@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -93,7 +95,9 @@ func TestControllerPublishesAttributedTopologyEvents(t *testing.T) {
 	c.registry.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a"})
 	assertEvent("register", next(), "agent_registered", "agent-1", "node-1", "zone-a")
 
-	c.registry.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2", Zone: "zone-b"})
+	// agent-2's zone comes from its node, so a node-label change moves it (an explicit one would stay).
+	c.registry.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-2": "zone-b"}})
+	c.registry.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
 	assertEvent("register", next(), "agent_registered", "agent-2", "node-2", "zone-b")
 
 	c.registry.UpdateZone("node-2", "zone-c")
@@ -200,6 +204,82 @@ func TestControllerRunShutsDownWithActiveEventSubscriber(t *testing.T) {
 	}
 }
 
+// The gateway is the agents' door, not the Console's: WatchEvents carries no identity to pin, so
+// serving it there handed any gateway credential the dispatched task ids and the whole event stream.
+func TestControllerGatewayDoesNotServeEventStream(t *testing.T) {
+	p := newTestPKI(t)
+	grpcPort := freePort(t)
+
+	cfg := &config.Config{
+		MetricsPrefix: "test",
+		HTTPPort:      freePort(t),
+		GRPCPort:      grpcPort,
+		MetricsPort:   freePort(t),
+	}
+	cfg.Controller.AgentTTL = 30 * time.Second
+	cfg.Controller.Events.Enabled = true
+	cfg.Controller.ExternalGateway = p.gatewayConfig(true)
+	cfg.Controller.ExternalGateway.Port = freePort(t)
+
+	c := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(15 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+	})
+
+	certFile, keyFile := p.issueClient("ext-1")
+	gwConn := dialGatewayConn(t, p, fmt.Sprintf("127.0.0.1:%d", cfg.Controller.ExternalGateway.Port), certFile, keyFile)
+	callCtx := withToken(t.Context(), gatewayTestToken)
+
+	// The gateway binds in a goroutine; Register proves it is serving before the real assertion.
+	var regErr error
+	for range 100 {
+		if _, regErr = pb.NewAgentRegistryClient(gwConn).Register(callCtx, registerReq("ext-1")); regErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if regErr != nil {
+		t.Fatalf("gateway never accepted a Register: %v", regErr)
+	}
+
+	watchCtx, watchCancel := context.WithTimeout(callCtx, 5*time.Second)
+	defer watchCancel()
+	stream, err := pb.NewEventStreamClient(gwConn).WatchEvents(watchCtx, &pb.WatchEventsRequest{})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	wantCode(t, err, codes.Unimplemented, "WatchEvents on the gateway")
+	if n := c.grpcServer.EventSubscriberCount(); n != 0 {
+		t.Errorf("event subscribers = %d after a gateway WatchEvents, want 0", n)
+	}
+
+	// The in-cluster listener still serves the Console.
+	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", grpcPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dialling the in-cluster listener: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := pb.NewEventStreamClient(conn).WatchEvents(t.Context(), &pb.WatchEventsRequest{}); err != nil {
+		t.Fatalf("WatchEvents on the in-cluster listener: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for c.grpcServer.EventSubscriberCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the in-cluster listener never registered the WatchEvents subscriber")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // KconmonAgentsMissing subtracts controller_external_agents from registered_agents, so the gauge
 // has to move with the registry exactly where registered_agents does, demotion included.
 func TestControllerExternalAgentsGauge(t *testing.T) {
@@ -221,7 +301,12 @@ func TestControllerExternalAgentsGauge(t *testing.T) {
 		t.Errorf("external_agents = %v, want 1", got)
 	}
 
-	c.registry.Deregister("edge-edge")
+	if _, err := c.grpcServer.Deregister(t.Context(), &pb.DeregisterRequest{AgentId: "edge-edge"}); err != nil {
+		t.Fatalf("Deregister: %v", err)
+	}
+	if got := testutil.ToFloat64(registered); got != 1 {
+		t.Errorf("registered_agents after deregister = %v, want 1", got)
+	}
 	if got := testutil.ToFloat64(external); got != 0 {
 		t.Errorf("external_agents after deregister = %v, want 0", got)
 	}
@@ -267,5 +352,47 @@ func TestControllerMountsPrometheusSDOnMetricsListener(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A demoted replica's agents report to the new leader, which drops the results as unknown tasks,
+// so an in-flight diagnostics dispatch must fail at demotion instead of waiting out its timeout.
+func TestControllerDemotionFailsInFlightDispatches(t *testing.T) {
+	cfg := &config.Config{MetricsPrefix: "test"}
+	cfg.Controller.AgentTTL = 30 * time.Second
+	cfg.Controller.LeaderElection = true
+
+	c := New(cfg)
+	c.SetLeader(true)
+
+	tm := c.grpcServer.TaskManager()
+	sub, unsub := tm.Subscribe("agent-1")
+	defer unsub()
+
+	errCh := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := tm.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "mtr"})
+		errCh <- err
+	}()
+	select {
+	case <-sub:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task was never dispatched")
+	}
+
+	c.SetLeader(false)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrLeadershipLost) {
+			t.Fatalf("Dispatch after demotion = %v, want ErrLeadershipLost", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Dispatch kept waiting after the replica lost leadership")
+	}
+	if n := tm.PendingCount(); n != 0 {
+		t.Errorf("pending tasks after demotion = %d, want 0", n)
 	}
 }

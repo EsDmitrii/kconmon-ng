@@ -58,18 +58,11 @@ func (h *PrometheusSDHandler) SetLeaderGate(enabled bool, isLeader func() bool) 
 	h.gate.Store(&leaderGate{enabled: enabled, isLeader: isLeader})
 }
 
-// lostLeadership mirrors TopologyHandler.lostLeadership.
-func (h *PrometheusSDHandler) lostLeadership() bool {
-	g := h.gate.Load()
-	return g != nil && g.enabled && (g.isLeader == nil || !g.isLeader())
-}
-
 func (h *PrometheusSDHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	/* A standby's registry is empty by design. Prometheus reads a 200 as the complete new target
 	   list, so [] from a standby would wipe every external target; on a non-200 it keeps the list
 	   it has, which is exactly right until the next refresh lands on the leader. */
-	if h.lostLeadership() {
-		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+	if h.gate.Load().refuse(w) {
 		return
 	}
 

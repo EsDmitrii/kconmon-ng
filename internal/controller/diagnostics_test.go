@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -95,16 +97,25 @@ func TestDiagnosticsPlaneDefaultsToPod(t *testing.T) {
 	}
 }
 
-func TestDiagnosticsHostPlaneForwarded(t *testing.T) {
-	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
-	h := newDiagTestHandler(t, disp, false, false)
+// Agents probe the pod plane only and never read the task's plane, so a host-plane request ran a pod
+// probe and the console's event history recorded it as plane=host. It is refused before anything is
+// dispatched or published.
+func TestDiagnosticsRefusesAPlaneAgentsDoNotProbe(t *testing.T) {
+	for _, plane := range []string{"host", "Pod", "pod\u0000"} {
+		disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+		pub := &fakeEventPublisher{}
+		h := newDiagTestHandlerWithEvents(t, disp, pub)
 
-	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"icmp","plane":"host"}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected host plane to be accepted, got %d", w.Code)
-	}
-	if disp.gotReq.GetPlane() != "host" {
-		t.Errorf("expected plane host forwarded, got %q", disp.gotReq.GetPlane())
+		w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"icmp","plane":"`+plane+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("plane %q: status %d, want 400 (%s)", plane, w.Code, w.Body.String())
+		}
+		if disp.gotReq != nil {
+			t.Errorf("plane %q: dispatched %v", plane, disp.gotReq)
+		}
+		if evs := pub.events(); len(evs) != 0 {
+			t.Errorf("plane %q: published %v", plane, evs)
+		}
 	}
 }
 
@@ -189,6 +200,21 @@ func TestDiagnosticsDispatchError(t *testing.T) {
 	// task; surface as 404 (no agent able to serve).
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 when source agent not subscribed, got %d", w.Code)
+	}
+}
+
+// A replica demoted while the task was in flight answers like a standby (503, retry elsewhere), not
+// like a broken agent (502).
+func TestDiagnosticsLeadershipLostMidDispatchIsALeadershipError(t *testing.T) {
+	disp := &fakeDispatcher{err: fmt.Errorf("dispatch: %w", ErrLeadershipLost)}
+	h := newDiagTestHandler(t, disp, true, true)
+
+	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"icmp"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d (%s), want 503 when leadership is lost mid-dispatch", w.Code, strings.TrimSpace(w.Body.String()))
+	}
+	if !strings.Contains(w.Body.String(), "leadership lost") {
+		t.Errorf("body = %q, want it to say leadership was lost", w.Body.String())
 	}
 }
 
@@ -347,7 +373,7 @@ func TestDiagnosticsHandlerPublishesDiagnosticProgressOnTimeout(t *testing.T) {
 
 // Nanosecond values above 2^24 cannot survive a float32 round-trip, and the
 // loss ratio is not representable in binary at all: exact assertions on these
-// pin the hand-rolled numeric extraction in publishObserved/mtrHopsFromDetails.
+// pin the numbers publishObserved carries from the agent's JSON into the events.
 const (
 	// ~1.23s, above 2^24.
 	fixtureNs = int64(1234567891)
@@ -788,7 +814,7 @@ func TestDiagnosticsBodyNeverEmpty(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			body := diagnosticsBody(tc.res)
+			body := diagnosticsBody(tc.res, "mtr", "node-a", "node-b", time.Now())
 			if len(body) == 0 {
 				t.Fatal("diagnosticsBody returned no bytes; the Console cannot decode an empty 200")
 			}
@@ -807,6 +833,46 @@ func TestDiagnosticsBodyNeverEmpty(t *testing.T) {
 	}
 }
 
+// An agent that reports no payload still ends the run: the caller gets a body naming the check, and
+// the Console's timeline gets the terminal event that follows the dispatched one.
+func TestDiagnosticsEmptyPayloadStillPublishesTheTerminalEvent(t *testing.T) {
+	for _, typ := range []string{"icmp", "mtr"} {
+		t.Run(typ, func(t *testing.T) {
+			disp := &fakeDispatcher{result: &pb.TaskResult{Success: false, Error: "agent said no"}}
+			pub := &fakeEventPublisher{}
+			h := newDiagTestHandlerWithEvents(t, disp, pub)
+
+			w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"`+typ+`"}`)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			var body model.CheckResult
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body does not decode: %v (%s)", err, w.Body.String())
+			}
+			if string(body.Type) != typ || body.Source != "node-a" || body.Destination != "node-b" ||
+				body.Error != "agent said no" || body.Timestamp.Year() < 2000 {
+				t.Errorf("synthesized body = %s, want the check type, both nodes, the reason and a real timestamp", w.Body.String())
+			}
+
+			events := pub.events()
+			if len(events) != 2 {
+				t.Fatalf("expected the dispatched and the terminal event, got %d: %+v", len(events), events)
+			}
+			switch typ {
+			case "mtr":
+				if mc := events[1].GetMtrCompleted(); mc == nil || mc.GetSuccess() || mc.GetError() != "agent said no" {
+					t.Errorf("terminal event = %+v, want a failed MTRCompleted carrying the reason", events[1])
+				}
+			default:
+				if co := events[1].GetCheckObserved(); co == nil || co.GetSuccess() || co.GetError() != "agent said no" {
+					t.Errorf("terminal event = %+v, want a failed CheckObserved carrying the reason", events[1])
+				}
+			}
+		})
+	}
+}
+
 func TestDiagnosticsAcceptsPMTU(t *testing.T) {
 	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
 	h := newDiagTestHandler(t, disp, false, false)
@@ -814,5 +880,221 @@ func TestDiagnosticsAcceptsPMTU(t *testing.T) {
 	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"pmtu"}`)
 	if w.Code == http.StatusBadRequest {
 		t.Fatalf("pmtu rejected as a diagnostic type: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// No plane:* at all means an agent older than 2.4.0 whose planes are unknown: fail open and dispatch.
+// Advertising plane:pmtu dispatches too.
+func TestDiagnosticsPMTUPlaneGateFailsOpen(t *testing.T) {
+	for name, caps := range map[string][]string{
+		"no plane capabilities": nil,
+		"external only":         {capabilityExternalChecks},
+		"plane:pmtu":            {"plane:tcp", "plane:pmtu"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+			h := newDiagTestHandlerExternal(t, disp, nil, caps)
+
+			w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"pmtu"}`)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+			}
+			if disp.gotReq.GetCheckType() != "pmtu" {
+				t.Errorf("dispatched %v, want a pmtu task", disp.gotReq)
+			}
+		})
+	}
+}
+
+// The plane gate covers every type, not only pmtu: a source that advertises its planes without the
+// requested one (checkers.<type>.enabled=false, http off by default) would refuse the task with
+// success=false, which the CLI turns into exit 2 "the check ran and failed". The types it does
+// advertise still dispatch.
+func TestDiagnosticsPlaneGateCoversEveryType(t *testing.T) {
+	// The default chart: http off, every other checker on.
+	defaultCaps := []string{"plane:tcp", "plane:udp", "plane:icmp", "plane:pmtu", "plane:dns", "plane:mtr"}
+	for checkType := range validCheckTypes {
+		t.Run(checkType, func(t *testing.T) {
+			var caps []string
+			for _, c := range defaultCaps {
+				if c != "plane:"+checkType {
+					caps = append(caps, c)
+				}
+			}
+			disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+			m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+			reg := NewRegistry(30 * time.Second)
+			reg.Register(model.AgentInfo{ID: "src-agent", NodeName: "node-a", Capabilities: caps})
+			reg.Register(model.AgentInfo{ID: "dst-agent", NodeName: "node-b"})
+			h := NewDiagnosticsHandler(reg, disp, m, false, nil, nil)
+
+			w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"`+checkType+`"}`)
+
+			if w.Code != http.StatusNotImplemented {
+				t.Fatalf("expected 501, got %d (%s)", w.Code, w.Body.String())
+			}
+			if body := w.Body.String(); !strings.Contains(body, "node-a") || !strings.Contains(body, checkType) {
+				t.Errorf("501 detail must name the node and %s, got %q", checkType, body)
+			}
+			if disp.gotReq != nil {
+				t.Errorf("dispatch must not run when the source agent does not advertise plane:%s", checkType)
+			}
+			if got := testutil.ToFloat64(m.ControllerDiagnostics.WithLabelValues(checkType, "unsupported")); got != 1 {
+				t.Errorf("result=unsupported = %v, want 1", got)
+			}
+		})
+	}
+
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, defaultCaps)
+	for _, checkType := range []string{"tcp", "icmp", "dns", "mtr"} {
+		if w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"`+checkType+`"}`); w.Code != http.StatusOK {
+			t.Errorf("%s on an agent advertising plane:%s = %d (%s), want 200", checkType, checkType, w.Code, w.Body.String())
+		}
+	}
+}
+
+// An external destination is probed by the source agent's own checker of that type, so the plane gate
+// applies there too.
+func TestDiagnosticsPlaneGateCoversExternalDestinations(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks, "plane:icmp", "plane:mtr"})
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"tcp"}`)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d (%s)", w.Code, w.Body.String())
+	}
+	if disp.gotReq != nil {
+		t.Error("dispatch must not run when the source agent does not advertise plane:tcp")
+	}
+}
+
+// pmtu measures the path to another agent's echo listener; an external destination would only fail on
+// the agent with a message about another check type.
+func TestDiagnosticsPMTURefusesExternalDestination(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks, "plane:pmtu"})
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"pmtu"}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "pmtu") {
+		t.Errorf("400 detail must name pmtu, got %q", w.Body.String())
+	}
+	if disp.gotReq != nil {
+		t.Error("dispatch must not run for pmtu towards an external destination")
+	}
+}
+
+// A caller that went away (Ctrl-C in the CLI, a cancelled Console run) cancels the request context. That is
+// not a dispatch failure: it is counted as cancelled and publishes no error progress event.
+func TestDiagnosticsCancelledRequestIsNotAnError(t *testing.T) {
+	dispatcher := &fakeDispatcher{err: context.Canceled}
+	pub := &fakeEventPublisher{}
+	reg := NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "src-agent", NodeName: "node-a"})
+	reg.Register(model.AgentInfo{ID: "dst-agent", NodeName: "node-b"})
+	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+	h := NewDiagnosticsHandler(reg, dispatcher, m, false, nil, pub)
+
+	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"tcp"}`)
+
+	if got := testutil.ToFloat64(m.ControllerDiagnostics.WithLabelValues("tcp", "error")); got != 0 {
+		t.Errorf("result=error = %v, want 0 for a cancelled request", got)
+	}
+	if got := testutil.ToFloat64(m.ControllerDiagnostics.WithLabelValues("tcp", "cancelled")); got != 1 {
+		t.Errorf("result=cancelled = %v, want 1", got)
+	}
+	for _, ev := range pub.events() {
+		if st := ev.GetDiagnosticProgress().GetState(); st == "error" {
+			t.Errorf("a cancelled request published a progress event with state=%q", st)
+		}
+	}
+	if w.Code == http.StatusBadGateway {
+		t.Errorf("a cancelled request must not be answered as a dispatch failure (502)")
+	}
+}
+
+// The agent probes an external destination only with tcp, icmp and mtr (internal/agent/tasks.go
+// externalCapableChecks) and refuses the rest with success=false. Dispatching them anyway recorded
+// every such pair as a failed probe; the controller answers 400 instead, before any dispatch.
+func TestDiagnosticsExternalRefusesTypesTheAgentCannotProbe(t *testing.T) {
+	for checkType := range validCheckTypes {
+		t.Run(checkType, func(t *testing.T) {
+			disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+			h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+
+			w := doDiag(h, `{"source":"node-a","destinationKind":"external",`+
+				`"destinationAddress":"10.0.0.9:53","type":"`+checkType+`"}`)
+
+			_, capable := externalCapableDiagnosticTypes[checkType]
+			switch {
+			case capable && w.Code != http.StatusOK:
+				t.Fatalf("%s to an external destination: got %d (%s), want 200", checkType, w.Code, w.Body.String())
+			case !capable && w.Code != http.StatusBadRequest:
+				t.Fatalf("%s to an external destination: got %d (%s), want 400", checkType, w.Code, w.Body.String())
+			case !capable && disp.gotReq != nil:
+				t.Errorf("%s to an external destination was dispatched", checkType)
+			case !capable && checkType != string(model.CheckPMTU) &&
+				!strings.Contains(w.Body.String(), "tcp, icmp and mtr"):
+				t.Errorf("400 must name the types that work, got %q", w.Body.String())
+			}
+		})
+	}
+	for _, capable := range []string{"tcp", "icmp", "mtr"} {
+		if _, ok := externalCapableDiagnosticTypes[capable]; !ok {
+			t.Errorf("%s must stay external-capable, as it is on the agent", capable)
+		}
+	}
+}
+
+// POST /api/v1/diagnostics is a handful of short strings. A body past the cap is refused with 413
+// before it is buffered: one 32 MiB string was enough to push a 128Mi controller past its limit.
+func TestDiagnosticsRefusesAnOversizedBody(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandler(t, disp, false, false)
+
+	huge := `{"source":"` + strings.Repeat("a", 1<<20) + `","destination":"node-b","type":"icmp"}`
+	w := doDiag(h, huge)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("1 MiB body: got %d (%.200s), want 413", w.Code, w.Body.String())
+	}
+	if disp.gotReq != nil {
+		t.Error("an oversized request was dispatched")
+	}
+
+	// A body that is merely long but under the cap is still an ordinary request.
+	padded := `{"source":"node-a","destination":"node-b","type":"icmp","plane":"pod","pad":"` +
+		strings.Repeat("p", 8<<10) + `"}`
+	if w := doDiag(h, padded); w.Code != http.StatusOK {
+		t.Fatalf("8 KiB body: got %d (%s), want 200", w.Code, w.Body.String())
+	}
+}
+
+// The 400 for a type that is not one-off external-capable says why for that type: only udp needs
+// another agent at the far end; dns and http need none, they are simply not one-off external checks.
+func TestDiagnosticsExternalRefusalNamesTheRealReason(t *testing.T) {
+	for typ, want := range map[string]string{
+		"udp":  "kconmon probe server",
+		"dns":  "continuous external check",
+		"http": "continuous external check",
+	} {
+		disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+		h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+		w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"`+typ+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (%s)", typ, w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, want) {
+			t.Errorf("%s: 400 detail %q, want it to mention %q", typ, body, want)
+		}
+		if typ != "udp" && strings.Contains(body, "kconmon probe server") {
+			t.Errorf("%s: 400 detail %q claims it needs an agent at the far end", typ, body)
+		}
 	}
 }

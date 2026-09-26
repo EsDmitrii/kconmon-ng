@@ -27,7 +27,7 @@ var _ AnnotationService = (*store.DB)(nil)
 // annotationsUnavailableDetail is served whenever s.annotations is nil, in
 // targetsUnavailableDetail's shape.
 const annotationsUnavailableDetail = "annotations are persisted operator notes with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/annotations"
+	databaseKnob + " to enable /api/v1/annotations"
 
 // annotationsUnavailable answers 503 and reports true when no
 // AnnotationService is wired.

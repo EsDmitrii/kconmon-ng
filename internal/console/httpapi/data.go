@@ -6,8 +6,10 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/matrix"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
@@ -23,13 +25,13 @@ type TopologyHistory interface {
 // topologyHistoryUnavailableDetail is ?at='s 503, in annotationsUnavailableDetail's shape; it is
 // deliberately NOT the live route's "controller not configured" message.
 const topologyHistoryUnavailableDetail = "historical topology is reconstructed from persisted events: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable GET /api/v1/topology?at="
+	databaseKnob + " to enable GET /api/v1/topology?at="
 
 // topologyRetentionDetail is ?at='s 422. It names the value an operator would
 // change, because "we pruned it" is only actionable if you know what to turn up.
 const topologyRetentionDetail = "no events are retained for that instant, so the topology cannot be " +
-	"reconstructed there. Pick a later time, or raise console.database.retentionDays to keep more " +
-	"history in future"
+	"reconstructed there. Pick a later time, or raise database.retentionDays (console config and Helm) " +
+	"to keep more history in future"
 
 // historicalTopology is GET /api/v1/topology?at='s body.
 type historicalTopology struct {
@@ -148,28 +150,34 @@ func (s *Server) serveHistoricalTopology(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, out)
 }
 
-func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
+// prometheusUnavailableDetail is the 503 detail of every route that reads Prometheus.
+const prometheusUnavailableDetail = "set prometheus.url in the console config (Helm: console.prometheus.url)"
+
+// prometheusUnavailable answers 503 and reports true when no Prometheus client is wired.
+func (s *Server) prometheusUnavailable(w http.ResponseWriter) bool {
 	if s.prom == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured",
-			"set prometheus.url in the console config (Helm: console.prometheus.url)")
+		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured", prometheusUnavailableDetail)
+		return true
+	}
+	return false
+}
+
+func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
+	if s.prometheusUnavailable(w) {
 		return
 	}
 	protocol := r.URL.Query().Get("protocol")
 	if protocol == "" {
 		protocol = "tcp"
 	}
-	plane := r.URL.Query().Get("plane")
-	if plane == "" {
-		plane = "pod"
-	}
-	if plane != "pod" {
-		writeProblem(w, http.StatusBadRequest, "unsupported plane", "only plane=pod exists in M1")
+	if err := checks.ValidatePlane(r.URL.Query().Get("plane")); err != nil {
+		writeProblem(w, http.StatusBadRequest, "unsupported plane", err.Error())
 		return
 	}
-	m, err := matrix.Compute(r.Context(), s.prom, s.cfg.MetricsPrefix, protocol)
+	m, err := s.cachedMatrix(r.Context(), protocol)
 	if err != nil {
 		if errors.Is(err, matrix.ErrBadProtocol) {
-			writeProblem(w, http.StatusBadRequest, "unsupported protocol", "protocol must be one of tcp|udp|icmp")
+			writeProblem(w, http.StatusBadRequest, "unsupported protocol", "protocol must be one of tcp|udp|icmp|pmtu")
 			return
 		}
 		// Same reason as handleTopology's: the error text names Prometheus' URL and its address.
@@ -178,6 +186,73 @@ func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, m)
+}
+
+// matrixCacheTTL is how long GET /api/v1/matrix serves one computation; well under the SPA's
+// 15s MATRIX_POLL_MS, so a poller never reads a matrix older than one cycle.
+const matrixCacheTTL = 5 * time.Second
+
+type matrixEntry struct {
+	m  *matrix.Matrix
+	at time.Time
+}
+
+// cachedMatrix is matrix.Compute behind a per-protocol singleflight and a matrixCacheTTL cache, so
+// a client looping on GET /api/v1/matrix costs Prometheus at most one computation per protocol per
+// TTL. Only successes are cached.
+func (s *Server) cachedMatrix(ctx context.Context, protocol string) (*matrix.Matrix, error) {
+	s.matrixMu.Lock()
+	e, ok := s.matrixCache[protocol]
+	s.matrixMu.Unlock()
+	if ok && time.Since(e.at) < matrixCacheTTL {
+		return e.m, nil
+	}
+
+	ch := s.matrixFlight.DoChan(protocol, func() (any, error) {
+		// Detached from the first caller: its disconnect must not fail the others waiting on this
+		// flight. promql.Client's QueryTimeout still bounds every query.
+		m, err := matrix.Compute(context.WithoutCancel(ctx), s.prom, s.cfg.MetricsPrefix, protocol)
+		if err != nil {
+			return nil, err
+		}
+		m = s.restrictToAdvertisedPlane(context.WithoutCancel(ctx), m, protocol)
+		s.matrixMu.Lock()
+		if s.matrixCache == nil {
+			s.matrixCache = make(map[string]matrixEntry)
+		}
+		s.matrixCache[protocol] = matrixEntry{m: m, at: time.Now()}
+		s.matrixMu.Unlock()
+		return m, nil
+	})
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*matrix.Matrix), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// matrixTopologyTimeout bounds the topology read the matrix is checked against; past it the matrix is
+// served as Prometheus has it.
+const matrixTopologyTimeout = 2 * time.Second
+
+// restrictToAdvertisedPlane checks m against the planes the agents advertise (matrix.RestrictToPlane),
+// failing open to m when the topology cannot be read.
+func (s *Server) restrictToAdvertisedPlane(ctx context.Context, m *matrix.Matrix, protocol string) *matrix.Matrix {
+	if s.topology == nil {
+		return m
+	}
+	ctx, cancel := context.WithTimeout(ctx, matrixTopologyTimeout)
+	defer cancel()
+	topo, err := s.topology.Topology(ctx)
+	if err != nil {
+		slog.Debug("matrix: topology unavailable, serving it without the plane check", "error", err)
+		return m
+	}
+	return matrix.RestrictToPlane(m, matrix.PlaneRunners(topo.Agents, protocol))
 }
 
 type promQLQueryRequest struct {
@@ -197,57 +272,71 @@ type promQLRangeRequest struct {
 const promqlRateLimitDetail = "too many PromQL queries " +
 	"(limit: console.rateLimit.promqlPerMinute per subject per minute)"
 
-func (s *Server) handlePromQLQuery(w http.ResponseWriter, r *http.Request) {
-	if s.prom == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured",
-			"set prometheus.url in the console config (Helm: console.prometheus.url)")
-		return
-	}
-	/* Rate limited BEFORE the query leaves for Prometheus: this route forwards ARBITRARY PromQL to
+// promQLAllowed answers 429 and reports false when the caller is over its PromQL budget.
+func (s *Server) promQLAllowed(w http.ResponseWriter, r *http.Request) bool {
+	/* Rate limited BEFORE the query leaves for Prometheus: these routes forward ARBITRARY PromQL to
 	   the cluster's monitoring stack, promql:query belongs to the viewer role, and the chart's demo
 	   default makes every visitor a viewer. One wide range query is a great deal of upstream work,
 	   and nothing bounded how many a caller could ask for. */
 	subject, _ := SubjectFrom(r.Context())
 	if !s.rateLimitAllow(r.Context(), rateLimitPromQL, s.cfg.RateLimit.PromQLPerMinute, promqlRateLimitKey(subject)) {
 		writeRateLimited(w, promqlRateLimitDetail)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handlePromQLQuery(w http.ResponseWriter, r *http.Request) {
+	if s.prometheusUnavailable(w) || !s.promQLAllowed(w, r) {
 		return
 	}
 	var req promQLQueryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Query == "" {
-		writeProblem(w, http.StatusBadRequest, "invalid request", "body must be JSON with a non-empty \"query\"")
+	dec := strictJSONDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil || req.Query == "" {
+		badBody(w, err, `body must be JSON with a non-empty "query"`)
+		return
+	}
+	if refuseTrailingJSON(w, dec) {
 		return
 	}
 	ts := time.Time{}
 	if req.Time != nil {
 		ts = *req.Time
 	}
-	raw, err := s.prom.Query(r.Context(), req.Query, ts)
+	raw, err := s.prom.Query(r.Context(), rewriteMetricsPrefix(req.Query, s.cfg.MetricsPrefix), ts)
 	s.writePromResult(w, raw, err)
 }
 
 func (s *Server) handlePromQLQueryRange(w http.ResponseWriter, r *http.Request) {
-	if s.prom == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured",
-			"set prometheus.url in the console config (Helm: console.prometheus.url)")
-		return
-	}
-	/* Rate limited BEFORE the query leaves for Prometheus: this route forwards ARBITRARY PromQL to
-	   the cluster's monitoring stack, promql:query belongs to the viewer role, and the chart's demo
-	   default makes every visitor a viewer. One wide range query is a great deal of upstream work,
-	   and nothing bounded how many a caller could ask for. */
-	subject, _ := SubjectFrom(r.Context())
-	if !s.rateLimitAllow(r.Context(), rateLimitPromQL, s.cfg.RateLimit.PromQLPerMinute, promqlRateLimitKey(subject)) {
-		writeRateLimited(w, promqlRateLimitDetail)
+	if s.prometheusUnavailable(w) || !s.promQLAllowed(w, r) {
 		return
 	}
 	var req promQLRangeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Query == "" {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			"body must be JSON with \"query\", RFC3339 \"start\"/\"end\", and \"step\" in nanoseconds")
+	dec := strictJSONDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil || req.Query == "" {
+		badBody(w, err, `body must be JSON with "query", RFC3339 "start"/"end", and "step" in nanoseconds`)
 		return
 	}
-	raw, err := s.prom.QueryRange(r.Context(), req.Query, req.Start, req.End, time.Duration(req.Step))
+	if refuseTrailingJSON(w, dec) {
+		return
+	}
+	raw, err := s.prom.QueryRange(r.Context(), rewriteMetricsPrefix(req.Query, s.cfg.MetricsPrefix),
+		req.Start, req.End, time.Duration(req.Step))
 	s.writePromResult(w, raw, err)
+}
+
+// isPromAPIError reports whether ue is Prometheus's own API error: one of the statuses its HTTP API
+// documents for a failed query, carrying the {"status":"error"} envelope.
+func isPromAPIError(ue *promql.UpstreamError) bool {
+	switch ue.Status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusInternalServerError, http.StatusServiceUnavailable:
+	default:
+		return false
+	}
+	var env struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal(ue.Body, &env) == nil && env.Status == "error"
 }
 
 func (s *Server) writePromResult(w http.ResponseWriter, raw json.RawMessage, err error) {
@@ -263,13 +352,22 @@ func (s *Server) writePromResult(w http.ResponseWriter, raw json.RawMessage, err
 	case errors.Is(err, promql.ErrResponseTooLarge):
 		writeProblem(w, http.StatusUnprocessableEntity, "result too large", "narrow the query or shorten the range")
 	default:
-		if ue, ok := errors.AsType[*promql.UpstreamError](err); ok {
+		ue, isUpstream := errors.AsType[*promql.UpstreamError](err)
+		if isUpstream && isPromAPIError(ue) {
 			// Forward Prometheus's own error envelope (e.g. PromQL parse errors)
 			// with its status so the PromQL Console can show it verbatim.
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.WriteHeader(ue.Status)
 			_, _ = w.Write(ue.Body) //nolint:gosec // G705: Prometheus JSON error envelope, served as application/json with nosniff, never rendered as HTML
+			return
+		}
+		if isUpstream {
+			// Anything else (an auth proxy's 401/403, an HTML error page) is a misconfigured upstream. Its
+			// status must not become the console's own: the SPA reads a 401 as a lost session.
+			slog.Error("prometheus answered with an unexpected status", "status", ue.Status) //nolint:gosec // G706: structured slog fields
+			writeProblem(w, http.StatusBadGateway, "prometheus error",
+				"prometheus answered HTTP "+strconv.Itoa(ue.Status))
 			return
 		}
 		// Prometheus' OWN envelope is forwarded above (that is the point of the branch); this branch

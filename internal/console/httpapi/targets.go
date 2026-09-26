@@ -26,10 +26,14 @@ type TargetService interface {
 
 var _ TargetService = (*store.DB)(nil)
 
+// databaseKnob names the setting every database-backed route's 503 points at, in the
+// "<config key> in the console config (Helm: <values path>)" form the other knobs use.
+const databaseKnob = "set database.dsnFile in the console config (Helm: database.existingSecret)"
+
 // targetsUnavailableDetail is served whenever s.targets is nil; unlike Runner -- which falls back
 // to checks.NewMemoryStore so on-demand runs still work with the database off.
 const targetsUnavailableDetail = "targets are persisted configuration with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/targets"
+	databaseKnob + " to enable /api/v1/targets"
 
 // Limit bounds for GET /api/v1/targets, mirroring runsMinLimit/runsMaxLimit/runsDefaultLimit
 // (runs.go).
@@ -97,9 +101,8 @@ type targetRequest struct {
 // 400 (malformed request).
 func decodeTargetRequest(w http.ResponseWriter, r *http.Request) (store.TargetInput, bool) {
 	var req targetRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`body must be JSON with "name", "kind" ("host" or "url"), "address", and an optional "labels" object`))
+	if !decodeMutationBody(w, r, &req,
+		`body must be JSON with "name", "kind" ("host" or "url"), "address", and an optional "labels" object`) {
 		return store.TargetInput{}, false
 	}
 	in := store.TargetInput{Name: req.Name, Kind: req.Kind, Address: req.Address, Labels: req.Labels}
@@ -286,6 +289,11 @@ func (s *Server) handleTargetsUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.refuseUnreachableTarget(w, r, in.Address) {
 		return
 	}
+	if names, exact, reason := s.definitionsBrokenByTargetEdit(r.Context(), id, &in, nil); reason != nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "check definition cannot run",
+			targetEditBreaksDetail(&in, names, exact, reason))
+		return
+	}
 
 	target, err := s.targets.UpdateTarget(r.Context(), id, in)
 	if err != nil {
@@ -317,9 +325,16 @@ func (s *Server) handleTargetsDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// inUseDefinitionsListed caps how many referencing definitions the 409 spells out; past this the
-// message names the rest by count rather than turning into a wall of text.
+// inUseDefinitionsListed caps how many definitions a refusal spells out; past this the message
+// names the rest by count rather than turning into a wall of text.
 const inUseDefinitionsListed = 10
+
+// inUseDefinitionsPageSize and inUseDefinitionsMaxPages bound the walks that collect those
+// definitions; a walk cut short reports its count as a lower bound.
+const (
+	inUseDefinitionsPageSize = 500
+	inUseDefinitionsMaxPages = 20
+)
 
 // writeTargetInUse answers the delete refusal in the terms the operator works in -- the target's
 // NAME and the names of the definitions still pointing at it -- falling back to the id-only
@@ -330,52 +345,63 @@ func (s *Server) writeTargetInUse(ctx context.Context, w http.ResponseWriter, id
 		label = strconv.Quote(t.Name)
 	}
 
-	names, more := s.referencingDefinitionNames(ctx, id)
+	names, exact := s.referencingDefinitionNames(ctx, id)
 	if len(names) == 0 {
 		writeProblem(w, http.StatusConflict, "target in use",
 			"one or more check definitions still reference target "+label+
 				"; delete or re-point those definitions first")
 		return
 	}
-
-	quoted := make([]string, 0, len(names))
-	for _, n := range names {
-		quoted = append(quoted, strconv.Quote(n))
-	}
-	listed := strings.Join(quoted, ", ")
-	if more > 0 {
-		listed += " and " + strconv.Itoa(more) + " more"
-	}
+	listed, total := definitionNameList(names, exact)
 	writeProblem(w, http.StatusConflict, "target in use",
-		"target "+label+" is still referenced by check "+pluralDefinitions(len(names)+more)+" "+listed+
-			"; delete or re-point them first")
+		"target "+label+" is still referenced by check "+pluralDefinitions(total)+" "+listed+
+			"; delete or re-point "+pronounFor(total)+" first")
 }
 
-// referencingDefinitionNames lists the definitions pointing at target id, capped at
-// inUseDefinitionsListed; more counts the ones past the cap. An absent or failing
-// DefinitionService yields no names at all, which the caller reads as "cannot enumerate".
-func (s *Server) referencingDefinitionNames(ctx context.Context, id string) (names []string, more int) {
+// referencingDefinitionNames lists the definitions pointing at target id; exact is false when the
+// walk stopped before the last page. An absent or failing DefinitionService yields no names at all,
+// which the caller reads as "cannot enumerate".
+func (s *Server) referencingDefinitionNames(ctx context.Context, id string) (names []string, exact bool) {
 	if s.definitions == nil {
-		return nil, 0
+		return nil, true
 	}
-	page, err := s.definitions.ListDefinitions(ctx, store.DefinitionFilter{
-		TargetID: id,
-		// One past the cap, so "and N more" can be honest about there being more at all.
-		Limit: inUseDefinitionsListed + 1,
-	})
-	if err != nil {
-		slog.Error("httpapi: list definitions for in-use target failed", "target", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
-		return nil, 0
+	filter := store.DefinitionFilter{TargetID: id, Limit: inUseDefinitionsPageSize}
+	for range inUseDefinitionsMaxPages {
+		page, err := s.definitions.ListDefinitions(ctx, filter)
+		if err != nil {
+			slog.Error("httpapi: list definitions for in-use target failed", "target", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+			return names, false
+		}
+		for i := range page.Definitions {
+			names = append(names, page.Definitions[i].Name)
+		}
+		if page.NextCursor == "" {
+			return names, true
+		}
+		filter.Cursor = page.NextCursor
 	}
-	for i := range page.Definitions {
-		names = append(names, page.Definitions[i].Name)
-	}
+	return names, false
+}
+
+// definitionNameList words the names a walk collected for a refusal: the first
+// inUseDefinitionsListed in order, quoted, then " and N more", or " and at least N more" when the
+// walk was not exact. total is the count the sentence's grammar follows.
+func definitionNameList(names []string, exact bool) (listed string, total int) {
 	sort.Strings(names)
-	if len(names) > inUseDefinitionsListed {
-		more = len(names) - inUseDefinitionsListed
-		names = names[:inUseDefinitionsListed]
+	shown := names[:min(len(names), inUseDefinitionsListed)]
+	quoted := make([]string, 0, len(shown))
+	for _, n := range shown {
+		quoted = append(quoted, strconv.Quote(n))
 	}
-	return names, more
+	listed = strings.Join(quoted, ", ")
+	if more := len(names) - len(shown); more > 0 {
+		atLeast := ""
+		if !exact {
+			atLeast = "at least "
+		}
+		listed += " and " + atLeast + strconv.Itoa(more) + " more"
+	}
+	return listed, len(names)
 }
 
 func pluralDefinitions(n int) string {
@@ -383,4 +409,11 @@ func pluralDefinitions(n int) string {
 		return "definition"
 	}
 	return "definitions"
+}
+
+func pronounFor(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
 }

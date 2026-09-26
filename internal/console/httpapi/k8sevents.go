@@ -18,9 +18,9 @@ var _ K8sEventService = (*store.DB)(nil)
 
 // k8sEventsUnavailableDetail names BOTH knobs.
 const k8sEventsUnavailableDetail = "captured Kubernetes events live in the database and have no in-memory " +
-	"fallback: set console.database.mode (Helm: console.database.mode) to enable GET /api/v1/k8s-events, and " +
-	"console.kubernetesContext.enabled to capture events into it -- without the capture the endpoint answers " +
-	"an empty page rather than this error"
+	"fallback: " + databaseKnob + " to enable GET /api/v1/k8s-events, and kubernetesContext.enabled " +
+	"(Helm: console.kubernetesContext.enabled) to capture events into it -- without the capture the endpoint " +
+	"answers an empty page rather than this error"
 
 // k8sEventKinds and k8sEventTypes are the closed vocabularies store's own validation enforces on
 // the write side (store/k8sevents.go); a ?kind= or ?type= outside them can never match a row.

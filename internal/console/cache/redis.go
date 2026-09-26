@@ -44,6 +44,9 @@ func NewRedisBus(ctx context.Context, dsn string, dialTimeout time.Duration) (*R
 	}
 	opt.Dialer = net.Dialer{Timeout: dialTimeout}
 	opt.ForceSingleClient = true // one server, never a cluster
+	// Nothing reads through the client-side cache, and requiring it refuses RESP2-only servers and
+	// endpoints that disable CLIENT TRACKING.
+	opt.DisableCache = true
 	client, err := rueidis.NewClient(opt)
 	if err != nil {
 		return nil, fmt.Errorf("redis connect: %w", err)

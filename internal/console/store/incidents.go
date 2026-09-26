@@ -153,10 +153,13 @@ var _ IncidentReader = (*DB)(nil)
 // Validate reports whether in is a well-formed incident.
 func (in *IncidentInput) Validate() error {
 	// See validateNoControlChars: a NUL here came back as 502 "incidents unavailable".
-	for _, f := range [][2]string{{"title", in.Title}, {"scope", in.Scope}, {"notes", in.Notes}} {
+	for _, f := range [][2]string{{"title", in.Title}, {"scope", in.Scope}} {
 		if err := validateNoControlChars(f[0], f[1]); err != nil {
 			return fmt.Errorf("store: incident: %w", err)
 		}
+	}
+	if err := ValidateFreeText("notes", in.Notes); err != nil {
+		return fmt.Errorf("store: incident: %w", err)
 	}
 	if in.Title == "" {
 		return errors.New("store: incident: title must not be empty")
@@ -222,6 +225,10 @@ func ValidatePinned(raw json.RawMessage) error {
 	var refs []PinnedRef
 	if err := json.Unmarshal(trimmed, &refs); err != nil {
 		return fmt.Errorf("store: incident: pinned must be a JSON array of {kind,id,note}: %w", err)
+	}
+	// json.Unmarshal accepts an escaped \u0000 or a lone surrogate escape, which JSONB refuses.
+	if err := validateJSONBStorable("pinned", trimmed); err != nil {
+		return fmt.Errorf("store: incident: %w", err)
 	}
 	if len(refs) > pinnedMaxEntries {
 		return fmt.Errorf("store: incident: %d pinned entries, limit is %d", len(refs), pinnedMaxEntries)
@@ -422,6 +429,9 @@ func (db *DB) UpdateIncidentNotes(ctx context.Context, id, notes string) (Incide
 	if len(notes) > incidentNotesMaxLen {
 		return Incident{}, fmt.Errorf("store: incident: notes are %d bytes, limit is %d",
 			len(notes), incidentNotesMaxLen)
+	}
+	if err := ValidateFreeText("notes", notes); err != nil {
+		return Incident{}, fmt.Errorf("store: incident: %w", err)
 	}
 	iid, err := parseUUID(id)
 	if err != nil {

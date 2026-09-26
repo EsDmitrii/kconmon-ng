@@ -33,14 +33,13 @@ WHERE id = $1
 RETURNING id, name, kind, params, severity, for_ns, labels, annotations, enabled,
           rendered_expr, sync_status, sync_message, last_synced_at, created_at, updated_at;
 
--- name: UpdateAlertRuleSyncStatus :one
+-- name: UpdateAlertRuleSyncStatusIfUnchanged :execrows
 -- The RECONCILER's write-back, touching the three sync columns and nothing else -- not even
--- updated_at.
+-- updated_at -- and only while updated_at is still the one the reconcile pass rendered from: an
+-- edit since then keeps its 'unsynced' for the next pass.
 UPDATE alert_rules
 SET sync_status = $2, sync_message = $3, last_synced_at = $4
-WHERE id = $1
-RETURNING id, name, kind, params, severity, for_ns, labels, annotations, enabled,
-          rendered_expr, sync_status, sync_message, last_synced_at, created_at, updated_at;
+WHERE id = $1 AND updated_at = $5;
 
 -- name: DeleteAlertRule :execrows
 -- No cascade and no dependents: a rule references nothing and nothing references it.

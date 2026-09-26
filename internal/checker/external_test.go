@@ -666,6 +666,41 @@ func TestExternalCheckerWarnsOncePerTargetForDenials(t *testing.T) {
 	}
 }
 
+// An http check may carry basic-auth userinfo in its URL. The password stays out of the refusal log
+// and out of a failed probe's error, the same as the peer http checker keeps it out of its results.
+func TestExternalHTTPUserinfoPasswordNeverLeaks(t *testing.T) {
+	buf := captureLogs(t)
+	closed := newCountingListener(t)
+	_, port := closed.hostPort(t)
+	_ = closed.ln.Close()
+
+	c := newTestExternalChecker(t, loopbackAllowlist(t))
+	c.SetSpecs([]ExternalSpec{
+		mustParseSpec(t, &ExternalSpecInput{
+			DefinitionID: "def-denied", Name: "denied", CheckType: "http", Interval: ExternalTick, Timeout: time.Second,
+			Address: "https://probe:s3cret@status.example.com/health",
+		}),
+		mustParseSpec(t, &ExternalSpecInput{
+			DefinitionID: "def-down", Name: "down", CheckType: "http", Interval: ExternalTick, Timeout: time.Second,
+			Address: "http://probe:s3cret@127.0.0.1:" + strconv.Itoa(int(port)) + "/health",
+		}),
+	})
+	res := c.Check(context.Background(), Target{})
+	details := externalDetails(t, &res)
+
+	if len(details) != 2 || !details[0].Denied || details[1].Success {
+		t.Fatalf("want one refusal and one failed probe, got %+v", details)
+	}
+	if !strings.Contains(buf.String(), "status.example.com") {
+		t.Fatalf("the refusal log must still name the destination, got:\n%s", buf.String())
+	}
+	for _, where := range []string{buf.String(), details[0].Error, details[1].Error} {
+		if strings.Contains(where, "s3cret") {
+			t.Fatalf("the URL password leaked: %s", where)
+		}
+	}
+}
+
 func TestParseExternalSpecRejects(t *testing.T) {
 	cases := []struct {
 		name string

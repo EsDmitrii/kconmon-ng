@@ -34,18 +34,18 @@ var _ RuleSyncer = (*promrules.Reconciler)(nil)
 // rules are persisted CONFIGURATION and get no in-memory fallback,
 // targetsUnavailableDetail's rule.
 const alertRulesUnavailableDetail = "alert rules are persisted configuration with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/alert-rules"
+	databaseKnob + " to enable /api/v1/alert-rules"
 
 // alertingDisabledDetail is served whenever s.ruleSync is nil, and it is a 409 rather than a 503.
 const alertingDisabledDetail = "prometheus rule sync is not running on this console: the alert rules " +
 	"themselves are unaffected and stay readable and editable, but nothing is applying them to the " +
-	"cluster -- set console.alerting.enabled=true (Helm: console.alerting.enabled) on a console running " +
+	"cluster -- set alerting.enabled in the console config (Helm: console.alerting.enabled) on a console running " +
 	"in-cluster with the PrometheusRule CRD present"
 
 // promUnconfiguredDetail is the sentence the PREVIEW route reports inside a
 // 200 body rather than as a problem. See handleAlertRulesPreview.
 const promUnconfiguredDetail = "prometheus is not configured on this console, so the expression could not " +
-	"be evaluated: set prometheus.url in the console config (Helm: console.prometheus.url)"
+	"be evaluated: " + prometheusUnavailableDetail
 
 // alertRuleValidationPrefix is the prefix store.AlertRuleInput.Validate builds
 // every one of its errors with.
@@ -155,6 +155,8 @@ type foreignRuleResponse struct {
 	Name   string `json:"name"`
 	Groups int    `json:"groups"`
 	Rules  int    `json:"rules"`
+	// AlertRules is how many of Rules are alerting rules, the ones an import copies.
+	AlertRules int `json:"alertRules"`
 	// ManagedBy is app.kubernetes.io/managed-by, or "" when the object carries
 	// no such label -- "managed by some other chart" and "managed by nobody"
 	// are different facts for an operator deciding whether to import.
@@ -282,12 +284,11 @@ func writeAlertRuleStoreError(w http.ResponseWriter, name, id string, err error)
 // decodeTargetRequest's distinction.
 func decodeAlertRuleRequest(w http.ResponseWriter, r *http.Request) (alertRuleRequest, bool) {
 	var req alertRuleRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`an alert rule body must be JSON with "name", "kind" (one of pair-loss, zone-latency, `+
-				`dns-failures, http-ttfb, agent-missing, external-target-down, raw), "params" (an object, `+
-				`closed per kind), "severity" (info|warning|critical), "forNs" (nanoseconds), optional `+
-				`"labels"/"annotations" objects and an optional "enabled"`))
+	if !decodeMutationBody(w, r, &req,
+		`an alert rule body must be JSON with "name", "kind" (one of pair-loss, zone-latency, `+
+			`dns-failures, http-ttfb, agent-missing, external-target-down, raw), "params" (an object, `+
+			`closed per kind), "severity" (info|warning|critical), "forNs" (nanoseconds), optional `+
+			`"labels"/"annotations" objects and an optional "enabled"`) {
 		return alertRuleRequest{}, false
 	}
 	return req, true
@@ -544,7 +545,7 @@ func (s *Server) handleAlertRulesForeign(w http.ResponseWriter, r *http.Request)
 	for i := range found {
 		out = append(out, foreignRuleResponse{
 			Name: found[i].Name, Groups: found[i].Groups,
-			Rules: found[i].Rules, ManagedBy: found[i].ManagedBy,
+			Rules: found[i].Rules, AlertRules: found[i].AlertRules, ManagedBy: found[i].ManagedBy,
 		})
 	}
 	writeJSON(w, foreignRulesResponse{Foreign: out})
@@ -569,9 +570,8 @@ func (s *Server) handleAlertRulesImport(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req alertRuleImportRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`an import body must be JSON with "name", the name of a PrometheusRule object in the console's namespace`))
+	if !decodeMutationBody(w, r, &req,
+		`an import body must be JSON with "name", the name of a PrometheusRule object in the console's namespace`) {
 		return
 	}
 	// A blank name is a rejected field VALUE rather than a 404: answering "no
@@ -668,7 +668,8 @@ func (s *Server) adoptRuleEntry(
 		return
 	}
 	// The alert name is used AS IS or not at all; SanitizeAlertName exists and is deliberately NOT
-	// called here.
+	// called here. A name whose Prometheus alert name another rule already has is refused by the
+	// store, and that refusal becomes this entry's skip reason.
 	name, _ := entry["alert"].(string)
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -849,7 +850,8 @@ func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request)
 	subject, _ := SubjectFrom(r.Context())
 	if req.Kind == string(store.AlertRuleKindRaw) {
 		if s.policy == nil || !s.policy.Can(subject, authz.PermPromQLQuery) {
-			writeProblem(w, http.StatusForbidden, "forbidden",
+			s.metrics.AuthzDenied.WithLabelValues(string(authz.PermPromQLQuery)).Inc()
+			writeProblem(w, http.StatusForbidden, "permission denied",
 				"previewing a raw PromQL rule runs that query: it needs "+string(authz.PermPromQLQuery)+" as well as "+string(authz.PermAlertsRead))
 			return
 		}

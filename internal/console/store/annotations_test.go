@@ -78,6 +78,7 @@ func TestAnnotationInputValidateRejects(t *testing.T) {
 		{"created by over 255 bytes", func(in *AnnotationInput) {
 			in.CreatedBy = strings.Repeat("u", annotationScopeMaxLen+1)
 		}},
+		{"created by with a control character", func(in *AnnotationInput) { in.CreatedBy = "user:a\x00b" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

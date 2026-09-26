@@ -337,73 +337,6 @@ func TestConfigGetReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestHotReload(t *testing.T) {
-	content := `
-httpPort: 8080
-grpcPort: 9090
-logLevel: info
-`
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	loader := NewLoader(path)
-	if err := loader.Load(); err != nil {
-		t.Fatal(err)
-	}
-
-	changed := make(chan *Config, 1)
-	loader.OnChange(func(cfg *Config) {
-		select {
-		case changed <- cfg:
-		default:
-			<-changed
-			changed <- cfg
-		}
-	})
-
-	if err := loader.WatchForChanges(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = loader.Close() }()
-
-	select {
-	case <-changed:
-	default:
-	}
-
-	newContent := `
-httpPort: 7777
-grpcPort: 9090
-logLevel: debug
-`
-
-	if err := os.WriteFile(path, []byte(newContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case cfg := <-changed:
-			if cfg.HTTPPort == 7777 && cfg.LogLevel == "debug" {
-				return
-			}
-		case <-deadline:
-			last := loader.Get()
-			t.Fatalf(
-				"timeout waiting for config reload (last seen: httpPort=%d logLevel=%s)",
-				last.HTTPPort,
-				last.LogLevel,
-			)
-		}
-	}
-}
-
 func TestDefaultConfigEventsDisabled(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Controller.Events.Enabled {
@@ -677,6 +610,42 @@ func TestAgentAdvertiseAddressMustBeAnIPLiteral(t *testing.T) {
 			}
 			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "advertiseAddress") {
 				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+}
+
+// Every peer dials the advertised address. 0.0.0.0 or a loopback address reaches the prober's own
+// agent, so the pair reads healthy while the advertised host is down.
+func TestAgentAdvertiseAddressMustBeReachableByPeers(t *testing.T) {
+	for _, tt := range []struct {
+		address string
+		wantErr bool
+	}{
+		{"0.0.0.0", true},
+		{"::", true},
+		{"127.0.0.1", true},
+		{"127.0.0.53", true},
+		{"::1", true},
+		{"::ffff:127.0.0.1", true},
+		{"224.0.0.1", true},
+		{"ff02::1", true},
+		{"255.255.255.255", true},
+		{"10.1.2.3", false},
+		{"192.168.1.255", false}, // a subnet broadcast cannot be told from a host address here
+		{"169.254.10.1", false},
+		{"2001:db8::7", false},
+		{"fe80::1", false},
+		{"::ffff:10.1.2.3", false},
+	} {
+		t.Run(tt.address, func(t *testing.T) {
+			t.Setenv("KCONMON_NG_ADVERTISE_ADDRESS", tt.address)
+			err := NewLoader(writeConfig(t, "agent:\n  nodeName: edge-1\n")).Load()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "agent.advertiseAddress")) {
+				t.Fatalf("advertiseAddress %q must be refused naming the key, got %v", tt.address, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("advertiseAddress %q must be accepted, got %v", tt.address, err)
 			}
 		})
 	}

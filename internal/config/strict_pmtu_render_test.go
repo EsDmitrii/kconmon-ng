@@ -10,10 +10,7 @@ import (
 // Every pmtu key the chart can write must decode into the agent's own settings: the chart renders
 // them conditionally, so the default render above never exercises them.
 func TestHelmRenderedTunedPMTULoads(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm not found in PATH, skipping chart render validation")
-	}
+	helm := helmBinary(t)
 	chartPath := filepath.Join("..", "..", "charts", "kconmon-ng")
 	out, err := exec.CommandContext(t.Context(), helm, "template", chartPath,
 		"--set", "config.checkers.pmtu.enabled=false",

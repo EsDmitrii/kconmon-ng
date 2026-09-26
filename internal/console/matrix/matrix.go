@@ -29,9 +29,13 @@ type Cell struct {
 	RTTP95      *int64   `json:"rttP95,omitempty"`
 	LossRatio   *float64 `json:"lossRatio,omitempty"`
 	// pmtu protocol only: the largest datagram that crossed the pair (bytes) and the size its source
-	// probes at. MTUBytes below ProbeMTUBytes with a zero FailRatio is a reduced path, not a failure.
+	// probes this destination at. MTUBytes below ProbeMTUBytes with a zero FailRatio is a reduced
+	// path, not a failure.
 	MTUBytes      *int64 `json:"mtuBytes,omitempty"`
 	ProbeMTUBytes *int64 `json:"probeMtuBytes,omitempty"`
+	// pmtu protocol only: the fail ratio over the last recentWindow, absent without a probe in it. 0
+	// after failures in the rateWindow means the pair recovers; above 0 a full-size MTU is a black hole.
+	RecentFailRatio *float64 `json:"recentFailRatio,omitempty"`
 }
 
 // Matrix is the computed heatmap payload.
@@ -57,7 +61,7 @@ type pair struct{ src, dst string }
 
 // Compute runs the per-protocol instant queries and folds them into a Matrix.
 func Compute(ctx context.Context, q Querier, metricsPrefix, protocol string) (*Matrix, error) {
-	var failQ, rttQ, lossQ, mtuQ string
+	var failQ, rttQ, lossQ, mtuQ, recentQ string
 	switch protocol {
 	case "tcp":
 		failQ = failRatioQuery(metricsPrefix, "tcp")
@@ -73,6 +77,7 @@ func Compute(ctx context.Context, q Querier, metricsPrefix, protocol string) (*M
 	case "pmtu":
 		failQ = failRatioQuery(metricsPrefix, "pmtu")
 		mtuQ = `min by (source_node, destination_node) (` + metricsPrefix + `_pmtu_bytes)`
+		recentQ = failRatioWindowQuery(metricsPrefix, "pmtu", recentWindow)
 	default:
 		return nil, fmt.Errorf("%q: %w", protocol, ErrBadProtocol)
 	}
@@ -94,14 +99,25 @@ func Compute(ctx context.Context, q Querier, metricsPrefix, protocol string) (*M
 		}
 	}
 	mtu := map[pair]float64{}
-	probe := map[string]float64{}
+	probe := map[pair]float64{}
+	recent := map[pair]float64{}
 	if mtuQ != "" {
 		if mtu, err = vectorByPair(ctx, q, mtuQ); err != nil {
 			return nil, err
 		}
-		if probe, err = vectorBySource(ctx, q,
-			`max by (source_node) (`+metricsPrefix+`_agent_pmtu_probe_bytes)`); err != nil {
+		if probe, err = vectorByPair(ctx, q,
+			`max by (source_node, destination_node) (`+metricsPrefix+`_pmtu_probe_bytes)`); err != nil {
 			return nil, err
+		}
+		if recent, err = vectorByPair(ctx, q, recentQ); err != nil {
+			return nil, err
+		}
+		// The gauge keeps its last value while every probe is unreachable (no result is counted), so
+		// without a verdict in the window it is stale and the pair is no data, not a measured MTU.
+		for p := range mtu {
+			if _, ok := fail[p]; !ok {
+				delete(mtu, p)
+			}
 		}
 	}
 
@@ -137,9 +153,12 @@ func Compute(ctx context.Context, q Querier, metricsPrefix, protocol string) (*M
 		}
 		if v, ok := mtu[p]; ok {
 			c.MTUBytes = new(int64(v))
-			if pv, ok := probe[p.src]; ok {
+			if pv, ok := probe[p]; ok {
 				c.ProbeMTUBytes = new(int64(pv))
 			}
+		}
+		if v, ok := recent[p]; ok {
+			c.RecentFailRatio = new(v)
 		}
 		cells = append(cells, c)
 	}
@@ -153,13 +172,25 @@ func Compute(ctx context.Context, q Querier, metricsPrefix, protocol string) (*M
 	return &Matrix{Protocol: protocol, Plane: "pod", Nodes: nodes, Cells: cells, Timestamp: time.Now().UTC()}, nil
 }
 
+// rateWindow is every cell's rate() window, and recentWindow covers the last two to three probes at
+// the default pmtu interval (60s). Keep both in step with web/src/lib/matrix-promql.ts so the live
+// matrix and the Time Machine agree.
+const (
+	rateWindow   = "5m"
+	recentWindow = "3m"
+)
+
 func failRatioQuery(prefix, proto string) string {
+	return failRatioWindowQuery(prefix, proto, rateWindow)
+}
+
+func failRatioWindowQuery(prefix, proto, window string) string {
 	m := prefix + "_" + proto + "_results_total"
-	return `sum by (source_node, destination_node) (rate(` + m + `{result="fail"}[5m])) / sum by (source_node, destination_node) (rate(` + m + `[5m]))`
+	return `sum by (source_node, destination_node) (rate(` + m + `{result="fail"}[` + window + `])) / sum by (source_node, destination_node) (rate(` + m + `[` + window + `]))`
 }
 
 func p95Query(bucketMetric string) string {
-	return `histogram_quantile(0.95, sum by (source_node, destination_node, le) (rate(` + bucketMetric + `[5m])))`
+	return `histogram_quantile(0.95, sum by (source_node, destination_node, le) (rate(` + bucketMetric + `[` + rateWindow + `])))`
 }
 
 func lossQuery(prefix, proto string) string {
@@ -212,21 +243,6 @@ func vectorByPair(ctx context.Context, q Querier, query string) (map[pair]float6
 			continue
 		}
 		out[pair{s, d}] = smp.value
-	}
-	return out, nil
-}
-
-// vectorBySource is vectorByPair for a series keyed by source_node alone: the agent-level gauges.
-func vectorBySource(ctx context.Context, q Querier, query string) (map[string]float64, error) {
-	samples, err := queryVector(ctx, q, query)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]float64, len(samples))
-	for _, smp := range samples {
-		if s := smp.metric["source_node"]; s != "" {
-			out[s] = smp.value
-		}
 	}
 	return out, nil
 }

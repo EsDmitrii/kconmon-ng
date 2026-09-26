@@ -46,6 +46,12 @@ func newTestHub(t *testing.T, bus cache.Bus) (*Hub, *metrics.Metrics) {
 	return NewHub(bus, m), m
 }
 
+// register is registerLimited with no connection limits.
+func (h *Hub) register(authorize TopicAuthorizer) *client {
+	c, _ := h.registerLimited(authorize, nil)
+	return c
+}
+
 // nextEnvelope reads one frame from the client's send buffer.
 func nextEnvelope(t *testing.T, c *client) Envelope {
 	t.Helper()
@@ -97,6 +103,7 @@ func TestMatrixTopicShape(t *testing.T) {
 		"tcp":  "matrix:tcp:pod",
 		"udp":  "matrix:udp:pod",
 		"icmp": "matrix:icmp:pod",
+		"pmtu": "matrix:pmtu:pod",
 	} {
 		if got := MatrixTopic(protocol); got != want {
 			t.Errorf("MatrixTopic(%q) = %q, want %q", protocol, got, want)
@@ -198,6 +205,11 @@ func TestHubUnknownTopicIsRejectedAndNotSubscribed(t *testing.T) {
 	}
 	if err := json.Unmarshal(got.Data, &payload); err != nil || payload.Error == "" {
 		t.Errorf("error frame data = %s (unmarshal err %v), want a non-empty {\"error\":...}", got.Data, err)
+	}
+	for topic := range allowedTopics {
+		if !strings.Contains(payload.Error, topic) {
+			t.Errorf("error %q does not list the subscribable topic %s", payload.Error, topic)
+		}
 	}
 
 	// Not subscribed: a later broadcast on that topic must not reach the client.
@@ -594,7 +606,7 @@ func TestHubRegisterAfterShutdownClosesClientImmediately(t *testing.T) {
 	}
 }
 
-// --- Task 20: ephemeral run:{id} topics ---
+// --- ephemeral run:{id} topics ---
 
 func TestRunTopicShape(t *testing.T) {
 	if got, want := RunTopic("abc-123"), "run:abc-123"; got != want {
@@ -1012,7 +1024,7 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 	}
 }
 
-// --- Fix pass regression tests (code review on Task 20) ---
+// --- ephemeral run:{id} topics: edge cases ---
 
 // subscribeCountingBus wraps InProcessBus and counts Subscribe calls per topic; it exists for
 // TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce.
@@ -1229,6 +1241,38 @@ func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
 	expectNoEnvelope(t, c)
 }
 
+// The owner's CloseTopicWithFinal must still deliver the finished and closed frames when the
+// liveness sweep already marked the topic closed: the sweep reads a terminal status the moment
+// FinishRun commits, before the owner has broadcast anything.
+func TestCloseTopicWithFinalAfterTheSweepStillDeliversTheFinalFrames(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("swept-before-final")
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+	c := h.register(nil)
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+	expectNoEnvelope(t, c)
+
+	h.SetEphemeralLiveness(func(string) bool { return false })
+	h.sweepEphemeralLiveness()
+	expectNoEnvelope(t, c) // the sweep closes silently
+
+	final := json.RawMessage(`{"state":"finished","status":"succeeded"}`)
+	h.CloseTopicWithFinal(topic, TypeEvent, final)
+	if got := nextEnvelope(t, c); got.Type != TypeEvent || string(got.Data) != string(final) {
+		t.Fatalf("first frame = %s %s, want the final %s frame", got.Type, got.Data, TypeEvent)
+	}
+	if got := nextEnvelope(t, c); got.Type != TypeClosed {
+		t.Fatalf("second frame type = %q, want %q", got.Type, TypeClosed)
+	}
+
+	h.CloseTopicWithFinal(topic, TypeEvent, final)
+	h.CloseTopic(topic)
+	expectNoEnvelope(t, c)
+}
+
 // reapTopicLocked must clear the reaped topic out of every currently subscribed client's c.topics
 // map.
 /*
@@ -1413,5 +1457,62 @@ func TestRegateDropsOnlyTheTopicsThatAreNoLongerPermitted(t *testing.T) {
 	// Idempotent: a second pass has nothing left to take.
 	if again := h.regate(c); len(again) != 0 {
 		t.Errorf("second regate dropped %v, want nothing", again)
+	}
+}
+
+/*
+ * A run topic is gated on the subject's permission BEFORE the hub looks the run up or opens it.
+ *
+ * Existence used to come first: a socket without runs:read could tell a live run id ("missing
+ * permission") from an unknown one ("unknown topic"), and every probe of a live id made the hub open
+ * an ephemeral topic slot through the on-demand opener.
+ */
+func TestSubscribeRunTopicIsGatedBeforeTheHubOpensIt(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	const liveRun, unknownRun = "run:live", "run:unknown"
+	var asked atomic.Int64
+	h.SetEphemeralOpener(func(ctx context.Context, topic string) bool {
+		asked.Add(1)
+		return topic == liveRun && h.OpenTopic(ctx, topic)
+	})
+	c := h.register(func(topic string) error {
+		if IsRunTopic(topic) {
+			return errors.New("missing permission: runs:read")
+		}
+		return nil
+	})
+	defer h.unregister(c)
+
+	details := map[string]string{}
+	for _, topic := range []string{liveRun, unknownRun} {
+		subscribeClient(h, c, topic, 0)
+		got := nextEnvelope(t, c)
+		if got.Type != TypeError || got.Topic != topic {
+			t.Fatalf("subscribe %s: frame = %+v, want an error frame on that topic", topic, got)
+		}
+		var payload struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(got.Data, &payload); err != nil {
+			t.Fatalf("subscribe %s: error payload %s: %v", topic, got.Data, err)
+		}
+		details[topic] = payload.Error
+	}
+	for topic, detail := range details {
+		if detail != "missing permission: runs:read" {
+			t.Errorf("subscribe %s: error = %q, want the permission refusal whether or not the run exists", topic, detail)
+		}
+	}
+	if n := asked.Load(); n != 0 {
+		t.Errorf("the on-demand opener was asked %d time(s) for a subject without runs:read, want 0", n)
+	}
+	h.mu.Lock()
+	open := len(h.ephemeral)
+	h.mu.Unlock()
+	if open != 0 {
+		t.Errorf("%d ephemeral topic(s) opened for a refused subscribe, want 0", open)
+	}
+	if len(c.topics) != 0 {
+		t.Errorf("client topics = %v, want none", c.topics)
 	}
 }

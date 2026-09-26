@@ -474,6 +474,31 @@ func TestStartFullMeshFallbackStillFailsWithNoAgents(t *testing.T) {
 	}
 }
 
+// The plane is stored twice per run and re-read by every run list, and the controller refuses any
+// but pod for every pair, so Start refuses one the API would refuse too: a schedule's definition may
+// still carry it.
+func TestStartRefusesAPlaneOtherThanPod(t *testing.T) {
+	_, ctrl := startFakeDiagnosticsServer(t)
+	bus := newRecordingBus()
+	st := checks.NewMemoryStore()
+	runner := checks.NewRunner(ctrl, ws.NewHub(bus, testMetrics(t)), bus, st, testMetrics(t))
+
+	for _, plane := range []string{"host", strings.Repeat("p", 8<<20), "pod\x00", "Pod"} {
+		_, err := runner.Start(context.Background(),
+			checks.Spec{Sources: []string{"n1"}, Destinations: []string{"n2"}, Type: "tcp", Plane: plane}, testInitiator())
+		if !errors.Is(err, checks.ErrInvalidPlane) {
+			t.Errorf("Start with plane %.40q = %v, want ErrInvalidPlane", plane, err)
+		}
+	}
+	page, err := st.ListRuns(context.Background(), store.RunFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Runs) != 0 {
+		t.Errorf("stored %d runs, want 0", len(page.Runs))
+	}
+}
+
 func TestStartAllFailingPairsYieldsFailed(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	fake.failPair("n1", "n2")

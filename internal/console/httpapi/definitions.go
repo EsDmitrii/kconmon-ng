@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
@@ -37,7 +38,7 @@ var _ TopologySource = (*controllerclient.Client)(nil)
 // definitionsUnavailableDetail is served whenever s.definitions is nil; check definitions are
 // CONFIGURATION, exactly like targets, and get NO in-memory fallback.
 const definitionsUnavailableDetail = "check definitions are persisted configuration with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/checks"
+	databaseKnob + " to enable /api/v1/checks"
 
 // projectionUnavailableDetail is POST /api/v1/checks/projection's 503. The projected series count
 // is a function of the CURRENT topology.
@@ -47,6 +48,10 @@ const projectionUnavailableDetail = "the projected series count is computed agai
 // maxProjectedSeries bounds the continuous external series ONE definition may project; the bound is
 // PER DEFINITION, not fleet-wide, and that is load-bearing.
 const maxProjectedSeries = 400
+
+// maxDefinitionParamsBytes bounds params: the reconciler copies them into every agent's spec of the
+// continuous assignment, and the checkers read three small fields at most.
+const maxDefinitionParamsBytes = 4 << 10
 
 // protocolsPerDefinition is the "protocols" half; it is named rather than inlined because the wire
 // shape reports it separately.
@@ -128,11 +133,10 @@ type definitionRequest struct {
 // JSON at all is a 400 (malformed request).
 func decodeDefinitionRequest(w http.ResponseWriter, r *http.Request) (store.DefinitionInput, bool) {
 	var req definitionRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`body must be JSON with "name", "sourceSelection" (all|per-zone|one-per-zone), `+
-				`"destinationKind" (node|target|adhoc), "checkType" (tcp|udp|icmp|dns|http|mtr), "plane", `+
-				`an optional "params" object and an optional "enabled" flag`))
+	if !decodeMutationBody(w, r, &req,
+		`body must be JSON with "name", "sourceSelection" (all|per-zone|one-per-zone), `+
+			`"destinationKind" (node|target|adhoc), "checkType" (tcp|udp|icmp|pmtu|dns|http|mtr), "plane", `+
+			`an optional "params" object and an optional "enabled" flag`) {
 		return store.DefinitionInput{}, false
 	}
 	/* A destinationTargetId that is not a UUID is a CLIENT error, and it used to reach the store as
@@ -145,6 +149,16 @@ func decodeDefinitionRequest(w http.ResponseWriter, r *http.Request) (store.Defi
 				"destinationTargetId must be a UUID naming a saved target")
 			return store.DefinitionInput{}, false
 		}
+	}
+	// The scheduler copies the plane into every run it fires, so the run's rule applies here.
+	if err := checks.ValidatePlane(req.Plane); err != nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid check definition", "definition: "+err.Error())
+		return store.DefinitionInput{}, false
+	}
+	if len(req.Params) > maxDefinitionParamsBytes {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid check definition",
+			fmt.Sprintf("definition: params is %d bytes, limit is %d", len(req.Params), maxDefinitionParamsBytes))
+		return store.DefinitionInput{}, false
 	}
 	in := store.DefinitionInput{
 		Name: req.Name, SourceSelection: req.SourceSelection,
@@ -321,7 +335,12 @@ func (s *Server) handleChecksUpdate(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceProjection(w, r, &in) {
 		return
 	}
-	if s.refuseUnrunnableDefinition(w, r, &in) {
+	// A disabled definition runs nothing, so pausing one the guard would refuse (a row saved before
+	// it, or imported) stays possible; enabling it again is judged.
+	if in.Enabled && s.refuseUnrunnableDefinition(w, r, &in) {
+		return
+	}
+	if s.refuseDefinitionEditBreakingSchedules(w, r, id, &in) {
 		return
 	}
 
@@ -395,14 +414,29 @@ func (s *Server) handleChecksProjection(w http.ResponseWriter, r *http.Request) 
 // projectDefinition resolves in's agent selection against the live topology and returns the
 // projected series count.
 func (s *Server) projectDefinition(ctx context.Context, in *store.DefinitionInput) (projectionResponse, error) {
+	topo, err := s.projectionTopology(ctx)
+	if err != nil {
+		return projectionResponse{}, err
+	}
+	return projectDefinitionOn(topo, in), nil
+}
+
+// projectionTopology reads the live topology projections are computed against, or
+// errTopologyUnavailable when no TopologySource is wired.
+func (s *Server) projectionTopology(ctx context.Context) (*controllerclient.Topology, error) {
 	if s.topology == nil {
-		return projectionResponse{}, errTopologyUnavailable
+		return nil, errTopologyUnavailable
 	}
 	topo, err := s.topology.Topology(ctx)
 	if err != nil {
-		return projectionResponse{}, fmt.Errorf("httpapi: projection: %w", err)
+		return nil, fmt.Errorf("httpapi: projection: %w", err)
 	}
+	return topo, nil
+}
 
+// projectDefinitionOn is projectDefinition against a topology already read, so a caller judging
+// many definitions reads it once.
+func projectDefinitionOn(topo *controllerclient.Topology, in *store.DefinitionInput) projectionResponse {
 	agents := projectedAgents(in.SourceSelection, topo)
 	series := agents * protocolsPerDefinition
 	return projectionResponse{
@@ -411,7 +445,7 @@ func (s *Server) projectDefinition(ctx context.Context, in *store.DefinitionInpu
 		Series:    series,
 		Limit:     maxProjectedSeries,
 		OverLimit: series > maxProjectedSeries,
-	}, nil
+	}
 }
 
 // projectedAgents counts the agents a selection resolves to against topo; "all" and "per-zone" both

@@ -30,6 +30,11 @@ func TestPercentile(t *testing.T) {
 	if got := percentile(ds, 100); got != 100*time.Millisecond {
 		t.Fatalf("p100=%v, want 100ms", got)
 	}
+
+	// Nearest-rank is ceil(p/100*n): 0.95*33 = 31.35, so p95 is the 32nd smallest sample.
+	if got := percentile(ds[:33], 95); got != 32*time.Millisecond {
+		t.Fatalf("n=33 p95=%v, want 32ms", got)
+	}
 }
 
 func TestPercentileSortsInput(t *testing.T) {

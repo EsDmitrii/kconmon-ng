@@ -650,9 +650,10 @@ func TestWSRefusesTheUpgradeWithoutEitherPermission(t *testing.T) {
 	}
 }
 
-// TestWSEventsReadAloneCoversRunTopics is the other face of the same coupling: events:read alone;
-// stated as a test so the per-connection granularity is a pinned property rather than folklore.
-func TestWSEventsReadAloneCoversRunTopics(t *testing.T) {
+// TestWSEventsReadAloneIsRefusedRunTopics pins the REST/socket symmetry for runs: GET
+// /api/v1/runs/{id} answers 403 without runs:read, so the run:{id} topic that streams the same run
+// must refuse the subscribe too. It used to pin the opposite (events:read alone covered run topics).
+func TestWSEventsReadAloneIsRefusedRunTopics(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
 		"events-only": {authz.PermEventsRead},
@@ -663,6 +664,10 @@ func TestWSEventsReadAloneCoversRunTopics(t *testing.T) {
 	topic := ws.RunTopic("run-1")
 	if !hub.OpenTopic(t.Context(), topic) {
 		t.Fatal("OpenTopic refused the run topic")
+	}
+
+	if w := doRequest(t, s, http.MethodGet, "/api/v1/runs/run-1", nil, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("GET /api/v1/runs/{id} with events:read only = %d, want 403 (the REST half of the pair)", w.Code)
 	}
 
 	httpSrv := httptest.NewServer(s.Handler())
@@ -685,23 +690,27 @@ func TestWSEventsReadAloneCoversRunTopics(t *testing.T) {
 	if err := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); err != nil {
 		t.Fatalf("subscribe %s: %v", topic, err)
 	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	var env ws.Envelope
-	for {
-		hub.Broadcast(topic, ws.TypeSnapshot, json.RawMessage(`{"progress":1}`))
-		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatalf("set read deadline: %v", err)
-		}
-		if err := conn.ReadJSON(&env); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no frame on %s within 5s -- events:read should already cover run topics", topic)
-		}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
 	}
-	if env.Topic != topic || env.Type == ws.TypeError {
-		t.Errorf("envelope = %+v, want a frame on %s, not an error", env, topic)
+	var env ws.Envelope
+	if err := conn.ReadJSON(&env); err != nil {
+		t.Fatalf("read the refusal for %s: %v", topic, err)
+	}
+	if env.Type != ws.TypeError {
+		t.Fatalf("subscribe to %s with events:read only: envelope = %+v, want an error frame", topic, env)
+	}
+	if !strings.Contains(string(env.Data), string(authz.PermRunsRead)) {
+		t.Errorf("refusal for %s = %s, want it to name the missing permission %q", topic, env.Data, authz.PermRunsRead)
+	}
+
+	// Nothing broadcast on the run topic afterwards reaches this socket.
+	hub.Broadcast(topic, ws.TypeSnapshot, json.RawMessage(`{"progress":1}`))
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if err := conn.ReadJSON(&env); err == nil && env.Topic == topic {
+		t.Errorf("a refused socket still received %+v on %s", env, topic)
 	}
 }
 
@@ -1507,4 +1516,28 @@ type failingRoleResolver struct{}
 
 func (failingRoleResolver) RolesFor(context.Context, authz.Subject) ([]string, error) { //nolint:gocritic // Subject is a value type by design
 	return nil, errors.New("role store unreachable")
+}
+
+/*
+A username with a control character or bytes that are not UTF-8 cannot belong to any user, and the
+database refuses a NUL outright (SQLSTATE 22021). Looked up anyway, a client's own input read as the
+local auth backend being down: 503 and an auth error in the metrics.
+*/
+func TestLoginWithAnUnstorableUsernameIsAnInvalidCredential(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts := newRateLimitServer(t, "local", config.RateLimitConfig{}, kv, Deps{
+		Users:         erroringUserStore{},
+		Sessions:      authn.NewSessionStore(cache.NewInProcessKV(), 0, 0),
+		Authenticator: fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"},
+	})
+	for _, username := range []string{`admin\u0000`, `ad\u001bmin`} {
+		w := postLoginFrom(t, ts.srv, "192.0.2.1:1234", `{"username":"`+username+`","password":"x"}`)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("login as %s = %d %s, want 401 without asking the store", username, w.Code, w.Body)
+		}
+	}
+	if got := testutil.ToFloat64(ts.srv.metrics.AuthRequests.WithLabelValues("local", "error")); got != 0 {
+		t.Errorf("AuthRequests(local, error) = %v, want 0", got)
+	}
 }

@@ -56,12 +56,14 @@ func Build(agents []model.AgentInfo, cfg config.TopologyConfig) Plan {
 		return ring[i].ID < ring[j].ID
 	})
 
-	// More successors than peers just means "all of them".
-	ringDeg := min(cfg.Sparse.RingDegree, n-1)
+	// More successors or chords than peers just means "all of them".
+	others := max(n-1, 0)
+	ringDeg := min(cfg.Sparse.RingDegree, others)
+	chords := min(cfg.Sparse.ZoneChords, others)
 
 	adj := make(map[string]map[string]struct{}, n)
 	for i := range ring {
-		adj[ring[i].ID] = make(map[string]struct{}, ringDeg+cfg.Sparse.ZoneChords)
+		adj[ring[i].ID] = make(map[string]struct{}, ringDeg+chords)
 	}
 
 	for i := range ring {
@@ -77,7 +79,7 @@ func Build(agents []model.AgentInfo, cfg config.TopologyConfig) Plan {
 		idHash[i] = fnvHashParts(ring[i].ID)
 	}
 
-	addChords(ring, idHash, adj, ringDeg, cfg.Sparse.ZoneChords)
+	addChords(ring, idHash, adj, ringDeg, chords)
 	repairZonePairs(ring, idHash, adj)
 
 	plan := make(Plan, n)

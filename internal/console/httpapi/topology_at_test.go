@@ -435,13 +435,15 @@ func TestTopologyAtBeforeRetentionIs422(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
 		t.Fatalf("unmarshal problem: %v", err)
 	}
-	if !strings.Contains(p.Detail, "console.database.retentionDays") {
-		t.Errorf("detail = %q, want it to name console.database.retentionDays", p.Detail)
+	// database.retentionDays is the key in both the console config and the Helm values; there is no
+	// console.database block in either.
+	if strings.Contains(p.Detail, "console.database.") {
+		t.Errorf("detail = %q names console.database.*, a key that exists nowhere", p.Detail)
 	}
 	// The knob is named ONCE: the Helm value and the console-config key are the
 	// same string, so repeating it read as two different settings.
-	if n := strings.Count(p.Detail, "console.database.retentionDays"); n != 1 {
-		t.Errorf("detail names console.database.retentionDays %d times, want 1: %q", n, p.Detail)
+	if n := strings.Count(p.Detail, "database.retentionDays"); n != 1 {
+		t.Errorf("detail names database.retentionDays %d times, want 1: %q", n, p.Detail)
 	}
 	if strings.Contains(p.Detail, "--") {
 		t.Errorf("detail = %q, want sentences rather than an ASCII double dash", p.Detail)
@@ -487,8 +489,8 @@ func TestTopologyAtWithoutADatabaseIs503(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
 		t.Fatalf("unmarshal problem: %v", err)
 	}
-	if !strings.Contains(p.Detail, "console.database.mode") {
-		t.Errorf("detail = %q, want it to name console.database.mode", p.Detail)
+	if !strings.Contains(p.Detail, "database.dsnFile") {
+		t.Errorf("detail = %q, want it to name database.dsnFile", p.Detail)
 	}
 }
 

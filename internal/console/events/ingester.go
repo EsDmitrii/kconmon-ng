@@ -99,12 +99,19 @@ type Ingester struct {
 	// baselineInterval defaults to the baselineInterval const; export_test.go shortens it.
 	baselineInterval time.Duration
 
+	// initialBackoff and maxBackoff default to the consts of the same name; export_test.go shortens them.
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+
 	connected atomic.Bool
 }
 
 // NewIngester returns an ingester for the controller at grpcAddr.
 func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, m *metrics.Metrics, opts ...Option) *Ingester {
-	i := &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace, baselineInterval: baselineInterval}
+	i := &Ingester{
+		ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace, baselineInterval: baselineInterval,
+		initialBackoff: initialBackoff, maxBackoff: maxBackoff,
+	}
 	for _, opt := range opts {
 		opt(i)
 	}
@@ -123,11 +130,15 @@ func (i *Ingester) Run(ctx context.Context) {
 		return
 	}
 
-	backoff := initialBackoff
+	backoff := i.initialBackoff
 	for {
-		reason, err := i.attempt(ctx)
+		reason, established, err := i.attempt(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if established {
+			// A stream that proved itself ends the outage the backoff was built up for.
+			backoff = i.initialBackoff
 		}
 
 		i.metrics.IngesterReconnects.WithLabelValues(reason).Inc()
@@ -149,16 +160,17 @@ func (i *Ingester) Run(ctx context.Context) {
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, maxBackoff)
+		backoff = min(backoff*2, i.maxBackoff)
 	}
 }
 
 // attempt performs one whole cycle — capability precheck, dial, consume — and
-// returns the metrics reason label to count plus the error that ended the
-// attempt. It never returns a nil error: the loop above only stops on ctx.
-func (i *Ingester) attempt(ctx context.Context) (string, error) {
-	if err := i.precheck(ctx); err != nil {
-		return reasonCapability, err
+// returns the metrics reason label to count, whether the stream reached the
+// connected state, and the error that ended the attempt. It never returns a nil
+// error: the loop above only stops on ctx.
+func (i *Ingester) attempt(ctx context.Context) (reason string, established bool, err error) {
+	if perr := i.precheck(ctx); perr != nil {
+		return reasonCapability, false, perr
 	}
 
 	// Same dial options as internal/agent/grpc_client.go. grpc.NewClient is
@@ -173,17 +185,18 @@ func (i *Ingester) attempt(ctx context.Context) (string, error) {
 		}),
 	)
 	if err != nil {
-		return reasonDial, fmt.Errorf("dial controller %s: %w", i.grpcAddr, err)
+		return reasonDial, false, fmt.Errorf("dial controller %s: %w", i.grpcAddr, err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	// A Go server-streaming client returns from WatchEvents BEFORE the server has accepted the stream.
 	stream, err := pb.NewEventStreamClient(conn).WatchEvents(ctx, &pb.WatchEventsRequest{})
 	if err != nil {
-		return reasonDial, fmt.Errorf("open WatchEvents stream on %s: %w", i.grpcAddr, err)
+		return reasonDial, false, fmt.Errorf("open WatchEvents stream on %s: %w", i.grpcAddr, err)
 	}
 
-	return reasonStream, i.consume(ctx, stream)
+	established, err = i.consume(ctx, stream)
+	return reasonStream, established, err
 }
 
 // precheck is a: feature-detect before every dial attempt, including every reconnect.
@@ -203,7 +216,7 @@ func (i *Ingester) precheck(ctx context.Context) error {
 
 // consume runs the stream to its end; it does NOT report the ingester healthy just because the
 // stream object exists.
-func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEventsClient) error {
+func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEventsClient) (bool, error) {
 	gate := &connectGate{ing: i, established: make(chan struct{})}
 	defer gate.finish()
 
@@ -225,7 +238,7 @@ func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEvent
 	for {
 		ev, err := stream.Recv()
 		if err != nil {
-			return fmt.Errorf("receive event: %w", err)
+			return gate.wasEstablished(), fmt.Errorf("receive event: %w", err)
 		}
 		// An event in hand is the strongest possible proof of a live stream, so
 		// it promotes the ingester ahead of the grace period.
@@ -266,6 +279,16 @@ func (g *connectGate) promote() bool {
 	g.ing.setConnected(true)
 	close(g.established)
 	return true
+}
+
+// wasEstablished reports whether this attempt was ever promoted.
+func (g *connectGate) wasEstablished() bool {
+	select {
+	case <-g.established:
+		return true
+	default:
+		return false
+	}
 }
 
 // finish closes the attempt out, demoting the ingester if this attempt had

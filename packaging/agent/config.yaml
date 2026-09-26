@@ -20,8 +20,11 @@ agent:
   # Failure domain reported to the controller (in-cluster agents inherit it from the node label).
   zone: external
 
-  # TLS towards the gateway. An empty caFile trusts the system pool — set it for a private CA.
+  # TLS towards the gateway. caFile names a private CA; for a gateway with a publicly trusted
+  # certificate drop it and set enabled: true, which verifies against the system pool (an empty
+  # caFile alone leaves the dial plaintext, and the token is then refused).
   tls:
+    # enabled: true
     caFile: /etc/kconmon-ng/ca.crt
     # Client certificate pair, both or neither. Required when the gateway sets tls.clientCaFile.
     # certFile: /etc/kconmon-ng/client.crt
@@ -29,8 +32,9 @@ agent:
     # Verify the server certificate against this name instead of the dialed host (IP/LB dials).
     # serverName: kconmon-ng-gw.example.com
 
-  # Same content as the controller's externalGateway.bootstrapTokenFile. Refused without the tls
-  # block — the token never rides plaintext. Keep the file mode 0600, owned by kconmon-ng.
+  # Same content as the controller's externalGateway.bootstrapTokenFile. Refused unless TLS is on
+  # (enabled, caFile, a client pair or serverName above), so the token never rides plaintext. Keep
+  # the file mode 0600, owned by kconmon-ng.
   bootstrapTokenFile: /etc/kconmon-ng/bootstrap-token
 
 # Peers probe each other on httpPort (TCP) and grpcPort (UDP probes); Prometheus scrapes
@@ -42,11 +46,16 @@ agent:
 # grpcPort: 9090
 # metricsPort: 9091
 
-# Path MTU probe towards every peer (agent 2.5.0+), on by default. Defaults shown; size 0 probes at
-# the MTU of the interface that routes to the peer.
-# checkers:
-#   pmtu:
-#     enabled: true
-#     interval: 60s
-#     timeout: 500ms
-#     size: 0
+checkers:
+  # Path MTU probe towards every peer (agent 2.5.0+), on by default. Defaults shown; size 0 probes at
+  # the MTU of the route to the peer (a route mtu set by the CNI, else the egress device).
+  # pmtu:
+  #   enabled: true
+  #   interval: 60s
+  #   timeout: 500ms
+  #   size: 0
+  # Off here because its built-in probe host, kubernetes.default.svc.cluster.local, resolves only
+  # inside a cluster, so on a bare host it would fail from the first start. To use it, set enabled
+  # to true and add a hosts list of names this host must resolve.
+  dns:
+    enabled: false

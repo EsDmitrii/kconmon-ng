@@ -143,7 +143,7 @@ func printReport(w io.Writer, rep *Report) {
 		rep.DeliveryP50.Round(time.Microsecond), rep.DeliveryP95.Round(time.Microsecond), rep.ObserverResubs)
 
 	if rep.FullSyncBytes > 0 {
-		p("\nFULL_SYNC wire size at %d peers: %d bytes (%.1f bytes/peer, narrow projection)\n",
+		p("\nFULL_SYNC wire size at %d peers: %d bytes (%.1f bytes/peer, peers plus fleet echo endpoints)\n",
 			rep.FullSyncPeers, rep.FullSyncBytes, float64(rep.FullSyncBytes)/float64(rep.FullSyncPeers))
 	} else {
 		p("\nFULL_SYNC size at exactly %d peers was not observed (desync/resubscribe timing)\n", rep.FullSyncPeers)
@@ -161,7 +161,7 @@ func printReport(w io.Writer, rep *Report) {
 		}
 	}
 
-	// One machine-greppable line per run for the roadmap table.
+	// One machine-greppable line per run.
 	cold, churn, steady := &rep.Phases[0], &rep.Phases[1], &rep.Phases[2]
 	p("\nSUMMARY n=%d reg/s=%.1f cold_coalesce=%s churn_coalesce=%s prop_p95=%s fullsync_bytes=%d steady_cpu=%.1f%% heap=%s rss=%s desync_resubs=%d\n",
 		c.N, regRate,

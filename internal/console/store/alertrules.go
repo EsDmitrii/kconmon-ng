@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
@@ -117,7 +118,7 @@ type AlertRule struct {
 	// re-running the renderer.
 	RenderedExpr string
 	// SyncStatus, SyncMessage and LastSyncedAt are RECONCILER OUTCOMES, written only by
-	// UpdateAlertRuleSyncStatus.
+	// UpdateAlertRuleSyncStatusIfUnchanged.
 	SyncStatus   string
 	SyncMessage  string
 	LastSyncedAt *time.Time
@@ -141,16 +142,14 @@ type AlertRuleInput struct {
 	RenderedExpr string
 }
 
-// The update surface is TWO NARROW UPDATES rather than one full replace.
+// AlertRuleStore is the operator's write surface: it updates the builder half of a rule only. The
+// sync half is the reconciler's, through UpdateAlertRuleSyncStatusIfUnchanged.
 type AlertRuleStore interface {
 	CreateAlertRule(ctx context.Context, in AlertRuleInput) (AlertRule, error)
 	// UpdateAlertRule replaces the builder fields and resets the rule to
 	// 'unsynced': a changed rule is by definition not the rule that was
 	// applied.
 	UpdateAlertRule(ctx context.Context, id string, in AlertRuleInput) (AlertRule, error)
-	// UpdateAlertRuleSyncStatus records one reconcile outcome and touches NOTHING else -- not the
-	// builder fields, not updated_at.
-	UpdateAlertRuleSyncStatus(ctx context.Context, id, status, message string, lastSyncedAt *time.Time) (AlertRule, error)
 	// DeleteAlertRule returns ErrNotFound when id does not name a rule,
 	// including when it is not a UUID at all.
 	DeleteAlertRule(ctx context.Context, id string) error
@@ -266,8 +265,8 @@ func validateJSONObject(field string, raw json.RawMessage) error {
 	if !json.Valid(trimmed) {
 		return fmt.Errorf("%s must be valid JSON", field)
 	}
-	// Same reason as validateJSON's: a NUL is valid JSON and invalid jsonb.
-	if err := validateNoJSONNUL(field, trimmed); err != nil {
+	// Same reason as validateJSON's: valid JSON is not always storable jsonb.
+	if err := validateJSONBStorable(field, trimmed); err != nil {
 		return err
 	}
 	if trimmed[0] != '{' {
@@ -300,6 +299,9 @@ func (db *DB) CreateAlertRule(ctx context.Context, in AlertRuleInput) (AlertRule
 	if err := in.Validate(); err != nil {
 		return AlertRule{}, err
 	}
+	if err := db.checkAlertNameFree(ctx, "", in.Name); err != nil {
+		return AlertRule{}, err
+	}
 	rid, err := parseUUID(uuid.NewString())
 	if err != nil {
 		return AlertRule{}, fmt.Errorf("store: create alert rule: %w", err)
@@ -323,6 +325,52 @@ func (db *DB) CreateAlertRule(ctx context.Context, in AlertRuleInput) (AlertRule
 		return AlertRule{}, fmt.Errorf("store: create alert rule: %w", wrapUniqueViolation(err))
 	}
 	return alertRuleFromRow(&row), nil
+}
+
+/*
+checkAlertNameFree refuses a name whose Prometheus alert name another rule already has. The unique
+index is on lower(name), but 'pair-loss', 'pair.loss' and 'PairLoss' all become the alert PairLoss,
+and the bundle cannot hold two of them. An update that keeps its alert name is not checked, so a
+clash an older version let in can still be edited, disabled or renamed away. Concurrent writes can
+still race past this; the reconciler refuses the later rule of such a pair on its own.
+*/
+func (db *DB) checkAlertNameFree(ctx context.Context, id, name string) error {
+	if _, err := alerting.SanitizeAlertName(name); err != nil {
+		return nil //nolint:nilerr // the render at write time reports a name with no alert name
+	}
+	rows, err := db.ListAlertRules(ctx, false)
+	if err != nil {
+		return err
+	}
+	return AlertNameConflict(rows, id, name)
+}
+
+// AlertNameConflict is checkAlertNameFree against rows already read: id is the rule being written
+// ("" for a create), and a caller judging many rules without the database (an import's dry run)
+// gets the store's own answer. Every row needs a non-empty id unique among rows.
+func AlertNameConflict(rows []AlertRule, id, name string) error {
+	alert, err := alerting.SanitizeAlertName(name)
+	if err != nil {
+		return nil //nolint:nilerr // the render at write time reports a name with no alert name
+	}
+	for i := range rows {
+		if rows[i].ID != id {
+			continue
+		}
+		if cur, _ := alerting.SanitizeAlertName(rows[i].Name); cur == alert {
+			return nil
+		}
+	}
+	for i := range rows {
+		if rows[i].ID == id || strings.EqualFold(rows[i].Name, name) {
+			continue // the lower(name) index answers ErrAlreadyExists for these
+		}
+		if other, _ := alerting.SanitizeAlertName(rows[i].Name); other == alert {
+			return fmt.Errorf("store: alert rule: name %q becomes the Prometheus alert name %q, which alert rule %q "+
+				"already has; choose a name that differs in more than case and punctuation", name, alert, rows[i].Name)
+		}
+	}
+	return nil
 }
 
 // GetAlertRule applies GetRun's UUID pre-check: a malformed id is ErrNotFound.
@@ -365,6 +413,11 @@ func (db *DB) UpdateAlertRule(ctx context.Context, id string, in AlertRuleInput)
 	if err != nil {
 		return AlertRule{}, fmt.Errorf("store: update alert rule: %w: %w", ErrNotFound, err)
 	}
+	// formatUUID(rid), not id: uuid.Parse also takes an upper-case, braced or hyphen-less spelling,
+	// which would never equal the row's own id and so read as a clash with itself.
+	if cerr := db.checkAlertNameFree(ctx, formatUUID(rid), in.Name); cerr != nil {
+		return AlertRule{}, cerr
+	}
 	start := time.Now()
 	row, err := gen.New(db.pool).UpdateAlertRule(ctx, gen.UpdateAlertRuleParams{
 		ID:           rid,
@@ -385,18 +438,20 @@ func (db *DB) UpdateAlertRule(ctx context.Context, id string, in AlertRuleInput)
 	return alertRuleFromRow(&row), nil
 }
 
-// UpdateAlertRuleSyncStatus records one reconcile outcome. A nil lastSyncedAt
-// writes SQL NULL rather than year 1, UpdateWebhookDelivery's reasoning: the
-// column is nullable precisely so "never applied" is expressible.
-func (db *DB) UpdateAlertRuleSyncStatus(
-	ctx context.Context, id, status, message string, lastSyncedAt *time.Time,
-) (AlertRule, error) {
+// UpdateAlertRuleSyncStatusIfUnchanged records one reconcile outcome in the sync columns only, not
+// the builder fields and not updated_at, and only while the row's updated_at still equals updatedAt,
+// the version the pass rendered. false with a nil error means the rule was edited or deleted since,
+// and the next pass records its status. A nil lastSyncedAt writes SQL NULL rather than year 1: the
+// column is nullable so "never applied" is expressible.
+func (db *DB) UpdateAlertRuleSyncStatusIfUnchanged(
+	ctx context.Context, id string, updatedAt time.Time, status, message string, lastSyncedAt *time.Time,
+) (bool, error) {
 	if err := validateAlertSyncStatus(status, message); err != nil {
-		return AlertRule{}, err
+		return false, err
 	}
 	rid, err := parseUUID(id)
 	if err != nil {
-		return AlertRule{}, fmt.Errorf("store: update alert rule sync status: %w: %w", ErrNotFound, err)
+		return false, fmt.Errorf("store: update alert rule sync status: %w: %w", ErrNotFound, err)
 	}
 
 	var synced pgtype.Timestamptz
@@ -405,17 +460,18 @@ func (db *DB) UpdateAlertRuleSyncStatus(
 	}
 
 	start := time.Now()
-	row, err := gen.New(db.pool).UpdateAlertRuleSyncStatus(ctx, gen.UpdateAlertRuleSyncStatusParams{
+	rows, err := gen.New(db.pool).UpdateAlertRuleSyncStatusIfUnchanged(ctx, gen.UpdateAlertRuleSyncStatusIfUnchangedParams{
 		ID:           rid,
 		SyncStatus:   status,
 		SyncMessage:  message,
 		LastSyncedAt: synced,
+		UpdatedAt:    updatedAt,
 	})
-	db.observe(queryUpdateAlertRuleSyncStatus, start, queryResult(wrapNoRows(err)))
+	db.observe(queryUpdateAlertRuleSyncStatusIfUnchanged, start, queryResult(err))
 	if err != nil {
-		return AlertRule{}, fmt.Errorf("store: update alert rule sync status: %w", wrapNoRows(err))
+		return false, fmt.Errorf("store: update alert rule sync status: %w", err)
 	}
-	return alertRuleFromRow(&row), nil
+	return rows > 0, nil
 }
 
 // DeleteAlertRule removes one rule. Same pre-check and same miss answer as

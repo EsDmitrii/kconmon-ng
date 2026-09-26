@@ -1,10 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,7 +22,7 @@ import (
 // errors.Is rather than importing pgx to recognize pgx.ErrNoRows or a Postgres error code directly.
 var (
 	// ErrNotFound is returned by every single-row lookup or targeted update/delete (GetUserByUsername,
-	// GetTokenByHash, UpdateUserPassword, SetUserDisabled, DeleteRole, DeleteBinding, RevokeToken,
+	// GetTokenByHash, UpdateUserPassword, UpdateUserGuarded, DeleteRole, DeleteBinding, RevokeToken,
 	// TouchTokenLastUsed) when no row matches.
 	ErrNotFound = errors.New("store: not found")
 	// ErrAlreadyExists is returned when a unique constraint blocks a write: CreateUser on a taken
@@ -100,6 +103,8 @@ type User struct {
 	Disabled     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// SessionEpoch counts the disables; populated by GetUserByUsername and CreateUser only.
+	SessionEpoch int64
 }
 
 // UserStore is the seam the authn layer and an admin user-management API take.
@@ -118,8 +123,6 @@ type UserStore interface {
 	// database.mode=enabled deployment with zero rows here needs one made,
 	// an existing one must not get a second one made for it.
 	CountUsers(ctx context.Context) (int64, error)
-	// SetUserDisabled returns ErrNotFound when id does not name a user.
-	SetUserDisabled(ctx context.Context, id string, disabled bool) error
 }
 
 var _ UserStore = (*DB)(nil)
@@ -133,6 +136,7 @@ func userFromRow(u *gen.User) User {
 		Disabled:     u.Disabled,
 		CreatedAt:    u.CreatedAt,
 		UpdatedAt:    u.UpdatedAt,
+		SessionEpoch: u.SessionEpoch,
 	}
 }
 
@@ -168,7 +172,7 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 		return User{}, fmt.Errorf("store: get user by id: %w", err)
 	}
 	start := time.Now()
-	u, err := gen.New(db.pool).GetUserByID(ctx, uid)
+	u, err := db.readQueries(ctx).GetUserByID(ctx, uid)
 	db.observe(queryGetUserByID, start, queryResult(wrapNoRows(err)))
 	if err != nil {
 		return User{}, fmt.Errorf("store: get user by id: %w", wrapNoRows(err))
@@ -178,7 +182,7 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 
 func (db *DB) GetUserByUsername(ctx context.Context, username string) (User, error) {
 	start := time.Now()
-	u, err := gen.New(db.pool).GetUserByUsername(ctx, username)
+	u, err := db.readQueries(ctx).GetUserByUsername(ctx, username)
 	db.observe(queryGetUserByUsername, start, queryResult(wrapNoRows(err)))
 	if err != nil {
 		return User{}, fmt.Errorf("store: get user by username: %w", wrapNoRows(err))
@@ -200,98 +204,201 @@ func (db *DB) CreateUser(ctx context.Context, username, passwordHash, displayNam
 	return userFromRow(&u), nil
 }
 
-// CreateBootstrapAdmin creates the local bootstrap user AND its admin binding in ONE transaction.
-//
-// The two used to be separate statements with a repair loop behind them: every boot looked for the
-// binding and re-created it when it was missing, because a crash between the two would otherwise
-// leave an account nobody could use. That repair could not tell a half-finished bootstrap from a
-// DELIBERATE revocation, so demoting the shared bootstrap account survived exactly until the next
-// pod restart — a rollout, an OOM kill, a node drain — and the re-grant went straight to the store,
-// bypassing the audit middleware entirely. The audit log said the binding was deleted and nothing
-// after it; the binding list said admin.
-//
-// A transaction removes the question. There is no partial state to repair, so nothing has to guess
-// what a missing binding means, and a revocation stays revoked.
+// CreateBootstrapAdmin creates the local bootstrap user AND its admin binding in ONE transaction, so
+// there is no half-made bootstrap for a later boot to repair. A repair could not tell a missing
+// binding from a deliberate revocation, and would re-grant a demoted account past the audit log.
 func (db *DB) CreateBootstrapAdmin(ctx context.Context, username, passwordHash, displayName, role string) (User, error) {
-	return db.createUserWithBinding(ctx, "create bootstrap admin", username, passwordHash, displayName, role)
+	return db.createUserWithBinding(ctx, "create bootstrap admin", username, passwordHash, displayName, role, nil)
 }
 
 // CreateUserWithRole is the admin API's create; same transaction as the bootstrap admin.
 func (db *DB) CreateUserWithRole(ctx context.Context, username, passwordHash, displayName, role string) (User, error) {
-	return db.createUserWithBinding(ctx, "create user", username, passwordHash, displayName, role)
+	return db.createUserWithBinding(ctx, "create user", username, passwordHash, displayName, role, nil)
 }
 
-// createUserWithBinding creates a local user and binds it to role in ONE transaction: a user row
-// without its binding is an account nobody can use, and a half-made one cannot be told from a
-// deliberate revocation afterwards.
-func (db *DB) createUserWithBinding(ctx context.Context, op, username, passwordHash, displayName, role string) (User, error) {
-	start := time.Now()
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		db.observe(queryCreateUser, start, queryResult(err))
-		return User{}, fmt.Errorf("store: %s: begin: %w", op, err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
+// CreateUserWithRoleGuarded is CreateUserWithRole with guard run first under the guarded writes'
+// lock, so a role deleted meanwhile is not bound. guard's error is returned unwrapped.
+func (db *DB) CreateUserWithRoleGuarded(ctx context.Context, username, passwordHash, displayName, role string, guard func(context.Context) error) (User, error) {
+	return db.createUserWithBinding(ctx, "create user", username, passwordHash, displayName, role, guard)
+}
 
-	q := gen.New(tx)
-	u, err := q.CreateUser(ctx, gen.CreateUserParams{
-		Username: username, PasswordHash: passwordHash, DisplayName: displayName,
+// createUserWithBinding creates a local user and binds it to role in ONE transaction, under the
+// guarded writes' lock: a user row without its binding is an account nobody can use, and a half-made
+// one cannot be told from a deliberate revocation afterwards.
+func (db *DB) createUserWithBinding(ctx context.Context, op, username, passwordHash, displayName, role string, guard func(context.Context) error) (User, error) {
+	start := time.Now()
+	var user User
+	refused, err := db.guardedTx(ctx, op, guard, func(tx pgx.Tx) error {
+		q := gen.New(tx)
+		u, cerr := q.CreateUser(ctx, gen.CreateUserParams{Username: username, PasswordHash: passwordHash, DisplayName: displayName})
+		if cerr != nil {
+			return wrapUniqueViolation(cerr)
+		}
+		if _, berr := q.CreateBinding(ctx, gen.CreateBindingParams{RoleName: role, SubjectKind: "user", SubjectID: u.ID.String()}); berr != nil {
+			return fmt.Errorf("binding: %w", wrapUniqueViolation(berr))
+		}
+		user = userFromRow(&u)
+		return nil
 	})
+	db.observeGuarded(queryCreateUser, start, refused, err)
 	if err != nil {
-		db.observe(queryCreateUser, start, queryResult(wrapUniqueViolation(err)))
-		return User{}, fmt.Errorf("store: %s: %w", op, wrapUniqueViolation(err))
+		return User{}, err
 	}
-	if _, err := q.CreateBinding(ctx, gen.CreateBindingParams{
-		RoleName: role, SubjectKind: "user", SubjectID: u.ID.String(),
-	}); err != nil {
-		db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
-		return User{}, fmt.Errorf("store: %s binding: %w", op, wrapUniqueViolation(err))
-	}
-	if err := tx.Commit(ctx); err != nil {
-		db.observe(queryCreateUser, start, queryResult(err))
-		return User{}, fmt.Errorf("store: %s: commit: %w", op, err)
-	}
-	db.observe(queryCreateUser, start, queryResult(nil))
-	return userFromRow(&u), nil
+	return user, nil
 }
 
-// SetUserRole replaces every DIRECT binding of a local user with one binding to role, in one
-// transaction: no reader ever sees the user with no role, or with both. Group bindings stay.
-func (db *DB) SetUserRole(ctx context.Context, userID, role string) error {
-	start := time.Now()
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		db.observe(queryCreateBinding, start, queryResult(err))
-		return fmt.Errorf("store: set user role: begin: %w", err)
+// setUserRoleTx replaces every DIRECT binding of a local user with one binding to role inside tx, so
+// no reader sees the user with no role or with both; group bindings stay. The caller holds
+// userAdminLockKey, which serialises role changes; the row lock doubles as the existence check.
+func setUserRoleTx(ctx context.Context, tx pgx.Tx, uid pgtype.UUID, userID, role string) error {
+	var one int
+	if lockErr := tx.QueryRow(ctx, "SELECT 1 FROM users WHERE id = $1 FOR UPDATE", uid).Scan(&one); lockErr != nil {
+		return fmt.Errorf("lock user: %w", wrapNoRows(lockErr))
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
 
 	q := gen.New(tx)
 	direct, err := q.ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
 		CallerKind: "user", UserID: userID, Groups: []string{},
 	})
 	if err != nil {
-		db.observe(queryCreateBinding, start, queryResult(err))
-		return fmt.Errorf("store: set user role: list bindings: %w", err)
+		return fmt.Errorf("list bindings: %w", err)
 	}
 	for _, b := range direct {
 		if _, err := q.DeleteBinding(ctx, b.ID); err != nil {
-			db.observe(queryCreateBinding, start, queryResult(err))
-			return fmt.Errorf("store: set user role: delete binding %d: %w", b.ID, err)
+			return fmt.Errorf("delete binding %d: %w", b.ID, err)
 		}
 	}
 	if _, err := q.CreateBinding(ctx, gen.CreateBindingParams{
 		RoleName: role, SubjectKind: "user", SubjectID: userID,
 	}); err != nil {
-		db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
-		return fmt.Errorf("store: set user role: %w", wrapUniqueViolation(err))
+		return wrapUniqueViolation(err)
+	}
+	return nil
+}
+
+// userAdminLockKey is the pg_advisory_xact_lock key every guarded users and RBAC write takes.
+const userAdminLockKey int64 = 2111970507
+
+// UserChange is one update of a local user; a nil field is left as it is.
+type UserChange struct {
+	Disabled *bool
+	Role     *string
+}
+
+// UpdateUserGuarded applies change to user id in one transaction. The transaction first takes an
+// advisory lock every call shares, then runs guard (when non-nil), and only then writes: two changes
+// whose guards read the same state, such as the last-admin check, cannot both pass on a stale read.
+// guard's error aborts the change and is returned unwrapped. ErrNotFound when id names no user.
+func (db *DB) UpdateUserGuarded(ctx context.Context, id string, change UserChange, guard func(context.Context) error) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("store: update user: %w: %w", ErrNotFound, err)
+	}
+	start := time.Now()
+	refused, err := db.guardedTx(ctx, "update user", guard, func(tx pgx.Tx) error {
+		if change.Disabled != nil {
+			rows, derr := gen.New(tx).SetUserDisabled(ctx, gen.SetUserDisabledParams{ID: uid, Disabled: *change.Disabled})
+			if derr != nil {
+				return fmt.Errorf("set disabled: %w", derr)
+			}
+			if rows == 0 {
+				return ErrNotFound
+			}
+		}
+		if change.Role != nil {
+			if rerr := setUserRoleTx(ctx, tx, uid, id, *change.Role); rerr != nil {
+				return fmt.Errorf("set role: %w", rerr)
+			}
+		}
+		return nil
+	})
+	db.observeGuarded(queryUpdateUser, start, refused, err)
+	return err
+}
+
+// DeleteUserGuarded deletes user id and the role bindings naming them directly, in one transaction
+// under the same lock and guard contract as UpdateUserGuarded; bindings have no foreign key, so
+// nothing else would remove them. ErrNotFound when id names no user. API tokens are not touched: the
+// caller revokes them first.
+func (db *DB) DeleteUserGuarded(ctx context.Context, id string, guard func(context.Context) error) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("store: delete user: %w: %w", ErrNotFound, err)
+	}
+	start := time.Now()
+	refused, err := db.guardedTx(ctx, "delete user", guard, func(tx pgx.Tx) error {
+		if _, derr := tx.Exec(ctx, "DELETE FROM role_bindings WHERE subject_kind = 'user' AND subject_id = $1", id); derr != nil {
+			return fmt.Errorf("delete bindings: %w", derr)
+		}
+		tag, derr := tx.Exec(ctx, "DELETE FROM users WHERE id = $1", uid)
+		if derr != nil {
+			return fmt.Errorf("delete user: %w", derr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	db.observeGuarded(queryDeleteUser, start, refused, err)
+	return err
+}
+
+// guardedTx runs write in one transaction that first takes userAdminLockKey and then runs guard
+// (when non-nil). guard's error is returned unwrapped with refused set; the others are wrapped with
+// op.
+func (db *DB) guardedTx(ctx context.Context, op string, guard func(context.Context) error, write func(pgx.Tx) error) (refused bool, err error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: %s: begin: %w", op, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
+
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", userAdminLockKey); err != nil {
+		return false, fmt.Errorf("store: %s: lock: %w", op, err)
+	}
+	// The guard's reads run on this transaction (see readQueries): every guarded writer that committed
+	// before the lock was granted is visible under READ COMMITTED, and none can commit until this one
+	// ends. Reading through the pool instead would need a second connection while the writers parked
+	// on the lock hold the rest, and maxConns concurrent guarded writes would wedge the pool.
+	if guard != nil {
+		if err := guard(context.WithValue(ctx, guardTxKey{}, guardTx{db: db, tx: tx})); err != nil {
+			return true, err
+		}
+	}
+	if err := write(tx); err != nil {
+		return false, fmt.Errorf("store: %s: %w", op, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		db.observe(queryCreateBinding, start, queryResult(err))
-		return fmt.Errorf("store: set user role: commit: %w", err)
+		return false, fmt.Errorf("store: %s: commit: %w", op, err)
 	}
-	db.observe(queryCreateBinding, start, queryResult(nil))
-	return nil
+	return false, nil
+}
+
+// guardTxKey carries a guardedTx's transaction into its guard's context.
+type guardTxKey struct{}
+
+type guardTx struct {
+	db *DB
+	tx pgx.Tx
+}
+
+// readQueries is where a user, role or binding read runs: on the guarded transaction when ctx is the
+// one guardedTx handed its guard, on the pool otherwise. The transaction is one connection, so a guard
+// must not read concurrently.
+func (db *DB) readQueries(ctx context.Context) *gen.Queries {
+	if g, ok := ctx.Value(guardTxKey{}).(guardTx); ok && g.db == db {
+		return gen.New(g.tx)
+	}
+	return gen.New(db.pool)
+}
+
+// observeGuarded records one guarded write; a guard's refusal is the caller's verdict, not a failed
+// query.
+func (db *DB) observeGuarded(query string, start time.Time, refused bool, err error) {
+	if refused {
+		err = nil
+	}
+	db.observe(query, start, queryResult(err))
 }
 
 func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
@@ -314,9 +421,30 @@ func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) e
 	return nil
 }
 
+// RehashUserPassword replaces id's password hash with newHash only while it is still oldHash, and
+// reports whether it did. false with a nil error means the hash changed since oldHash was read (or
+// id names no user), so a login's hash upgrade never overwrites a concurrent password reset.
+func (db *DB) RehashUserPassword(ctx context.Context, id, oldHash, newHash string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, fmt.Errorf("store: rehash user password: %w", err)
+	}
+	start := time.Now()
+	rows, err := gen.New(db.pool).RehashUserPassword(ctx, gen.RehashUserPasswordParams{
+		ID:      uid,
+		OldHash: oldHash,
+		NewHash: newHash,
+	})
+	db.observe(queryRehashUserPassword, start, queryResult(err))
+	if err != nil {
+		return false, fmt.Errorf("store: rehash user password: %w", err)
+	}
+	return rows == 1, nil
+}
+
 func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListUsers(ctx)
+	rows, err := db.readQueries(ctx).ListUsers(ctx)
 	db.observe(queryListUsers, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list users: %w", err)
@@ -330,29 +458,12 @@ func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
 
 func (db *DB) CountUsers(ctx context.Context) (int64, error) {
 	start := time.Now()
-	n, err := gen.New(db.pool).CountUsers(ctx)
+	n, err := db.readQueries(ctx).CountUsers(ctx)
 	db.observe(queryCountUsers, start, queryResult(err))
 	if err != nil {
 		return 0, fmt.Errorf("store: count users: %w", err)
 	}
 	return n, nil
-}
-
-func (db *DB) SetUserDisabled(ctx context.Context, id string, disabled bool) error {
-	uid, err := parseUUID(id)
-	if err != nil {
-		return fmt.Errorf("store: set user disabled: %w", err)
-	}
-	start := time.Now()
-	rows, err := gen.New(db.pool).SetUserDisabled(ctx, gen.SetUserDisabledParams{ID: uid, Disabled: disabled})
-	db.observe(querySetUserDisabled, start, queryResult(err))
-	if err != nil {
-		return fmt.Errorf("store: set user disabled: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("store: set user disabled: %w", ErrNotFound)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +528,7 @@ func bindingFromRow(b *gen.RoleBinding) RoleBinding {
 
 func (db *DB) ListRoles(ctx context.Context) ([]Role, error) {
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListRoles(ctx)
+	rows, err := db.readQueries(ctx).ListRoles(ctx)
 	db.observe(queryListRoles, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list roles: %w", err)
@@ -457,7 +568,7 @@ func (db *DB) DeleteRole(ctx context.Context, name string) error {
 // happened to appear in a 'user' binding would inherit that role.
 func (db *DB) ListBindingsForSubject(ctx context.Context, callerKind, subjectID string, groups []string) ([]RoleBinding, error) {
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
+	rows, err := db.readQueries(ctx).ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
 		CallerKind: callerKind,
 		UserID:     subjectID,
 		Groups:     groups,
@@ -475,7 +586,7 @@ func (db *DB) ListBindingsForSubject(ctx context.Context, callerKind, subjectID 
 
 func (db *DB) ListBindings(ctx context.Context) ([]RoleBinding, error) {
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListBindings(ctx)
+	rows, err := db.readQueries(ctx).ListBindings(ctx)
 	db.observe(queryListBindings, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list bindings: %w", err)
@@ -512,6 +623,84 @@ func (db *DB) DeleteBinding(ctx context.Context, id int64) error {
 		return fmt.Errorf("store: delete binding: %w", ErrNotFound)
 	}
 	return nil
+}
+
+// UpsertRoleGuarded is UpsertRole under the lock UpdateUserGuarded takes, written only once guard
+// passes; guard's error is returned unwrapped.
+func (db *DB) UpsertRoleGuarded(ctx context.Context, name string, permissions []string, guard func(context.Context) error) (Role, error) {
+	start := time.Now()
+	var role Role
+	refused, err := db.guardedTx(ctx, "upsert role", guard, func(tx pgx.Tx) error {
+		r, err := gen.New(tx).UpsertRole(ctx, gen.UpsertRoleParams{Name: name, Permissions: permissions})
+		if err != nil {
+			return err
+		}
+		role = roleFromRow(r)
+		return nil
+	})
+	db.observeGuarded(queryUpsertRole, start, refused, err)
+	if err != nil {
+		return Role{}, err
+	}
+	return role, nil
+}
+
+// DeleteRoleGuarded is DeleteRole under the lock UpdateUserGuarded takes, once guard passes.
+func (db *DB) DeleteRoleGuarded(ctx context.Context, name string, guard func(context.Context) error) error {
+	start := time.Now()
+	refused, err := db.guardedTx(ctx, "delete role", guard, func(tx pgx.Tx) error {
+		rows, err := gen.New(tx).DeleteRole(ctx, name)
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	db.observeGuarded(queryDeleteRole, start, refused, err)
+	return err
+}
+
+// DeleteBindingGuarded is DeleteBinding under the lock UpdateUserGuarded takes, once guard passes.
+func (db *DB) DeleteBindingGuarded(ctx context.Context, id int64, guard func(context.Context) error) error {
+	start := time.Now()
+	refused, err := db.guardedTx(ctx, "delete binding", guard, func(tx pgx.Tx) error {
+		rows, err := gen.New(tx).DeleteBinding(ctx, id)
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	db.observeGuarded(queryDeleteBinding, start, refused, err)
+	return err
+}
+
+// CreateBindingGuarded is CreateBinding under the lock UpdateUserGuarded takes, written only once
+// guard passes; guard's error is returned unwrapped.
+func (db *DB) CreateBindingGuarded(ctx context.Context, roleName, subjectKind, subjectID string, guard func(context.Context) error) (RoleBinding, error) {
+	start := time.Now()
+	var binding RoleBinding
+	refused, err := db.guardedTx(ctx, "create binding", guard, func(tx pgx.Tx) error {
+		b, err := gen.New(tx).CreateBinding(ctx, gen.CreateBindingParams{
+			RoleName:    roleName,
+			SubjectKind: subjectKind,
+			SubjectID:   subjectID,
+		})
+		if err != nil {
+			return wrapUniqueViolation(err)
+		}
+		binding = bindingFromRow(&b)
+		return nil
+	})
+	db.observeGuarded(queryCreateBinding, start, refused, err)
+	if err != nil {
+		return RoleBinding{}, err
+	}
+	return binding, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -727,9 +916,10 @@ type AuditPage struct {
 
 // AuditStore is the seam an audit-log read API and the retention Pruner take.
 type AuditStore interface {
-	// InsertAuditEntry appends one row; id and the assigned timestamp come
-	// back on the returned AuditEntry. detail == nil is written as the
-	// column's own default, {}.
+	// InsertAuditEntry appends one row whatever the fields carry: NUL, lone surrogates and invalid
+	// UTF-8 become U+FFFD and a number numeric cannot hold becomes a string (storableText,
+	// storableAuditDetail); an empty detail is written as {}. The returned AuditEntry holds the
+	// stored values.
 	InsertAuditEntry(ctx context.Context, subjectKind, subjectID, action, resource, outcome, remoteAddr string, detail json.RawMessage) (AuditEntry, error)
 	// ListAuditEntries pages newest-first, same keyset cursor shape as
 	// EventStore.ListEvents.
@@ -743,9 +933,9 @@ type AuditStore interface {
 var _ AuditStore = (*DB)(nil)
 
 func (db *DB) InsertAuditEntry(ctx context.Context, subjectKind, subjectID, action, resource, outcome, remoteAddr string, detail json.RawMessage) (AuditEntry, error) {
-	if detail == nil {
-		detail = json.RawMessage(`{}`)
-	}
+	detail = storableAuditDetail(detail)
+	subjectKind, subjectID, action = storableText(subjectKind), storableText(subjectID), storableText(action)
+	resource, outcome, remoteAddr = storableText(resource), storableText(outcome), storableText(remoteAddr)
 	start := time.Now()
 	r, err := gen.New(db.pool).InsertAuditEntry(ctx, gen.InsertAuditEntryParams{
 		SubjectKind: subjectKind,
@@ -771,6 +961,70 @@ func (db *DB) InsertAuditEntry(ctx context.Context, subjectKind, subjectID, acti
 		RemoteAddr:  remoteAddr,
 		Detail:      detail,
 	}, nil
+}
+
+/*
+storableAuditDetail returns detail in a form the JSONB column accepts. PostgreSQL refuses a lone
+UTF-16 surrogate escape, a \u0000 escape, invalid UTF-8 and a number numeric cannot hold, and an
+audit row must be written whatever a caller put in the fields it records, so the text becomes
+U+FFFD and such a number its literal as a string instead of failing the insert. A detail that is
+not JSON at all is replaced with {"unstorable":true}.
+*/
+func storableAuditDetail(detail json.RawMessage) json.RawMessage {
+	if len(bytes.TrimSpace(detail)) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	if json.Valid(detail) && validateJSONBStorable("detail", detail) == nil {
+		return detail
+	}
+	unstorable := json.RawMessage(`{"unstorable":true}`)
+	dec := json.NewDecoder(bytes.NewReader(detail))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return unstorable
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return unstorable
+	}
+	out, err := json.Marshal(storableJSONValue(v))
+	if err != nil || validateJSONBStorable("detail", out) != nil {
+		return unstorable
+	}
+	return out
+}
+
+// storableJSONValue makes a decoded JSON value storable: NUL in a string or key becomes U+FFFD and a
+// number numeric cannot hold becomes its literal as a string. Decoding already turned lone
+// surrogates and invalid UTF-8 into U+FFFD.
+func storableJSONValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return strings.ReplaceAll(t, "\x00", "\uFFFD")
+	case json.Number:
+		if !jsonbNumberStorable([]byte(t)) {
+			return string(t)
+		}
+		return t
+	case []any:
+		for i := range t {
+			t[i] = storableJSONValue(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[strings.ReplaceAll(k, "\x00", "\uFFFD")] = storableJSONValue(e)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// storableText makes s acceptable to a TEXT column, which refuses NUL and invalid UTF-8.
+func storableText(s string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", "\uFFFD"), "\uFFFD")
 }
 
 func (db *DB) ListAuditEntries(ctx context.Context, f AuditFilter) (AuditPage, error) { //nolint:gocritic // hugeParam: AuditFilter mirrors EventFilter's value semantics (events.go)

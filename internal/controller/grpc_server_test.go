@@ -3,12 +3,15 @@ package controller
 import (
 	"context"
 	"net"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
+	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
@@ -61,7 +64,6 @@ func TestGRPCServerDeregisterRemovesAgent(t *testing.T) {
 
 	reg.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
 	reg.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
-	srv.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(reg.Count()))
 
 	_, err := srv.Deregister(context.Background(), &pb.DeregisterRequest{AgentId: "agent-1"})
 	if err != nil {
@@ -71,16 +73,12 @@ func TestGRPCServerDeregisterRemovesAgent(t *testing.T) {
 	if reg.Count() != 1 {
 		t.Errorf("expected 1 agent after deregister, got %d", reg.Count())
 	}
-	if got := testutil.ToFloat64(srv.metrics.ControllerRegisteredAgents.WithLabelValues()); got != 1 {
-		t.Errorf("expected registered-agents gauge to be 1, got %v", got)
-	}
 }
 
 func TestGRPCServerDeregisterUnknownNoError(t *testing.T) {
 	srv, reg := newTestGRPCServer()
 
 	reg.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
-	srv.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(reg.Count()))
 
 	_, err := srv.Deregister(context.Background(), &pb.DeregisterRequest{AgentId: "does-not-exist"})
 	if err != nil {
@@ -89,9 +87,6 @@ func TestGRPCServerDeregisterUnknownNoError(t *testing.T) {
 
 	if reg.Count() != 1 {
 		t.Errorf("expected registry unchanged at 1 agent, got %d", reg.Count())
-	}
-	if got := testutil.ToFloat64(srv.metrics.ControllerRegisteredAgents.WithLabelValues()); got != 1 {
-		t.Errorf("expected registered-agents gauge to stay 1, got %v", got)
 	}
 }
 
@@ -172,7 +167,7 @@ func TestGRPCServerReportTaskResultRoundtrip(t *testing.T) {
 	}
 
 	if _, err := srv.ReportTaskResult(context.Background(),
-		&pb.TaskResult{TaskId: task.GetTaskId(), Success: true}); err != nil {
+		&pb.TaskResult{TaskId: task.GetTaskId(), AgentId: "agent-1", Success: true}); err != nil {
 		t.Fatalf("ReportTaskResult error: %v", err)
 	}
 
@@ -455,7 +450,7 @@ func TestGRPCServerShutdownUnblocksWatchEvents(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
 	// Leader election off is the configuration that made this hang in the wild:
-	// lostLeadership() is permanently false, so the ticker branch never exits.
+	// the leader check never fires, so only Shutdown can end the stream.
 	srv := NewGRPCServer(reg, m, false, nil, true)
 
 	ctx := t.Context()
@@ -844,6 +839,13 @@ func TestRegisterRejectsIncompleteAgentMeta(t *testing.T) {
 		{"no node", &pb.AgentMeta{Id: "agent-1", PodIp: "10.0.0.1"}},
 		{"no pod IP", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1"}},
 		{"pod IP is not an IP", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "not-an-ip"}},
+		// A 2.4.x or hand-built agent can still send an address that parses but that no peer can probe.
+		{"pod IP is unspecified", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "0.0.0.0"}},
+		{"pod IP is IPv6 unspecified", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "::"}},
+		{"pod IP is loopback", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "127.0.0.1"}},
+		{"pod IP is IPv6 loopback", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "::1"}},
+		{"pod IP is multicast", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "224.0.0.1"}},
+		{"pod IP is broadcast", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "255.255.255.255"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -929,7 +931,8 @@ func TestRegisterPublishesTheAgentsLabelsInTopologyChanged(t *testing.T) {
 		events = append(events, change.Events()...)
 	})
 
-	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
+	// An external host registers through the gateway, whose listener stamps the label.
+	if _, err := srv.Register(withGatewayCaller(context.Background()), &pb.RegisterRequest{
 		Agent: &pb.AgentMeta{
 			Id: "host-1-host-1", NodeName: "host-1", PodIp: "203.0.113.7",
 			Labels: map[string]string{model.LabelExternal: "true"},
@@ -1017,5 +1020,182 @@ func TestWatchPeersEndsAStreamThatIsNotBeingRead(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("WatchPeers stayed parked in Send through shutdown: the goroutine and its connection slot are held indefinitely")
+	}
+}
+
+// blockingSend parks every Send until release closes, like a stream whose reader stopped.
+type blockingSend struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingSend() *blockingSend {
+	return &blockingSend{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingSend) block() error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+
+type blockingTaskStream struct {
+	grpc.ServerStream
+	ctx context.Context
+	*blockingSend
+}
+
+func (f *blockingTaskStream) Context() context.Context   { return f.ctx }
+func (f *blockingTaskStream) Send(*pb.TaskRequest) error { return f.block() }
+
+type blockingExternalStream struct {
+	grpc.ServerStream
+	ctx context.Context
+	*blockingSend
+}
+
+func (f *blockingExternalStream) Context() context.Context               { return f.ctx }
+func (f *blockingExternalStream) Send(*pb.ExternalCheckAssignment) error { return f.block() }
+
+type blockingEventStream struct {
+	grpc.ServerStream
+	ctx context.Context
+	*blockingSend
+}
+
+func (f *blockingEventStream) Context() context.Context { return f.ctx }
+func (f *blockingEventStream) Send(*pb.Event) error     { return f.block() }
+
+// Every server-streaming handler, not only WatchPeers, must see shutdown while its Send is parked
+// on a subscriber that stopped reading.
+func TestWatchHandlersEndAStreamThatIsNotBeingRead(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(srv *GRPCServer, b *blockingSend) error
+		kick func(srv *GRPCServer)
+	}{
+		{
+			name: "WatchTasks",
+			run: func(srv *GRPCServer, b *blockingSend) error {
+				return srv.WatchTasks(&pb.WatchTasksRequest{AgentId: "agent-1"},
+					&blockingTaskStream{ctx: t.Context(), blockingSend: b})
+			},
+			kick: func(srv *GRPCServer) {
+				for srv.taskMgr.SubscriberCount() == 0 {
+					time.Sleep(5 * time.Millisecond)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				defer cancel()
+				_, _ = srv.taskMgr.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "icmp"})
+			},
+		},
+		{
+			name: "WatchExternalChecks",
+			run: func(srv *GRPCServer, b *blockingSend) error {
+				return srv.WatchExternalChecks(&pb.WatchExternalChecksRequest{AgentId: "agent-1"},
+					&blockingExternalStream{ctx: t.Context(), blockingSend: b})
+			},
+			kick: func(*GRPCServer) {}, // the initial assignment is the first Send
+		},
+		{
+			name: "WatchEvents",
+			run: func(srv *GRPCServer, b *blockingSend) error {
+				return srv.WatchEvents(&pb.WatchEventsRequest{}, &blockingEventStream{ctx: t.Context(), blockingSend: b})
+			},
+			kick: func(srv *GRPCServer) {
+				for srv.EventSubscriberCount() == 0 {
+					time.Sleep(5 * time.Millisecond)
+				}
+				srv.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{TopologyChanged: &pb.TopologyChanged{Reason: "x"}}})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewRegistry(30 * time.Second)
+			m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+			srv := NewGRPCServer(reg, m, false, nil, true)
+			srv.leaderCheckInterval = time.Hour
+
+			b := newBlockingSend()
+			defer close(b.release)
+
+			done := make(chan error, 1)
+			go func() { done <- tc.run(srv, b) }()
+			go tc.kick(srv)
+
+			select {
+			case <-b.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("handler never attempted a send")
+			}
+
+			srv.Shutdown()
+
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Error("handler returned nil; a blocked stream must end with an error")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("handler stayed parked in Send through shutdown")
+			}
+		})
+	}
+}
+
+/*
+A sparse plan hides most of the fleet from each agent, and an echo that knows only its peers answers
+a stranger agent's echo: one forged datagram then bounces between the two. Every peer list therefore
+carries every registered agent's echo endpoint, the receiver's included, whatever the plan says.
+*/
+func TestPeerListsCarryEveryAgentsEchoWhateverThePlan(t *testing.T) {
+	srv, _ := newTestGRPCServer()
+	agents := []*pb.AgentMeta{
+		{Id: "agent-a", NodeName: "node-a", PodIp: "10.0.0.1", UdpPort: 9090},
+		{Id: "agent-b", NodeName: "node-b", PodIp: "10.0.0.2", UdpPort: 9091},
+		{Id: "agent-c", NodeName: "node-c", PodIp: "10.0.0.3"}, // older than 2.4.0: no port
+	}
+	for _, a := range agents {
+		if _, err := srv.Register(context.Background(), &pb.RegisterRequest{Agent: a}); err != nil {
+			t.Fatalf("Register(%s): %v", a.GetId(), err)
+		}
+	}
+	srv.SetPeerPlan(meshplan.Plan{"agent-a": {"agent-b"}, "agent-b": {"agent-c"}, "agent-c": {"agent-a"}})
+	want := []string{"10.0.0.1:9090", "10.0.0.2:9091", "10.0.0.3:0"}
+	endpoints := func(echoes []*pb.EchoEndpoint) []string {
+		out := make([]string, 0, len(echoes))
+		for _, e := range echoes {
+			out = append(out, net.JoinHostPort(e.GetAddress(), strconv.FormatUint(uint64(e.GetPort()), 10)))
+		}
+		slices.Sort(out)
+		return out
+	}
+
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{Agent: agents[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := endpoints(resp.GetFleetEchoes()); !slices.Equal(got, want) {
+		t.Errorf("Register fleet echoes = %v, want %v", got, want)
+	}
+
+	stream := subscribePeersRaw(t, srv, "agent-a")
+	for _, what := range []string{"initial FULL_SYNC", "broadcast"} {
+		if what == "broadcast" {
+			srv.BroadcastPeerUpdate(srv.registry.GetAll())
+		}
+		select {
+		case u := <-stream.sent:
+			if len(u.GetPeers()) != 1 {
+				t.Errorf("%s peers = %d, want the plan's one", what, len(u.GetPeers()))
+			}
+			if got := endpoints(u.GetFleetEchoes()); !slices.Equal(got, want) {
+				t.Errorf("%s fleet echoes = %v, want %v", what, got, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no %s", what)
+		}
 	}
 }

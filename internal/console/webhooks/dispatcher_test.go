@@ -1109,11 +1109,10 @@ func TestSecretNeverReachesTheLogs(t *testing.T) {
 			t.Errorf("the logs carry the endpoint secret or its ciphertext:\n%s", logs)
 		}
 	}
-	// The URL is Debug-only, so it IS here -- but only because the level was
-	// turned all the way down for this test. The assertion below is what keeps
-	// it out of an ordinary Info-level deployment's logs.
+	// The Debug line names the endpoint by scheme and host, which for this path-less test URL is
+	// the whole URL; TestWebhookURLSecretsNeverReachTheLogs covers a URL that carries a credential.
 	if !strings.Contains(logs, fail.srv.URL) {
-		t.Errorf("expected the endpoint URL at DEBUG level, got:\n%s", logs)
+		t.Errorf("expected the endpoint at DEBUG level, got:\n%s", logs)
 	}
 }
 
@@ -1133,6 +1132,60 @@ func TestEndpointURLIsNotLoggedAboveDebug(t *testing.T) {
 
 	if strings.Contains(buf.String(), fail.srv.URL) {
 		t.Errorf("an Info-level log line names the endpoint URL:\n%s", buf.String())
+	}
+}
+
+// On Slack, Discord and Teams incoming webhooks the URL path is the credential, and other receivers
+// take a token in the query or the userinfo. A transport failure must not put any of them in a log
+// line, at any level: the endpoint is named by its id and by scheme and host only.
+func TestWebhookURLSecretsNeverReachTheLogs(t *testing.T) {
+	var buf lockedBuffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	host := dead.Listener.Addr().String()
+	dead.Close()
+	endpoint := "http://hookuser:hookpass@" + host + "/services/T0000/B0000/PATHSECRET?token=QUERYSECRET#FRAGSECRET"
+
+	st := newFakeStore()
+	d, _, _ := newTestDispatcher(t, st)
+	id := st.add(t, d, endpoint, []string{store.WebhookEventIncidentCreated}, true, 0)
+
+	d.Notify(context.Background(), store.WebhookEventIncidentCreated, testIncident())
+	st.waitOutcomes(t, 1)
+	d.Close()
+
+	logs := buf.String()
+	if !strings.Contains(logs, "delivery attempt failed") {
+		t.Fatalf("no transport failure was logged, so the assertions below would be vacuous:\n%s", logs)
+	}
+	for _, secret := range []string{"hookuser", "hookpass", "/services", "PATHSECRET", "QUERYSECRET", "FRAGSECRET"} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs carry %q from the endpoint URL:\n%s", secret, logs)
+		}
+	}
+	for _, want := range []string{id, "http://" + host + "/…"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("the logs do not name the endpoint by %q:\n%s", want, logs)
+		}
+	}
+}
+
+func TestRedactEndpoint(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://hooks.slack.com/services/T0/B0/token": "https://hooks.slack.com/…",
+		"https://u:p@example.com:8443/?token=abc":      "https://example.com:8443/…",
+		"https://example.com#frag":                     "https://example.com/…",
+		"http://10.0.0.7:9000":                         "http://10.0.0.7:9000",
+		"http://10.0.0.7:9000/":                        "http://10.0.0.7:9000",
+		"://no-scheme/secret":                          "(unparseable url)",
+		"/relative/secret":                             "(unparseable url)",
+	} {
+		if got := redactEndpoint(raw); got != want {
+			t.Errorf("redactEndpoint(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }
 
@@ -1272,5 +1325,31 @@ func TestUndecryptableSecretIsTerminal(t *testing.T) {
 	}
 	if !terminal {
 		t.Error("an unreadable secret is not terminal, so the delivery runs the whole retry ladder as no-ops")
+	}
+}
+
+// A receiver's redirect is its answer, not an instruction: following it would re-POST the signed body
+// to whatever host the receiver names, cluster-internal addresses included.
+func TestRedirectIsRecordedAndNeverFollowed(t *testing.T) {
+	target := newReceiver(t, http.StatusOK)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, target.srv.URL+"/elsewhere", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	st := newFakeStore()
+	d, m, _ := newTestDispatcher(t, st)
+	st.add(t, d, redirector.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
+
+	d.Notify(context.Background(), store.WebhookEventIncidentCreated, testIncident())
+	got := st.waitOutcomes(t, 1)
+	if n := len(target.received()); n != 0 {
+		t.Errorf("the redirect target received %d requests, want 0", n)
+	}
+	if got[0].lastStatus != "failed: HTTP 307" {
+		t.Errorf("lastStatus = %q, want %q", got[0].lastStatus, "failed: HTTP 307")
+	}
+	if n := deliveryCount(t, m, resultFailed); n != 1 {
+		t.Errorf("WebhookDeliveries(failed) = %v, want 1", n)
 	}
 }

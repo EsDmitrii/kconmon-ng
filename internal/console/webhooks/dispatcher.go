@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
+	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -142,8 +143,8 @@ type Dispatcher struct {
 // mid-ladder must record a failure rather than silently retry into a process that is going away.
 type sleeper func(ctx context.Context, d time.Duration) bool
 
-// New builds a Dispatcher. key must be exactly 32 bytes -- the decoded form of
-// console.webhooks.encryptionKey.
+// New builds a Dispatcher. key must be exactly 32 bytes -- the decoded form of the console config's
+// webhooks.encryptionKey or webhooks.encryptionKeyFile.
 func New(key []byte, st Store, m *metrics.Metrics) (*Dispatcher, error) {
 	if len(key) != keyLen {
 		return nil, fmt.Errorf("webhooks: encryption key is %d bytes, must be exactly %d", len(key), keyLen)
@@ -172,7 +173,11 @@ func New(key []byte, st Store, m *metrics.Metrics) (*Dispatcher, error) {
 		// The client carries no Timeout of its own: every request is issued
 		// with a per-attempt context deadline, and two independent clocks for
 		// one budget is how a timeout ends up being neither of them.
-		client:      &http.Client{},
+		// A redirect is recorded as the receiver's answer, never followed: following it would
+		// re-POST the signed body to any host the receiver names, cluster-internal ones included.
+		client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
 		sem:         make(chan struct{}, maxConcurrent),
 		pending:     make(chan struct{}, maxPending),
 		baseCtx:     base,
@@ -386,9 +391,7 @@ func (d *Dispatcher) fanOut(ctx context.Context, event string, body []byte) {
 		})
 		if !accepted {
 			d.m.WebhookDeliveries.WithLabelValues(resultFailed).Inc()
-			// The URL is absent by design (it is Debug-only, everywhere in
-			// this package): a warning an operator greps is not the place to
-			// put an address that names internal infrastructure.
+			// Named by id: the URL's path or query is often the credential (see redactEndpoint).
 			slog.Warn("webhooks: delivery pool saturated, dropping a notification",
 				"webhook", h.ID, "event", event, "maxConcurrent", maxConcurrent) //nolint:gosec // G706: structured slog fields, not string-built log injection
 		}
@@ -467,7 +470,7 @@ func (d *Dispatcher) withAttemptSlot(fn func()) bool {
 // ONE outcome is recorded per job, whatever happened in between -- the metric
 // counts deliveries, not attempts.
 func (d *Dispatcher) deliver(j job) { //nolint:gocritic // hugeParam: the worker owns this copy for the life of the delivery
-	slog.Debug("webhooks: delivering", "webhook", j.id, "event", j.event, "url", j.url, //nolint:gosec // G706: structured slog fields; the URL is Debug-only by design
+	slog.Debug("webhooks: delivering", "webhook", j.id, "event", j.event, "endpoint", redactEndpoint(j.url), //nolint:gosec // G706: structured slog fields, not string-built log injection
 		"attempts", len(j.attempts))
 
 	var lastStatus string
@@ -550,7 +553,14 @@ func (d *Dispatcher) attempt(j *job) (status string, ok, terminal bool) {
 		if ctx.Err() != nil {
 			return "failed: timeout after " + attemptTimeout.String(), false, false
 		}
-		slog.Warn("webhooks: delivery attempt failed", "webhook", j.id, "event", j.event, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		// Client.Do's *url.Error repeats the whole URL, which Go redacts only the password of; the
+		// log gets the cause under it.
+		cause := err
+		if ue, ok := errors.AsType[*url.Error](err); ok {
+			cause = ue.Err
+		}
+		slog.Warn("webhooks: delivery attempt failed", "webhook", j.id, "event", j.event, //nolint:gosec // G706: structured slog fields, not string-built log injection
+			"endpoint", redactEndpoint(j.url), "error", cause)
 		return "failed: connection error", false, false
 	}
 	defer func() {
@@ -605,6 +615,21 @@ func (d *Dispatcher) Close() {
 		}
 		d.cancelBase()
 	})
+}
+
+// redactEndpoint is the only form of an endpoint URL a log line may carry: scheme, host and port.
+// On Slack, Discord and Teams incoming webhooks the path is the credential, and other receivers take
+// a token in the query or the userinfo, so everything after the host collapses to "/…".
+func redactEndpoint(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "(unparseable url)"
+	}
+	out := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		out += "/…"
+	}
+	return out
 }
 
 // subscribes reports whether h asked for this event.

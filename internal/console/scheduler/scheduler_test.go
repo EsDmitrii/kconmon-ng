@@ -691,13 +691,14 @@ func TestScheduledRunIsAnOrdinaryRun(t *testing.T) {
 }
 
 // TestTargetDestinationResolvesThroughTheTargetsTable covers the one
-// destination kind that needs a second read.
+// destination kind that needs a second read. tcp, not dns: the agents refuse
+// a dns run toward a target, and so does specFor.
 func TestTargetDestinationResolvesThroughTheTargetsTable(t *testing.T) {
 	h := newHarness(t, true)
 	h.store.definitions[defID] = store.Definition{
 		ID: defID, Name: "probe-dns", SourceSelection: "all",
 		DestinationKind: "target", DestinationTargetID: targetID,
-		CheckType: "dns", Plane: "pod", Enabled: true,
+		CheckType: "tcp", Plane: "pod", Enabled: true,
 	}
 	h.store.targets[targetID] = store.Target{ID: targetID, Name: "corp-dns", Kind: "host", Address: "10.9.9.9:53"}
 	h.seedSchedule(kindInterval, int64(oneMinute))

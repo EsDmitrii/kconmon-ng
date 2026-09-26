@@ -178,8 +178,8 @@ func TestTargetsWithoutStoreReturns503(t *testing.T) {
 		// Targets are CONFIGURATION and get no in-memory fallback, so the
 		// only actionable remedy is the Helm value that turns the database
 		// on -- the detail must name it.
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -386,7 +386,7 @@ func TestTargetsDeleteInUseNamesTargetAndDefinitions(t *testing.T) {
 	for _, name := range []string{"edge-icmp", "edge-tcp"} {
 		if _, err := checks.CreateDefinition(context.Background(), store.DefinitionInput{
 			Name: name, SourceSelection: "all", DestinationKind: "target",
-			DestinationTargetID: created.ID, CheckType: "icmp", Plane: "node", Enabled: true,
+			DestinationTargetID: created.ID, CheckType: "icmp", Plane: "pod", Enabled: true,
 		}); err != nil {
 			t.Fatalf("seed definition %s: %v", name, err)
 		}

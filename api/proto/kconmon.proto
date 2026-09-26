@@ -43,7 +43,7 @@ message AgentMeta {
   string zone = 5;
   map<string, string> labels = 6;
   // capabilities are opt-in feature flags this agent build supports, e.g. "external-checks"; a
-  // pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs.
+  // pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs one.
   repeated string capabilities = 7;
   // Listener ports this agent serves PEERS on. 0 = not reported (an agent older
   // than this field); the probing agent then falls back to its OWN configured
@@ -64,6 +64,8 @@ message RegisterResponse {
   // agent is the resolved metadata for the registering agent (e.g. zone
   // enriched by the controller from the node's failure-domain label).
   AgentMeta agent = 4;
+  // fleet_echoes: see PeerUpdate.fleet_echoes.
+  repeated EchoEndpoint fleet_echoes = 5;
 }
 
 message HeartbeatRequest {
@@ -88,6 +90,18 @@ message PeerUpdate {
   UpdateType type = 1;
   repeated AgentMeta peers = 2;
   google.protobuf.Timestamp timestamp = 3;
+  // fleet_echoes is the echo endpoint of every registered agent, the receiver included, whatever
+  // the probe plan: a datagram from one is another responder's echo, never a probe, so the receiver
+  // does not answer it. Empty from controllers older than 2.5.0; the agent then knows its planned
+  // peers' echoes only.
+  repeated EchoEndpoint fleet_echoes = 4;
+}
+
+// EchoEndpoint is where a registered agent's UDP echo listens: its advertised address and echo
+// port (0 = an agent older than 2.4.0, which echoes on the fleet-wide port).
+message EchoEndpoint {
+  string address = 1;
+  uint32 port = 2;
 }
 
 message WatchTasksRequest {
@@ -126,9 +140,9 @@ message ExternalTarget {
 
 message TaskRequest {
   string task_id = 1;
-  string check_type = 2; // tcp|udp|icmp|dns|http|mtr
+  string check_type = 2; // tcp|udp|icmp|pmtu|dns|http|mtr
   AgentMeta target = 3;
-  string plane = 4; // pod|host
+  string plane = 4; // always "pod"; agents probe the pod network only and do not read it
   // external_target is set INSTEAD OF target (field 3) when the destination is not a registered
   // agent.
   ExternalTarget external_target = 5;
@@ -199,7 +213,7 @@ message TopologyChanged {
 // /api/v1/diagnostics); it is NOT the continuous background probes.
 message CheckObserved {
   string task_id = 1;
-  string check_type = 2; // tcp|udp|icmp|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
+  string check_type = 2; // tcp|udp|icmp|pmtu|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
   string source_node = 3;
   string destination_node = 4;
   string plane = 5;
@@ -233,11 +247,12 @@ message MTRCompleted {
 
 // DiagnosticProgress fires at dispatch-start and on non-terminal-failure
 // paths; the terminal success outcome is a CheckObserved or MTRCompleted
-// instead, never a second DiagnosticProgress.
+// instead. Only undelivered follows one: the check ran, but its HTTP
+// response could not be written.
 message DiagnosticProgress {
   string task_id = 1;
   string check_type = 2;
   string source_node = 3;
   string destination_node = 4;
-  string state = 5; // dispatched|timeout|error
+  string state = 5; // dispatched|timeout|error|undelivered
 }

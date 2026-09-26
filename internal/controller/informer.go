@@ -73,10 +73,6 @@ func (nw *NodeWatcher) GetNodes() []model.NodeInfo {
 	return nodes
 }
 
-func (nw *NodeWatcher) GetNodeZone(nodeName string) string {
-	return nw.ZoneFor(nodeName)
-}
-
 // ZoneFor returns the failure-domain zone for nodeName, or "" if the node is
 // unknown or has no zone label.
 func (nw *NodeWatcher) ZoneFor(nodeName string) string {

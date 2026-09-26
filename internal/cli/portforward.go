@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream" //nolint:staticcheck // SA1019: spdy.NewDialer and portforward.NewOnAddresses still take this Dialer
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -19,8 +20,8 @@ import (
 	"k8s.io/client-go/transport/spdy"
 )
 
-// controllerPort is the controller's HTTP API port inside the pod.
-const controllerPort = 8080
+// defaultControllerPort is config.httpPort's default, used when the pod names no "http" port.
+const defaultControllerPort = 8080
 
 // controllerLabelSelector matches controller pods managed by the chart.
 const controllerLabelSelector = "app.kubernetes.io/name=kconmon-ng,app.kubernetes.io/component=controller"
@@ -33,6 +34,9 @@ const portForwardReadyTimeout = 30 * time.Second
 type Connection struct {
 	BaseURL string
 	Close   func()
+	// Next connects to the next running controller pod, for when this one answered as a standby; nil
+	// when there is none.
+	Next func(ctx context.Context) (*Connection, error)
 }
 
 // Connector opens a Connection to a controller. It is the narrow seam that
@@ -69,8 +73,8 @@ func (k *kubeConnector) restConfig() (*rest.Config, error) {
 	return cfg.ClientConfig()
 }
 
-// Connect finds a running controller pod (searching all namespaces when one was
-// not given) and port-forwards a random local port to it.
+// Connect finds the running controller pods (searching all namespaces when one was not given) and
+// port-forwards a random local port to the first; Connection.Next moves on to the others.
 func (k *kubeConnector) Connect(ctx context.Context) (*Connection, error) {
 	cfg, err := k.restConfig()
 	if err != nil {
@@ -81,17 +85,31 @@ func (k *kubeConnector) Connect(ctx context.Context) (*Connection, error) {
 		return nil, fmt.Errorf("building kubernetes client: %w", err)
 	}
 
-	pod, err := k.findControllerPod(ctx, clientset)
+	pods, err := k.controllerPods(ctx, clientset)
 	if err != nil {
 		return nil, err
 	}
 
-	return startPortForward(ctx, cfg, clientset, pod)
+	return connectInOrder(ctx, pods, func(ctx context.Context, pod *corev1.Pod) (*Connection, error) {
+		return startPortForward(ctx, cfg, clientset, pod)
+	})
 }
 
-// findControllerPod locates a running controller pod. When a namespace is set
-// it searches only there; otherwise it searches all namespaces.
-func (k *kubeConnector) findControllerPod(ctx context.Context, clientset kubernetes.Interface) (*corev1.Pod, error) {
+// connectInOrder connects to pods[0] and hands the rest to Connection.Next.
+func connectInOrder(ctx context.Context, pods []*corev1.Pod, dial func(context.Context, *corev1.Pod) (*Connection, error)) (*Connection, error) {
+	conn, err := dial(ctx, pods[0])
+	if err != nil {
+		return nil, err
+	}
+	if others := pods[1:]; len(others) > 0 {
+		conn.Next = func(ctx context.Context) (*Connection, error) { return connectInOrder(ctx, others, dial) }
+	}
+	return conn, nil
+}
+
+// controllerPods lists the running controller pods, the Lease holder first when a Lease names one.
+// When a namespace is set it searches only there; otherwise it searches all namespaces.
+func (k *kubeConnector) controllerPods(ctx context.Context, clientset kubernetes.Interface) ([]*corev1.Pod, error) {
 	ns := k.namespace // "" means all namespaces
 	pods, err := clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: controllerLabelSelector,
@@ -115,28 +133,46 @@ func (k *kubeConnector) findControllerPod(ctx context.Context, clientset kuberne
 		return nil, fmt.Errorf("no running kconmon-ng controller pod found in %s (selector %q)", where, controllerLabelSelector)
 	}
 
-	if leader := leaseHolder(ctx, clientset, ns, running); leader != nil {
-		return leader, nil
+	first := leaseHolder(ctx, clientset, running)
+	if first == nil {
+		first = running[0]
 	}
-	return running[0], nil
+	// Only the first pod's own replicas follow it: without -n the list spans every namespace.
+	ordered := []*corev1.Pod{first}
+	for _, p := range running {
+		if p != first && p.Namespace == first.Namespace {
+			ordered = append(ordered, p)
+		}
+	}
+	return ordered, nil
 }
 
-// leaseHolder returns the running controller pod named by a controller Lease. Only the leader
-// answers topology and diagnostics; a standby returns 503, which this CLI does not retry. A missing
-// or unreadable Lease is not an error: single-replica installs run without leader election.
-func leaseHolder(ctx context.Context, clientset kubernetes.Interface, ns string, running []*corev1.Pod) *corev1.Pod {
-	leases, err := clientset.CoordinationV1().Leases(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil
+// leaseHolder returns the running controller pod named by a controller Lease, reading Leases only in
+// the namespaces those pods run in. Only the leader answers topology and diagnostics; a standby
+// returns 503, and withClient then moves to the next pod. A missing or unreadable Lease is not an
+// error: single-replica installs run without leader election, and a caller without leases RBAC
+// still reaches the leader through that retry.
+func leaseHolder(ctx context.Context, clientset kubernetes.Interface, running []*corev1.Pod) *corev1.Pod {
+	var namespaces []string
+	for _, p := range running {
+		if !slices.Contains(namespaces, p.Namespace) {
+			namespaces = append(namespaces, p.Namespace)
+		}
 	}
-	for i := range leases.Items {
-		holder := leases.Items[i].Spec.HolderIdentity
-		if holder == nil {
+	for _, ns := range namespaces {
+		leases, err := clientset.CoordinationV1().Leases(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
 			continue
 		}
-		for _, p := range running {
-			if p.Name == *holder && p.Namespace == leases.Items[i].Namespace {
-				return p
+		for i := range leases.Items {
+			holder := leases.Items[i].Spec.HolderIdentity
+			if holder == nil {
+				continue
+			}
+			for _, p := range running {
+				if p.Name == *holder && p.Namespace == ns {
+					return p
+				}
 			}
 		}
 	}
@@ -157,18 +193,44 @@ func startPortForward(ctx context.Context, cfg *rest.Config, clientset kubernete
 		URL()
 
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, reqURL)
+	return forward(ctx, dialer, controllerHTTPPort(pod))
+}
 
-	local, err := freeLocalPort(ctx)
-	if err != nil {
-		return nil, err
+// controllerHTTPPort is the port the controller's HTTP API listens on inside pod: the chart publishes
+// config.httpPort as the controller container's port named "http".
+func controllerHTTPPort(pod *corev1.Pod) int {
+	fallback := 0
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		for _, p := range c.Ports {
+			if p.Name != "http" || p.ContainerPort <= 0 {
+				continue
+			}
+			if c.Name == "controller" {
+				return int(p.ContainerPort)
+			}
+			if fallback == 0 {
+				fallback = int(p.ContainerPort)
+			}
+		}
 	}
+	if fallback != 0 {
+		return fallback
+	}
+	return defaultControllerPort
+}
 
+// forward opens a port-forward through dialer to remotePort and returns once the local end listens.
+// The forwarder binds local port 0 itself and reports what it got, so no other process can take the
+// port between choosing and binding it. Only 127.0.0.1 is bound because that is what BaseURL names:
+// "localhost" would also bind ::1 and succeed when only one of the two was free.
+func forward(ctx context.Context, dialer httpstream.Dialer, remotePort int) (*Connection, error) {
 	stopCh := make(chan struct{})
 	readyCh := make(chan struct{})
 	errCh := make(chan error, 1)
 
-	ports := []string{fmt.Sprintf("%d:%d", local, controllerPort)}
-	fw, err := portforward.New(dialer, ports, stopCh, readyCh, io.Discard, io.Discard)
+	ports := []string{fmt.Sprintf("0:%d", remotePort)}
+	fw, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, ports, stopCh, readyCh, io.Discard, io.Discard)
 	if err != nil {
 		close(stopCh)
 		return nil, fmt.Errorf("creating port-forward: %w", err)
@@ -180,32 +242,31 @@ func startPortForward(ctx context.Context, cfg *rest.Config, clientset kubernete
 		}
 	}()
 
+	timer := time.NewTimer(portForwardReadyTimeout)
+	defer timer.Stop()
 	select {
 	case <-readyCh:
 	case ferr := <-errCh:
 		close(stopCh)
 		return nil, fmt.Errorf("establishing port-forward: %w", ferr)
-	case <-time.After(portForwardReadyTimeout):
+	case <-ctx.Done():
+		close(stopCh)
+		return nil, ctx.Err()
+	case <-timer.C:
 		close(stopCh)
 		return nil, errors.New("timed out establishing port-forward to controller")
 	}
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", local)
+	bound, err := fw.GetPorts()
+	if err != nil {
+		close(stopCh)
+		return nil, fmt.Errorf("reading the port-forward's local port: %w", err)
+	}
+	if len(bound) == 0 || bound[0].Local == 0 {
+		close(stopCh)
+		return nil, errors.New("port-forward is ready but reports no local port")
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", bound[0].Local)
 	var closeOnce sync.Once
 	return &Connection{BaseURL: baseURL, Close: func() { closeOnce.Do(func() { close(stopCh) }) }}, nil
-}
-
-// freeLocalPort asks the OS for a free TCP port on the loopback interface.
-func freeLocalPort(ctx context.Context) (int, error) {
-	var lc net.ListenConfig
-	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("finding free local port: %w", err)
-	}
-	defer func() { _ = l.Close() }()
-	addr, ok := l.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, errors.New("unexpected listener address type")
-	}
-	return addr.Port, nil
 }

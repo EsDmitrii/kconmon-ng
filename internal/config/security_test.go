@@ -15,7 +15,7 @@ func TestDefaultConfigExternalGatewayDisabled(t *testing.T) {
 	if cfg.Controller.ExternalGateway.Port != 9443 {
 		t.Errorf("externalGateway.port default = %d, want 9443", cfg.Controller.ExternalGateway.Port)
 	}
-	if cfg.Agent.TLS.Enabled() {
+	if cfg.Agent.TLS.InUse() {
 		t.Errorf("default agent.tls must be the zero (plaintext) block, got %+v", cfg.Agent.TLS)
 	}
 	if cfg.Agent.BootstrapTokenFile != "" {
@@ -110,13 +110,18 @@ func TestAgentSecurityValidation(t *testing.T) {
 		{"empty block is plaintext", AgentConfig{}, ""},
 		{"ca only", AgentConfig{TLS: AgentTLSConfig{CAFile: "/etc/ca.pem"}}, ""},
 		{"serverName only", AgentConfig{TLS: AgentTLSConfig{ServerName: "gw.example.com"}}, ""},
+		// A gateway behind a publicly trusted certificate, token-only: nothing to name but the switch.
+		{"enabled alone with token", AgentConfig{
+			TLS:                AgentTLSConfig{Enabled: true},
+			BootstrapTokenFile: "/etc/token",
+		}, ""},
 		{"full mTLS with token", AgentConfig{
 			TLS:                AgentTLSConfig{CAFile: "/etc/ca.pem", CertFile: "/etc/c.pem", KeyFile: "/etc/k.pem"},
 			BootstrapTokenFile: "/etc/token",
 		}, ""},
 		{"cert without key", AgentConfig{TLS: AgentTLSConfig{CertFile: "/etc/c.pem"}}, "set together"},
 		{"key without cert", AgentConfig{TLS: AgentTLSConfig{KeyFile: "/etc/k.pem"}}, "set together"},
-		{"token without tls", AgentConfig{BootstrapTokenFile: "/etc/token"}, "requires the agent.tls block"},
+		{"token without tls", AgentConfig{BootstrapTokenFile: "/etc/token"}, "set agent.tls.enabled"},
 	}
 
 	for _, tt := range tests {
@@ -140,12 +145,22 @@ func TestAgentSecurityValidation(t *testing.T) {
 	}
 }
 
+// A caFile blanked in YAML decodes to the zero TLS block, which dials plaintext, so the token is
+// refused with the reason spelled out.
+func TestLoadRefusesATokenWithOnlyAnEmptyCAFile(t *testing.T) {
+	err := NewLoader(writeConfig(t, "agent:\n  tls:\n    caFile: \"\"\n  bootstrapTokenFile: /etc/token\n")).Load()
+	if err == nil || !strings.Contains(err.Error(), "an empty caFile alone leaves the dial plaintext") {
+		t.Fatalf("Load error = %v, want the token refused because an empty caFile alone is plaintext", err)
+	}
+}
+
 // Pins the exact yaml spellings on both sides: the loader decodes with KnownFields, so a drifted
 // key in chart or packaging fails HERE, not in a cluster.
 func TestLoadSecurityBlocksFromFile(t *testing.T) {
 	content := `
 agent:
   tls:
+    enabled: true
     caFile: /etc/kconmon-ng/ca.pem
     certFile: /etc/kconmon-ng/agent.pem
     keyFile: /etc/kconmon-ng/agent-key.pem
@@ -167,7 +182,7 @@ controller:
 	}
 	cfg := loader.Get()
 
-	if cfg.Agent.TLS.CAFile != "/etc/kconmon-ng/ca.pem" ||
+	if !cfg.Agent.TLS.Enabled || cfg.Agent.TLS.CAFile != "/etc/kconmon-ng/ca.pem" ||
 		cfg.Agent.TLS.CertFile != "/etc/kconmon-ng/agent.pem" ||
 		cfg.Agent.TLS.KeyFile != "/etc/kconmon-ng/agent-key.pem" ||
 		cfg.Agent.TLS.ServerName != "kconmon-gw.example.com" {

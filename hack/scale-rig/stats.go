@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"runtime"
@@ -22,7 +23,7 @@ func percentile(samples []time.Duration, p float64) time.Duration {
 	sorted := make([]time.Duration, len(samples))
 	copy(sorted, samples)
 	slices.Sort(sorted)
-	rank := max(int(p/100*float64(len(sorted))+0.5)-1, 0)
+	rank := max(int(math.Ceil(p/100*float64(len(sorted))))-1, 0)
 	if rank >= len(sorted) {
 		rank = len(sorted) - 1
 	}

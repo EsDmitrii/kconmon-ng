@@ -34,8 +34,8 @@ type TopologySubject struct {
 	Labels   map[string]string
 }
 
-// TopologyChange is what a registry mutation tells its OnChange subscribers: the reason; until the
-// registry handed subscribers a bare reason string.
+// TopologyChange is what a registry mutation tells its OnChange subscribers: the reason and the
+// agents it was about.
 type TopologyChange struct {
 	Reason   string
 	Subjects []TopologySubject
@@ -63,13 +63,9 @@ type Registry struct {
 	mu     sync.RWMutex
 	agents map[string]*registeredAgent
 	ttl    time.Duration
-	/* notifyMu ORDERS the publications, which r.mu alone did not.
-	   Each mutator snapshots under r.mu and then published outside it, so two agents registering at
-	   the same instant — a DaemonSet rollout, a two-node scale-up — could publish in either order:
-	   goroutine A snapshots {A}, B snapshots {A,B}, and nothing stopped B's notify from running
-	   first. Every peer update is sent as a FULL_SYNC and applied by wholesale replacement, so the
-	   LAST word won: the fleet could be left believing in {A} alone, with B invisible to every other
-	   agent until the next change or the TTL sweep.
+	/* notifyMu orders the publications to match the mutations. Every peer update is a FULL_SYNC
+	   applied by wholesale replacement, so two concurrent registrations publishing out of order
+	   would leave the fleet on the older snapshot until the next change.
 	   ALWAYS taken BEFORE r.mu and held until the callbacks return. The other order deadlocks:
 	   notifyChange itself reads the callback list under r.mu.RLock, so a goroutine holding r.mu and
 	   waiting for notifyMu would be waiting on a goroutine holding notifyMu and waiting for r.mu. */
@@ -81,6 +77,8 @@ type Registry struct {
 type registeredAgent struct {
 	info     model.AgentInfo
 	lastSeen time.Time
+	// zoneExplicit is set when the agent registered with its own zone; UpdateZone leaves it alone.
+	zoneExplicit bool
 }
 
 func NewRegistry(ttl time.Duration) *Registry {
@@ -110,12 +108,14 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 	now := time.Now()
 	info.JoinedAt = now
 	info.LastSeen = now
-	if info.Zone == "" && r.zoneResolver != nil {
+	zoneExplicit := info.Zone != ""
+	if !zoneExplicit && r.zoneResolver != nil {
 		info.Zone = r.zoneResolver.ZoneFor(info.NodeName)
 	}
 	r.agents[info.ID] = &registeredAgent{
-		info:     info,
-		lastSeen: now,
+		info:         info,
+		lastSeen:     now,
+		zoneExplicit: zoneExplicit,
 	}
 	snapshot := r.snapshotLocked()
 	r.mu.Unlock()
@@ -130,9 +130,9 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 	return info
 }
 
-// UpdateZone sets the zone for every agent registered on nodeName and, if any
-// were changed, broadcasts a peer update to subscribers. Agents that resolve
-// their zone at registration time will keep the new value on re-registration.
+// UpdateZone sets the zone for every agent registered on nodeName without a zone of its own and, if
+// any were changed, broadcasts a peer update to subscribers. Agents that resolve their zone at
+// registration time will keep the new value on re-registration.
 func (r *Registry) UpdateZone(nodeName, zone string) {
 	/* notifyMu BEFORE r.mu, always in that order, and held across the publication: it is what makes
 	   the ORDER of the FULL_SYNC broadcasts match the order of the mutations. */
@@ -141,7 +141,7 @@ func (r *Registry) UpdateZone(nodeName, zone string) {
 	r.mu.Lock()
 	var subjects []TopologySubject
 	for _, agent := range r.agents {
-		if agent.info.NodeName == nodeName && agent.info.Zone != zone {
+		if agent.info.NodeName == nodeName && !agent.zoneExplicit && agent.info.Zone != zone {
 			agent.info.Zone = zone
 			subjects = append(subjects, TopologySubject{
 				AgentID: agent.info.ID, NodeName: nodeName, Zone: zone, Labels: agent.info.Labels,
@@ -192,16 +192,9 @@ func (r *Registry) Deregister(agentID string) {
 	}
 }
 
-/*
- * ResetQuiet drops every registered agent WITHOUT notifying subscribers.
- *
- * This is the demotion path. Reset's notification goes to the streams still attached to THIS
- * replica — the agents and consoles that have not yet noticed the leadership change — and it says
- * "every agent deregistered": each attached agent applied peers=[] wholesale, wiped its peer gauges
- * and resumed probing nothing until its own leader check finally ended the stream, while the
- * replica published one false agent_deregistered event per agent into the console's timeline. A
- * replica that is no longer the leader has nothing to announce about a fleet it no longer owns.
- */
+// ResetQuiet drops every registered agent WITHOUT notifying subscribers; it is the demotion path.
+// The streams still attached here would read a notification as "every agent deregistered" and
+// probe an empty mesh, and a replica that no longer leads has nothing to announce about the fleet.
 func (r *Registry) ResetQuiet() {
 	r.notifyMu.Lock()
 	defer r.notifyMu.Unlock()
@@ -213,31 +206,6 @@ func (r *Registry) ResetQuiet() {
 	if count > 0 {
 		slog.Info("registry cleared after losing leadership", "agents", count)
 	}
-}
-
-// Reset drops every registered agent and notifies subscribers as if each had deregistered.
-func (r *Registry) Reset() {
-	// notifyMu BEFORE r.mu, always; see the field.
-	r.notifyMu.Lock()
-	defer r.notifyMu.Unlock()
-	r.mu.Lock()
-	subjects := make([]TopologySubject, 0, len(r.agents))
-	for id, agent := range r.agents {
-		subjects = append(subjects, TopologySubject{
-			AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone, Labels: agent.info.Labels,
-		})
-	}
-	r.agents = make(map[string]*registeredAgent)
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-
-	if len(subjects) == 0 {
-		return
-	}
-
-	slog.Info("registry cleared after losing leadership", "agents", len(subjects))
-	sortSubjects(subjects)
-	r.notifyChange(snapshot, TopologyChange{Reason: reasonAgentDeregistered, Subjects: subjects})
 }
 
 func (r *Registry) Heartbeat(agentID string) bool {
@@ -285,19 +253,39 @@ func (r *Registry) Count() int {
 	return len(r.agents)
 }
 
-// GetByNodeName returns the registered agent running on nodeName. If several
-// agents share a node (rolling restart overlap), the first match is returned.
-// The bool is false when no agent is registered for that node.
+// GetByNodeName returns the registered agent running on nodeName. If several agents share a node
+// (an old pod that left without deregistering, until its TTL runs out), the most recent
+// registration wins: that is the replacement, the other one is dead. The bool is false when no
+// agent is registered for that node.
 func (r *Registry) GetByNodeName(nodeName string) (model.AgentInfo, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	var best *registeredAgent
 	for _, agent := range r.agents {
-		if agent.info.NodeName == nodeName {
-			return agent.info, true
+		if agent.info.NodeName != nodeName {
+			continue
+		}
+		if best == nil || newerRegistration(agent, best) {
+			best = agent
 		}
 	}
-	return model.AgentInfo{}, false
+	if best == nil {
+		return model.AgentInfo{}, false
+	}
+	return best.info, true
+}
+
+// newerRegistration orders agents on one node: latest JoinedAt, then latest heartbeat, then id, so
+// the choice never depends on map iteration order.
+func newerRegistration(a, b *registeredAgent) bool {
+	if !a.info.JoinedAt.Equal(b.info.JoinedAt) {
+		return a.info.JoinedAt.After(b.info.JoinedAt)
+	}
+	if !a.lastSeen.Equal(b.lastSeen) {
+		return a.lastSeen.After(b.lastSeen)
+	}
+	return a.info.ID > b.info.ID
 }
 
 func (r *Registry) EvictStale() int {
@@ -344,6 +332,25 @@ func (r *Registry) EvictStale() int {
 		r.notifyChange(snapshot, TopologyChange{Reason: reasonAgentEvicted, Subjects: subjects})
 	}
 	return evicted
+}
+
+// SetTTL changes the eviction TTL (a config reload); the next EvictStale sweep uses it.
+func (r *Registry) SetTTL(ttl time.Duration) {
+	r.mu.Lock()
+	r.ttl = ttl
+	r.mu.Unlock()
+}
+
+// WithSnapshot runs fn on the current agent list in order with every published change: it holds
+// notifyMu like the mutators, so nothing fn derives from the list can overtake, or be overtaken by, a
+// change's OnChange callbacks.
+func (r *Registry) WithSnapshot(fn func(agents []model.AgentInfo)) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	r.mu.RLock()
+	snapshot := r.snapshotLocked()
+	r.mu.RUnlock()
+	fn(snapshot)
 }
 
 func (r *Registry) OnChange(fn func(agents []model.AgentInfo, change TopologyChange)) {

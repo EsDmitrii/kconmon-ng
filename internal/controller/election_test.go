@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,7 +10,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // newElectionController builds a controller with leader election on and nothing wired to an
@@ -164,5 +168,46 @@ func TestSetLeaderDemotionDropsRegistry(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(c.metrics.ControllerLeader.WithLabelValues()); got != 0 {
 		t.Errorf("controller_leader = %v after demotion, want 0", got)
+	}
+}
+
+// On SIGTERM the lease is handed back from the election goroutine; Run must wait for that, or the
+// process exits first and the standby waits out the whole lease duration instead of one retry.
+func TestRunReleasesTheLeaseBeforeReturning(t *testing.T) {
+	client := fake.NewClientset()
+	// A real apiserver round trip, so the release is still in flight when the listeners are down.
+	client.PrependReactor("update", "leases", func(k8stesting.Action) (bool, runtime.Object, error) {
+		time.Sleep(300 * time.Millisecond)
+		return false, nil, nil
+	})
+	t.Setenv("KCONMON_NG_POD_NAMESPACE", "kconmon")
+	t.Setenv("KCONMON_NG_POD_NAME", "pod-a")
+	t.Setenv("KCONMON_NG_LEASE_NAME", "kconmon-controller")
+
+	cfg := &config.Config{MetricsPrefix: "test", HTTPPort: freePort(t), GRPCPort: freePort(t), MetricsPort: freePort(t)}
+	cfg.Controller.AgentTTL = 30 * time.Second
+	cfg.Controller.LeaderElection = true
+	c := New(cfg)
+	c.newClientset = func() (kubernetes.Interface, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+
+	waitForLeadership(t, c, true)
+	cancel()
+	select {
+	case <-runErr:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return")
+	}
+
+	lease, err := client.CoordinationV1().Leases("kconmon").Get(context.Background(), "kconmon-controller", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the lease: %v", err)
+	}
+	if h := lease.Spec.HolderIdentity; h != nil && *h != "" {
+		t.Errorf("lease holder after Run returned = %q, want released", *h)
 	}
 }

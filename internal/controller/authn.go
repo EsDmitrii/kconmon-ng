@@ -8,6 +8,7 @@ and an optional client certificate proves WHICH agent is calling. The token alon
 agents apart, so token-only mode leaves the subscription-steal attack described in grpc_server.go
 open to any token holder; that is the documented v1 trade-off, and the client CA is the fix.
 */
+
 package controller
 
 import (
@@ -18,14 +19,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -58,16 +57,21 @@ func newGatewayAuthn(tokenFile string, pinIdentity bool) (*gatewayAuthn, error) 
 }
 
 /*
-NewExternalGatewayServer builds the TLS gateway listener's grpc.Server: same keepalive contract as
-the in-cluster listener (external agents run the same client), plus transport TLS and the authn
-interceptors. The caller registers the SAME GRPCServer service instance on it — the gateway shares
-the registry, watchers and managers with the in-cluster listener, so an external agent is an
-ordinary fleet member the moment it is through the door.
+NewExternalGatewayServer builds the TLS gateway listener's grpc.Server: same keepalive pings as
+the in-cluster listener (external agents run the same client), plus transport TLS, the authn
+interceptors and the gatewayLimits on connections that have not authenticated yet. The caller
+registers the SAME GRPCServer service instance on it — the gateway shares the registry, watchers
+and managers with the in-cluster listener, so an external agent is an ordinary fleet member the
+moment it is through the door.
 
 Exported so the agent's end-to-end tests can stand up a real gateway without reaching into
 controller internals.
 */
 func NewExternalGatewayServer(gw config.ExternalGatewayConfig) (*grpc.Server, error) { //nolint:gocritic // hugeParam: value semantics intentional, config blocks are snapshots
+	return newExternalGatewayServer(gw, defaultGatewayLimits)
+}
+
+func newExternalGatewayServer(gw config.ExternalGatewayConfig, limits gatewayLimits) (*grpc.Server, error) { //nolint:gocritic // hugeParam: value semantics intentional, config blocks are snapshots
 	cert, err := tls.LoadX509KeyPair(gw.TLS.CertFile, gw.TLS.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("loading gateway certificate: %w", err)
@@ -94,16 +98,17 @@ func NewExternalGatewayServer(gw config.ExternalGatewayConfig) (*grpc.Server, er
 		return nil, fmt.Errorf("external gateway authn: %w", err)
 	}
 
+	keepaliveParams := agentKeepalive
+	keepaliveParams.MaxConnectionIdle = limits.maxIdle
+
 	return grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(tlsCfg)),
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    10 * time.Second,
-			Timeout: 5 * time.Second,
+		grpc.Creds(&gatewayCreds{
+			TransportCredentials: credentials.NewTLS(tlsCfg),
+			guard:                newGatewayConnGuard(limits),
 		}),
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             5 * time.Second,
-			PermitWithoutStream: true,
-		}),
+		grpc.ConnectionTimeout(limits.handshakeTimeout),
+		grpc.KeepaliveParams(keepaliveParams),
+		grpc.KeepaliveEnforcementPolicy(agentKeepalivePolicy),
 		grpc.ChainUnaryInterceptor(authn.unary),
 		grpc.ChainStreamInterceptor(authn.stream),
 	), nil
@@ -122,10 +127,11 @@ func (a *gatewayAuthn) unary(
 	if err := a.checkToken(ctx); err != nil {
 		return nil, err
 	}
+	markAuthenticated(ctx)
 	if err := a.checkIdentity(ctx, req); err != nil {
 		return nil, err
 	}
-	return handler(ctx, req)
+	return handler(withGatewayCaller(ctx), req)
 }
 
 func (a *gatewayAuthn) stream(
@@ -134,6 +140,7 @@ func (a *gatewayAuthn) stream(
 	if err := a.checkToken(ss.Context()); err != nil {
 		return err
 	}
+	markAuthenticated(ss.Context())
 	// The request message of a server-streaming RPC is not visible at interception time; it
 	// arrives through RecvMsg, so the identity check wraps that.
 	return handler(srv, &authnStream{ServerStream: ss, authn: a})
@@ -180,11 +187,12 @@ func (a *gatewayAuthn) checkToken(ctx context.Context) error {
 /*
 checkIdentity pins what the message CLAIMS to the certificate the transport VERIFIED.
 
-Register asserts a node name, so the cert must carry exactly that name. Everything after Register
-speaks as an agent_id, which the fleet builds as "<nodeName>-<podName>" (internal/agent/identity.go)
-— the pod half is not in the cert, so the id must merely EXTEND the certified node name with a "-"
-separated suffix. A message that carries no identity (e.g. an event subscription) passes on the
-token alone. In token-only mode this whole check is off: that is the documented v1 trade-off.
+Register asserts a node name, so the cert must carry exactly that name, and its agent id is held to
+the same rule as every later call. Everything after Register speaks as an agent_id, which the fleet
+builds as "<nodeName>-<podName>" (internal/agent/identity.go) — the pod half is not in the cert, so
+the id must merely EXTEND the certified node name with a "-" separated suffix. Every AgentRegistry
+request carries an identity; the default branch only keeps an identity-less future method from being
+refused. In token-only mode this whole check is off: that is the documented v1 trade-off.
 */
 func (a *gatewayAuthn) checkIdentity(ctx context.Context, msg any) error {
 	if !a.pinIdentity {
@@ -192,7 +200,11 @@ func (a *gatewayAuthn) checkIdentity(ctx context.Context, msg any) error {
 	}
 	switch m := msg.(type) {
 	case *pb.RegisterRequest:
-		return a.pinNodeName(ctx, m.GetAgent().GetNodeName())
+		// The registry keys the entry by agent id, so the id is pinned as well as the node name.
+		if err := a.pinNodeName(ctx, m.GetAgent().GetNodeName()); err != nil {
+			return err
+		}
+		return a.pinAgentID(ctx, m.GetAgent().GetId())
 	case agentIDCarrier:
 		return a.pinAgentID(ctx, m.GetAgentId())
 	default:
@@ -239,8 +251,14 @@ func certIdentities(ctx context.Context) ([]string, error) {
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "no peer information on the connection")
 	}
-	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+	var tlsInfo credentials.TLSInfo
+	switch info := p.AuthInfo.(type) {
+	case gatewayAuthInfo:
+		tlsInfo = info.TLSInfo
+	case credentials.TLSInfo:
+		tlsInfo = info
+	}
+	if len(tlsInfo.State.PeerCertificates) == 0 {
 		return nil, status.Error(codes.Unauthenticated, "identity pinning requires a client certificate")
 	}
 	leaf := tlsInfo.State.PeerCertificates[0]

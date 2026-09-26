@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -43,6 +45,14 @@ const auditBufferSize = 64
 // auditWriteTimeout bounds one InsertAuditEntry call the drain goroutine makes.
 const auditWriteTimeout = 5 * time.Second
 
+// auditSensitiveSendWait is how long a row on an auditSensitiveRoute waits for room in a full
+// buffer before it is dropped.
+const auditSensitiveSendWait = 2 * time.Second
+
+// auditQueuedPerSubject bounds the cheap rows (auditRowTier) one subject may have waiting in the
+// buffer at once.
+const auditQueuedPerSubject = auditBufferSize / 4
+
 // emptyDetail is the audit row's default "nothing allow-listed" detail.
 var emptyDetail = json.RawMessage(`{}`)
 
@@ -55,11 +65,16 @@ type auditJob struct {
 	outcome     string
 	remoteAddr  string
 	detail      json.RawMessage
+	// budget is the auditQueued key a cheap row counts against while it waits; "" for the others.
+	budget string
+	// failedSensitive marks a cheap row on a sensitive route, which waits in its own share.
+	failedSensitive bool
 }
 
 // runAuditDrain is the one goroutine draining s.auditCh.
 func (s *Server) runAuditDrain() {
 	for job := range s.auditCh {
+		auditQueued.release(s.auditCh, job.budget, job.failedSensitive)
 		ctx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
 		_, err := s.audit.InsertAuditEntry(ctx, job.subjectKind, job.subjectID, job.action, job.resource, job.outcome, job.remoteAddr, job.detail)
 		cancel()
@@ -76,46 +91,198 @@ func (s *Server) recordAudit(r *http.Request, subject authz.Subject, outcome str
 		return
 	}
 	pattern := chi.RouteContext(r.Context()).RoutePattern()
-	job := auditJob{
-		subjectKind: string(subject.Kind),
-		subjectID:   subject.ID,
-		action:      r.Method + " " + pattern,
-		resource:    auditResource(r),
-		outcome:     outcome,
-		remoteAddr:  r.RemoteAddr,
-		detail:      withSubjectDisplay(detail, subject.ID, subject.DisplayName),
+	remoteAddr := r.RemoteAddr
+	ip := clientIP(r, s.trustedProxies)
+	if ip != remoteAddrHost(r.RemoteAddr) {
+		// Only a trusted proxy's forwarding header gets here; the direct peer keeps its port.
+		remoteAddr = ip
 	}
-	/* A DENIAL is the cheapest row to produce and the least valuable to keep, and that asymmetry was
-	   a hole: a flood of rejected requests (no rate limit outside login and runs) kept this buffer
-	   full, so an admin revoking a role binding at the same moment had their row silently dropped —
-	   the one record of the most sensitive operation in the console, gone, behind a warning line
-	   that carries neither the subject nor the resource.
-	   So denials yield: they are dropped once the buffer is half full, leaving the other half for
-	   rows that describe something that actually HAPPENED.
-
-	   The first cut of this rule only made CREDENTIAL-LESS denials yield (`subject.Kind == ""`), and
-	   that was two holes at once: any subject holding the least-privileged token in the system was
-	   exempt and could still fill the buffer, and in anonymous mode Kind is "anonymous" rather than
-	   "" — so on the chart's own demo default the rule never fired for anyone. The yield now keys on
-	   what the row IS, not on who produced it, and a denial on one of the sensitive routes keeps the
-	   full buffer: refused attempts at RBAC, tokens, import and export are exactly the ones an
-	   investigation needs. */
-	if outcome == auditOutcomeDenied && !auditSensitiveRoute(pattern) && len(s.auditCh) >= cap(s.auditCh)/2 {
-		s.metrics.AuditDropped.WithLabelValues().Inc()
-		s.auditDropped.Add(1)
+	if subject.Kind == "" && outcome != auditOutcomeAllowed && !s.credentialLessRowAdmitted(r.Context(), ip) {
+		s.countAuditDrop()
 		return
 	}
-
-	select {
-	case s.auditCh <- job:
-	default:
-		s.metrics.AuditDropped.WithLabelValues().Inc()
-		// Counted locally as well as in the metric: flushAudit reports the
-		// total in the pod's own logs at shutdown, for the case where nobody
-		// scrapes this replica again before it goes away.
-		s.auditDropped.Add(1)
-		slog.Warn("httpapi: audit buffer full, dropping entry", "action", job.action, "outcome", job.outcome)
+	job := auditJob{
+		subjectKind: string(subject.Kind),
+		// A header-mode identity is whatever bytes the proxy sent, and a text column refuses invalid UTF-8.
+		subjectID:  sanitizeAuditText(subject.ID),
+		action:     r.Method + " " + pattern,
+		resource:   auditResource(r),
+		outcome:    outcome,
+		remoteAddr: remoteAddr,
+		detail:     withSubjectDisplay(detail, subject.ID, subject.DisplayName),
 	}
+	cheap, sensitive := auditRowTier(outcome, subject.Kind, r.Method, pattern)
+	if cheap {
+		job.budget = auditBudgetKey(subject, ip)
+		job.failedSensitive = sensitive
+	}
+	if auditQueued.admit(s.auditCh, job, auditQueueLimit(cheap, sensitive, cap(s.auditCh))) {
+		return
+	}
+	if cheap {
+		// Cheap rows are dropped by design once their share is used up; the counter still sees them.
+		s.countAuditDrop()
+		return
+	}
+	if sensitive {
+		// A sensitive row waits a moment for the drain instead of being dropped outright.
+		timer := time.NewTimer(auditSensitiveSendWait)
+		defer timer.Stop()
+		select {
+		case s.auditCh <- job:
+			return
+		case <-timer.C:
+		}
+	}
+	s.countAuditDrop()
+	slog.Warn("httpapi: audit buffer full, dropping entry", "action", job.action, "outcome", job.outcome)
+}
+
+// countAuditDrop counts a dropped row in the metric and locally: flushAudit reports the local total in
+// the pod's own logs at shutdown, for when nobody scrapes this replica again before it goes away.
+func (s *Server) countAuditDrop() {
+	s.metrics.AuditDropped.WithLabelValues().Inc()
+	s.auditDropped.Add(1)
+}
+
+/*
+auditRowTier sorts a row for the buffer, which is small and shared by every caller of this replica.
+
+A row is CHEAP when anyone can produce it at will: a failed request (denied, or a 4xx/5xx after
+authorize passed, such as a viewer's PromQL answered 429) whoever sent it, and any row of a caller with
+no credentials or in anonymous mode. One subject has at most auditQueuedPerSubject cheap rows waiting.
+
+A row is SENSITIVE on the routes that carry authority (auditSensitiveRoute) and for a sign-in or
+password change that succeeded, the row a flood of failed ones would otherwise hide.
+
+auditQueueLimit turns the two into a share of the buffer, so that no flood pushes out the rows that
+describe a change, and no stream of changes pushes out the record of who probed for authority.
+*/
+func auditRowTier(outcome string, kind authz.SubjectKind, method, pattern string) (cheap, sensitive bool) {
+	if outcome == auditOutcomeAllowed && auditCredentialRoutes[method+" "+pattern] {
+		return false, true
+	}
+	cheap = outcome != auditOutcomeAllowed || kind == "" || kind == authz.SubjectAnonymous
+	return cheap, auditSensitiveRoute(pattern)
+}
+
+/*
+auditQueueLimit is how many rows may already be waiting for a row of this tier to join them.
+
+Cheap rows on sensitive routes wait in a share of their own, an eighth of the buffer, and are counted
+only against it: they take nothing from the other tiers, and the other tiers cannot take their share.
+Every other row is measured against the rows waiting outside that share: cheap rows use at most half,
+allowed rows on ordinary routes three quarters, and sensitive allowed rows the rest, for which they
+also wait auditSensitiveSendWait before they are dropped.
+*/
+func auditQueueLimit(cheap, sensitive bool, capacity int) int {
+	switch {
+	case cheap && sensitive:
+		return capacity / 8
+	case cheap:
+		return capacity / 2
+	case !sensitive:
+		return capacity - capacity/4
+	default:
+		return capacity
+	}
+}
+
+// auditCredentialLessPerMinute is how many failed rows one client address without credentials may add
+// to the audit log per minute. It is above the default per-address sign-in budget, so a sign-in the
+// limiter admits is always recorded; past it the rows are counted as dropped.
+const auditCredentialLessPerMinute = 120
+
+// credentialLessRowAdmitted spends one of clientIP's auditCredentialLessPerMinute rows. Such a row costs
+// its sender nothing, so its rate is bounded where it is written, not only where it waits; a KV error
+// records the row.
+func (s *Server) credentialLessRowAdmitted(ctx context.Context, clientIP string) bool {
+	if s.kv == nil {
+		return true
+	}
+	n, err := s.kv.IncrWithTTL(ctx, "audit:nocred:"+rateLimitAddr(clientIP), rateLimitWindow)
+	return err != nil || n <= auditCredentialLessPerMinute
+}
+
+// auditBudgetKey names whose auditQueuedPerSubject budget a cheap row spends: the credential for a
+// signed-in caller, the client address for everyone else.
+func auditBudgetKey(subject authz.Subject, clientAddr string) string { //nolint:gocritic // Subject is a value type by design
+	if subject.Kind == "" || subject.Kind == authz.SubjectAnonymous {
+		return "addr:" + rateLimitAddr(clientAddr)
+	}
+	return string(subject.Kind) + ":" + subject.ID
+}
+
+// auditQueued counts the cheap rows each subject has waiting, and the failed rows on sensitive routes,
+// per audit buffer. It is keyed by the buffer's channel so every Server keeps its own counts; an entry
+// exists only while its rows wait.
+var auditQueued = &auditQueueLedger{waiting: map[auditQueuedKey]int{}, failedSensitive: map[chan auditJob]int{}}
+
+type auditQueuedKey struct {
+	ch     chan auditJob
+	budget string
+}
+
+type auditQueueLedger struct {
+	mu              sync.Mutex
+	waiting         map[auditQueuedKey]int
+	failedSensitive map[chan auditJob]int
+}
+
+// admit queues job without blocking when fewer than limit rows of its reckoning are waiting (see
+// auditQueueLimit) and job's budget, if it has one, is not spent. The check and the send share one
+// lock, so concurrent callers cannot overshoot the limit; only the drain empties the channel meanwhile.
+func (l *auditQueueLedger) admit(ch chan auditJob, job auditJob, limit int) bool { //nolint:gocritic // hugeParam: sent by value anyway
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	waiting := len(ch) - l.failedSensitive[ch]
+	if job.failedSensitive {
+		waiting = l.failedSensitive[ch]
+	}
+	if waiting >= limit {
+		return false
+	}
+	key := auditQueuedKey{ch: ch, budget: job.budget}
+	if job.budget != "" && l.waiting[key] >= auditQueuedPerSubject {
+		return false
+	}
+	select {
+	case ch <- job:
+	default:
+		return false
+	}
+	if job.budget != "" {
+		l.waiting[key]++
+	}
+	if job.failedSensitive {
+		l.failedSensitive[ch]++
+	}
+	return true
+}
+
+// release returns a row's place in the counts when the drain takes it off ch.
+func (l *auditQueueLedger) release(ch chan auditJob, budget string, failedSensitive bool) {
+	if budget == "" && !failedSensitive {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if failedSensitive {
+		if l.failedSensitive[ch] <= 1 {
+			delete(l.failedSensitive, ch)
+		} else {
+			l.failedSensitive[ch]--
+		}
+	}
+	if budget == "" {
+		return
+	}
+	key := auditQueuedKey{ch: ch, budget: budget}
+	if l.waiting[key] <= 1 {
+		delete(l.waiting, key)
+		return
+	}
+	l.waiting[key]--
 }
 
 /*
@@ -134,6 +301,14 @@ func auditSensitiveRoute(pattern string) bool {
 	return false
 }
 
+// auditCredentialRoutes are the public routes that verify a credential; their successful rows are kept
+// like a sensitive route's, while their failures still yield.
+var auditCredentialRoutes = map[string]bool{
+	"POST /api/v1/auth/login":        true,
+	"POST /api/v1/auth/password":     true,
+	"GET " + config.OIDCCallbackPath: true,
+}
+
 var auditSensitivePrefixes = []string{
 	"/api/v1/rbac",
 	"/api/v1/tokens",
@@ -143,32 +318,17 @@ var auditSensitivePrefixes = []string{
 	"/api/v1/audit",
 }
 
-// auditedReads are the SAFE requests worth a row of their own. Auditing was keyed on the HTTP verb,
-// so the single highest-value read in the API — the export, which is every probe address, every
-// webhook URL, every alert expression and, for a caller holding rbac:manage, the whole role map —
-// left no trace at all. A stolen token could dump it and the log an operator investigates with
-// showed nothing.
-// GET /api/v1/audit is deliberately NOT here: the console's own audit page polls it, and a row per
-// page view would be an audit log mostly about being read. The export is a single deliberate act.
+// auditedReads are the safe requests worth a row of their own: the export hands out every probe
+// address, webhook URL and alert expression, and for rbac:manage the whole role map. GET /api/v1/audit
+// is not here: the audit page polls it, and a row per page view would drown the log in its own reads.
 var auditedReads = map[string]bool{
 	"GET /api/v1/export": true,
 }
 
-/*
-auditResource extracts the one path parameter (name or id) this package's mutating routes carry,
-when they carry one at all — SANITISED, because the value is the caller's and the row is not.
-
-It used to be copied verbatim into audit_log.resource. PostgreSQL cannot store a NUL in a text
-column, so the INSERT failed and the drain logged a warning and moved on: appending %00 to any id
-deleted that request's audit row. The sharp case is the DENIED leg — middleware_auth records a
-denial through this same function — so a refused probe of /api/v1/rbac/* or /api/v1/tokens/*, the
-routes auditSensitiveRoute exists to guarantee are never dropped, became invisible to the caller's
-own choosing. That is the exact property stripJSONNULs was written to defend for the body; the path
-parameter had no equivalent.
-
-Sanitised rather than rejected here: by the time this runs the request has been served, and a row
-that names a mangled resource is worth immeasurably more than no row.
-*/
+// auditResource extracts the one path parameter (name or id) this package's mutating routes carry,
+// sanitised: PostgreSQL refuses a NUL in a text column, so a raw value would let the caller drop their
+// own row, denied probes included. By the time this runs the request is served, so it is sanitised
+// rather than refused.
 func auditResource(r *http.Request) string {
 	if name := chi.URLParam(r, "name"); name != "" {
 		return sanitizeAuditText(name)
@@ -176,11 +336,11 @@ func auditResource(r *http.Request) string {
 	return sanitizeAuditText(chi.URLParam(r, "id"))
 }
 
-// sanitizeAuditText replaces every control character with U+FFFD, so a value the caller chose can
-// never make a row unstorable. The substitution is visible on purpose: a reader of the audit log
-// should be able to see that the input carried something it should not have.
+// sanitizeAuditText replaces every control character and every invalid UTF-8 byte with U+FFFD, so a
+// value the caller chose can never make a row unstorable. The substitution is visible on purpose: a
+// reader of the audit log should be able to see that the input carried something it should not have.
 func sanitizeAuditText(v string) string {
-	if strings.IndexFunc(v, unicode.IsControl) < 0 {
+	if !invalidParamText(v) {
 		return v
 	}
 	return strings.Map(func(r rune) rune {
@@ -192,8 +352,7 @@ func sanitizeAuditText(v string) string {
 }
 
 // auditDetailAllowlist maps "METHOD route-pattern" to the top-level JSON body keys permitted into
-// an audit row's detail column; a mutating route with NO entry here -- or whose body fails to
-// decode as a JSON object.
+// an audit row's detail column; a route with no entry, or a body that is not a JSON object, records {}.
 var auditDetailAllowlist = map[string][]string{
 	"POST /api/v1/auth/login":    {"username"},
 	"POST /api/v1/rbac/roles":    {"name", "permissions"},
@@ -202,9 +361,8 @@ var auditDetailAllowlist = map[string][]string{
 	// Users: who was created with which role, and whether someone was disabled. The password NEVER.
 	"POST /api/v1/users":       {"username", "displayName", "role"},
 	"PATCH /api/v1/users/{id}": {"disabled", "role"},
-	// destinationKind joined in : a closed three-value enum that tells an auditor whether a run probed
-	// the mesh or something outside it; the external address and target id stay excluded for the same
-	// reason sources/destinations.
+	// destinationKind is a closed enum saying whether the run probed the mesh; addresses and target ids
+	// stay out, as sources and destinations do.
 	"POST /api/v1/runs": {"type", "plane", "destinationKind"},
 	// Targets: "name" and "kind" only, NEVER "address".
 	"POST /api/v1/targets":     {"name", "kind"},
@@ -219,17 +377,15 @@ var auditDetailAllowlist = map[string][]string{
 	"PUT /api/v1/schedules/{id}": {"definitionId", "kind", "enabled"},
 	// Annotations: "scope" and NOTHING else.
 	"POST /api/v1/annotations": {"scope"},
-	// Incidents: "title", "scope" and "status" — what was opened, about what, and where it stands.
-	"POST /api/v1/incidents": {"title", "scope", "status"},
-	// PATCH allow-lists "status" ALONE; note that "status" is present here even though POST never
-	// accepts.
+	// Incidents: what was opened and about what; PATCH records the status alone.
+	"POST /api/v1/incidents":       {"title", "scope"},
 	"PATCH /api/v1/incidents/{id}": {"status"},
 	// Maintenance: the SCOPE alone, on the annotations precedent.
 	"POST /api/v1/maintenance": {"scope"},
-	// Two bans, both absolute: - "secret" NEVER.
+	// Webhooks: never "secret" or "url"; the url may carry a token of its own.
 	"POST /api/v1/webhooks":     {"name", "events"},
 	"PUT /api/v1/webhooks/{id}": {"name", "events"},
-	// Alert rules: the rule NAME and nothing else; their key names would be safe.
+	// Alert rules: the name only.
 	"POST /api/v1/alert-rules":     {"name"},
 	"PUT /api/v1/alert-rules/{id}": {"name"},
 	// Import: the FOREIGN OBJECT's name, which is the whole body.
@@ -251,11 +407,7 @@ var auditResultAllowlist = map[string][]string{
 		"dryRun",
 		"targets", "checkDefinitions", "checkSchedules",
 		"alertRules", "webhooks", "maintenanceWindows",
-		/* The two access-control counters, and they are not optional: an import may MINT A CUSTOM ROLE
-		   carrying rbac:manage, and without these keys that row read as six all-zero collections —
-		   "this import changed nothing" — while the access map moved. Creating the same role through
-		   POST /api/v1/rbac/roles has always been audited; this was the quieter path to it. Counts
-		   only, like every other key here: no role name, no permission string, no subject. */
+		// An import may mint a custom role, so the access-control counts are recorded too; counts only.
 		"rbacRoles", "rbacBindings",
 	},
 }
@@ -335,10 +487,7 @@ func withSubjectDisplay(detail json.RawMessage, id, displayName string) json.Raw
 		// from {} is correct either way (mergeAuditResult's reasoning).
 		_ = json.Unmarshal(detail, &merged)
 	}
-	encodedName, err := json.Marshal(name)
-	if err != nil {
-		return detail
-	}
+	encodedName, _ := json.Marshal(name) // a string always encodes
 	merged[auditSubjectDisplayKey] = boundAuditValue(encodedName)
 	encoded, err := json.Marshal(merged)
 	if err != nil {
@@ -380,13 +529,8 @@ func auditDetailFor(action string, body []byte) json.RawMessage {
 	if !ok || len(allowed) == 0 || len(body) == 0 {
 		return emptyDetail
 	}
-	/* Decoded in ORDER, matched the way encoding/json matches — not with a case-sensitive map index.
-	   The handlers decode the same body into a struct, and encoding/json resolves a body key to a
-	   struct field case-INSENSITIVELY, last occurrence winning. A map index does neither, so a body
-	   carrying {"name":"benign", ..., "Name":"real"} let the caller write one name into the object
-	   and a different one into the audit row: the sole record of a privileged mutation described an
-	   action nobody performed. DisallowUnknownFields does not help — "Name" is not unknown, it is
-	   the same field spelled differently, which is why even the strict routes were affected. */
+	// Matched in wire order and case-insensitively, last key winning, as encoding/json resolves the body
+	// the handler acts on; otherwise {"name":"a","Name":"b"} would record a name the handler never used.
 	fields, err := orderedJSONFields(body, allowed)
 	if err != nil {
 		return emptyDetail
@@ -402,59 +546,42 @@ func auditDetailFor(action string, body []byte) json.RawMessage {
 	}
 	encoded, err := json.Marshal(out)
 	if err != nil {
-		/* The row still says the detail was lost. Returning {} here made an unencodable value
-		   indistinguishable from a route that records nothing, i.e. the caller got to choose
-		   whether their own action was described. */
+		// Not {}: the row says the detail was lost, so the caller cannot choose to go undescribed.
 		return json.RawMessage(`{"unencodable":true}`)
 	}
 	if len(encoded) > auditDetailMaxBytes {
-		// Belt and braces: several bounded values can still add up. The row survives, saying so.
-		return json.RawMessage(`{"truncated":true}`)
+		// Several bounded values can still add up; the row survives, saying so.
+		return auditTruncatedDetail
 	}
 	return encoded
 }
 
-/*
- * Bounds on what one audit row may carry.
- *
- * The detail is lifted out of the REQUEST BODY before validation runs — that is the point, since a
- * refused mutation is worth recording — but nothing bounded it, so a 2 MB "name" that the handler
- * then rejected with "name is 2000000 bytes, limit is 63" was still written down in full. A handful
- * of such requests turned the DEFAULT page of GET /api/v1/audit into a multi-megabyte response, i.e.
- * a caller could make the audit log expensive to read by sending values it was never going to
- * accept. Nothing in the audit contract needs the whole value: it records what was attempted.
- */
+// Bounds on what one audit row may carry. The detail is taken from the body before validation, so a
+// refused request is recorded too; unbounded, values it was never going to accept would make the log
+// expensive to read.
 const (
 	// auditValueMaxBytes bounds ONE allow-listed value.
 	auditValueMaxBytes = 512
 	// auditDetailMaxBytes bounds the whole detail object.
 	auditDetailMaxBytes = 4 << 10
+	// auditRawValueMaxBytes bounds one allow-listed value before it is decoded: generous next to any
+	// real name, scope or title, and far below the size at which decoding it becomes a denial of service.
+	auditRawValueMaxBytes = 64 << 10
 )
 
-/*
- * boundRawAuditValue caps a value on its RAW BYTES, before anything decodes it.
- *
- * The member bound above counts TOP-LEVEL members, so it does nothing about one member whose value
- * is enormous: `{"username":[0,0,0, ... ]}` at just under the 16 MiB request ceiling is a single
- * allow-listed member, and scrubJSONNULs then materialised it into a []any of ~5.5M elements --
- * roughly 560 MiB live for one request, on the PUBLIC login route, which OOM-killed a 256Mi console
- * pod at will. Capping the bytes first means the decode only ever runs on something small enough to
- * be worth recording, and a NUL can only hide inside a value that survived the cap.
- *
- * The shape recorded here matches boundAuditValue's own over-long marker, so a reader sees the same
- * sentence whichever bound fired.
- */
+// boundRawAuditValue caps a value on its raw bytes, before anything decodes it, so a huge allow-listed
+// member is never materialised.
 func boundRawAuditValue(v json.RawMessage) json.RawMessage {
 	if len(v) <= auditRawValueMaxBytes {
 		return v
 	}
-	return json.RawMessage(`"[truncated: ` + strconv.Itoa(len(v)) + ` bytes]"`)
+	return truncatedMarker(len(v))
 }
 
-// auditRawValueMaxBytes bounds ONE allow-listed value before it is decoded. Generous next to any
-// real name/scope/title (auditValueMaxBytes then trims to 512 for the row itself) and far below the
-// size at which decoding becomes a denial of service.
-const auditRawValueMaxBytes = 64 << 10
+// truncatedMarker is the value recorded in place of one too large to keep, whichever bound fired.
+func truncatedMarker(n int) json.RawMessage {
+	return json.RawMessage(`"[truncated: ` + strconv.Itoa(n) + ` bytes]"`)
+}
 
 // boundAuditValue truncates an over-long value to auditValueMaxBytes, keeping it VALID JSON and
 // saying that it was cut.
@@ -467,15 +594,10 @@ func boundAuditValue(v json.RawMessage) json.RawMessage {
 	var s string
 	if err := json.Unmarshal(v, &s); err != nil {
 		// Not a string (an object, an array): record the shape and the size, not the content.
-		return json.RawMessage(`"[truncated: ` + strconv.Itoa(len(v)) + ` bytes]"`)
+		return truncatedMarker(len(v))
 	}
-	/* CLAMPED to the decoded length first. The guard above compares auditValueMaxBytes against
-	   len(v), which is the ENCODED size, and this cut is then applied to s, the DECODED string —
-	   two different lengths. A value made of escapes shrinks by up to 6x when decoded, so a body
-	   carrying ~5 KB of \u0041 passed the size check and then sliced a ~830-character string at
-	   index 4064: an out-of-range slice, i.e. a panic, on the audit path of an UNAUTHENTICATED
-	   request (the login route is audited). The recoverer turns it into a 500, but the request is
-	   still a remote panic anyone can fire at will. */
+	// Clamped to the decoded length: the guard above measured the encoded size, and escapes shrink by
+	// up to 6x when decoded.
 	cut := min(auditValueMaxBytes-32, len(s))
 	for cut > 0 && !utf8.ValidString(s[:cut]) {
 		cut--
@@ -484,10 +606,7 @@ func boundAuditValue(v json.RawMessage) json.RawMessage {
 		// Nothing to cut after decoding: the value is only large in its encoded form.
 		return v
 	}
-	encoded, err := json.Marshal(s[:cut] + "…[truncated]")
-	if err != nil {
-		return emptyDetail
-	}
+	encoded, _ := json.Marshal(s[:cut] + "…[truncated]") // a string always encodes
 	return encoded
 }
 
@@ -530,12 +649,8 @@ func orderedJSONFields(body []byte, allowed []string) ([]jsonField, error) {
 		if members > auditBodyMaxMembers {
 			return nil, errAuditBodyTooWide
 		}
-		/* KEPT only if some allow-listed key folds to it. The first cut of this appended EVERY
-		   top-level member, duplicates included, and the audit middleware buffers the body before
-		   authentication on public routes -- so one unauthenticated 16 MiB POST /api/v1/auth/login
-		   whose body repeats "username" a million times built a million-element slice, ~13x the
-		   body in live heap, and OOM-killed the console pod. The map this replaced collapsed those
-		   duplicates to one entry; the slice has to earn its members back. */
+		// Kept only if some allow-listed key folds to it: a public body repeating one key a million times
+		// must not become a million-element slice.
 		if !foldContains(allowed, key) {
 			var skip json.RawMessage
 			if serr := dec.Decode(&skip); serr != nil {
@@ -571,26 +686,13 @@ func foldContains(keys []string, key string) bool {
 }
 
 /*
- * scrubJSONNULs removes U+0000 from an allow-listed value by DECODING it, not by rewriting bytes.
- *
- * PostgreSQL rejects a NUL anywhere inside a jsonb value (22P05), and this detail is copied out of
- * the REQUEST BODY verbatim: appending such an escape to any allow-listed field ("name" on POST
- * /api/v1/webhooks, "title" on POST /api/v1/incidents, "scope" on POST /api/v1/maintenance) made the
- * whole audit row unwritable, so the attempt left no trace in GET /api/v1/audit at all. A caller
- * must not get to choose whether their own action is recorded.
- *
- * The first cut of this deleted the six-BYTE escape from the RAW JSON at any offset, which handed
- * that choice straight back: a name whose literal characters were a backslash followed by u0000 --
- * the caller escaping the backslash, so no NUL was ever present -- matched one byte late, and the
- * deletion left a dangling backslash. Invalid JSON, unencodable detail, empty row. Decoding first
- * makes the escape a character like any other, and only real NULs are dropped.
- */
+scrubJSONNULs removes U+0000 from an allow-listed value, which PostgreSQL refuses anywhere in a jsonb
+(22P05) and so would let a caller drop their own row. It decodes rather than rewrites bytes, so an
+escaped backslash followed by u0000 stays the literal text it is.
+*/
 func scrubJSONNULs(v json.RawMessage) json.RawMessage {
-	/* UseNumber, not the default float64. encoding/json parses every JSON number into a float64, so a
-	   value carrying a literal like 1e999 failed to decode -- and the error path returned the value
-	   UNCHANGED, NUL escape and all. PostgreSQL then refused the jsonb (22P05) and the whole audit row
-	   was dropped: the caller was handed back exactly the choice this function exists to take away.
-	   json.Number never parses, so it neither overflows nor rewrites a large integer's digits. */
+	// UseNumber: a float64 decode fails on a literal like 1e999, and json.Number neither overflows nor
+	// rewrites a large integer's digits.
 	dec := json.NewDecoder(bytes.NewReader(v))
 	dec.UseNumber()
 	var decoded any
@@ -600,11 +702,10 @@ func scrubJSONNULs(v json.RawMessage) json.RawMessage {
 		// says less is better than a row that does not exist.
 		return json.RawMessage(`"[undecodable]"`)
 	}
-	scrubbed, changed := scrubNULValue(decoded)
-	if !changed {
-		return v
-	}
-	encoded, err := json.Marshal(scrubbed)
+	/* Always encoded again, so the detail kept here, and logged if the write fails, is the value the
+	   row stores: invalid UTF-8 (22021) and an unpaired surrogate escape (22P02), which PostgreSQL
+	   refuses, were already turned into U+FFFD by the decode, as the handler stored them. */
+	encoded, err := json.Marshal(scrubNULValue(decoded))
 	if err != nil {
 		return json.RawMessage(`"[unencodable]"`)
 	}
@@ -612,43 +713,41 @@ func scrubJSONNULs(v json.RawMessage) json.RawMessage {
 }
 
 // scrubNULValue walks a decoded JSON value dropping U+0000 from every string, key or leaf.
-func scrubNULValue(v any) (any, bool) {
+func scrubNULValue(v any) any {
 	switch t := v.(type) {
 	case string:
-		if !strings.ContainsRune(t, 0) {
-			return t, false
-		}
-		return strings.ReplaceAll(t, "\x00", ""), true
+		return strings.ReplaceAll(t, "\x00", "")
 	case []any:
-		changed := false
 		for i, item := range t {
-			scrubbed, c := scrubNULValue(item)
-			t[i] = scrubbed
-			changed = changed || c
+			t[i] = scrubNULValue(item)
 		}
-		return t, changed
+		return t
 	case map[string]any:
-		changed := false
 		out := make(map[string]any, len(t))
 		for key, item := range t {
-			scrubbed, c := scrubNULValue(item)
-			cleanKey := key
-			if strings.ContainsRune(key, 0) {
-				cleanKey = strings.ReplaceAll(key, "\x00", "")
-				c = true
-			}
-			out[cleanKey] = scrubbed
-			changed = changed || c
+			out[strings.ReplaceAll(key, "\x00", "")] = scrubNULValue(item)
 		}
-		return out, changed
+		return out
 	default:
-		return v, false
+		return v
 	}
 }
 
-// captureAuditDetail buffers r's body and restores it (io.NopCloser over the bytes already read)
-// BEFORE returning; only ever called for a mutating request once s.audit is known non-nil
-// (auditMutation's caller, authorize).
+// auditTruncatedDetail is the detail of a row whose body was too large to describe.
+var auditTruncatedDetail = json.RawMessage(`{"truncated":true}`)
+
+// auditCaptureMaxBytes is the most of a body the audit reads to describe it. Far above any real body
+// on an allow-listed route except an import, whose row the handler describes itself (setAuditResult).
+const auditCaptureMaxBytes = 256 << 10
+
+/*
+captureAuditDetail reads at most auditCaptureMaxBytes of r's body and puts that prefix back in front
+of the unread rest, so the handler still reads the whole body; called for an audited request once
+s.audit is known non-nil (auditMutation).
+
+A body over the bound is recorded as truncated, not described from its prefix: a later duplicate key
+could name what the handler really acted on.
+*/
 func (s *Server) captureAuditDetail(r *http.Request) json.RawMessage {
 	// Routes with no allow-list entry always audit {} — skip the body read
 	// entirely rather than buffering (e.g. a PromQL query body) for a
@@ -658,13 +757,23 @@ func (s *Server) captureAuditDetail(r *http.Request) json.RawMessage {
 	if _, ok := auditDetailAllowlist[key]; !ok {
 		return emptyDetail
 	}
-	raw, err := io.ReadAll(r.Body)
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(bytes.NewReader(raw))
-	if err != nil || len(raw) == 0 {
+	body := r.Body
+	head, err := io.ReadAll(io.LimitReader(body, auditCaptureMaxBytes+1))
+	r.Body = replayedBody{Reader: io.MultiReader(bytes.NewReader(head), body), Closer: body}
+	var tooLarge *http.MaxBytesError
+	switch {
+	case len(head) > auditCaptureMaxBytes, errors.As(err, &tooLarge):
+		return auditTruncatedDetail
+	case err != nil || len(head) == 0:
 		return emptyDetail
 	}
-	return auditDetailFor(key, raw)
+	return auditDetailFor(key, head)
+}
+
+// replayedBody is a request body whose first bytes were already read and are served again.
+type replayedBody struct {
+	io.Reader
+	io.Closer
 }
 
 // isAuditedRead reports whether this safe request is one of the privileged reads that gets its own
@@ -759,7 +868,7 @@ type auditResponse struct {
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if s.audit == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "audit log not available",
-			"set console.database.mode in the console config (Helm: console.database.mode) to enable GET /api/v1/audit")
+			databaseKnob+" to enable GET /api/v1/audit")
 		return
 	}
 
@@ -773,10 +882,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	/* A NUL in a text filter is fatal to pgx, and the handler mapped that to 502 "audit log
-	   unavailable" — a 5xx for a client mistake, telling a human the store is down while it is
-	   perfectly healthy. Every other filtered listing in this package already guards its text
-	   params this way. */
+	// A NUL in a text filter is fatal to pgx, which would answer a client mistake with a 502.
 	if rejectControlChars(w, "subjectKind", q.Get("subjectKind")) || rejectControlChars(w, "subjectId", q.Get("subjectId")) {
 		return
 	}

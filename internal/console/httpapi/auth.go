@@ -11,7 +11,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
@@ -131,7 +134,7 @@ func nonNilStrings(v []string) []string {
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	subject, _ := SubjectFrom(r.Context())
 	if subject.Kind == "" {
-		write401(w)
+		writeUnauthenticated(w, r)
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -161,8 +164,8 @@ func mustHashDummyPassword() string {
 
 // loginRateLimitDetail is the 429 body's detail for POST /api/v1/auth/login; it never says WHICH
 // counter tripped (username or source IP).
-const loginRateLimitDetail = "too many login attempts; retry shortly " +
-	"(limit: console.rateLimit.loginPerMinute per username and per source address per minute)"
+var loginRateLimitDetail = "too many login attempts; retry shortly (limit: console.rateLimit.loginPerMinute " +
+	"per username, and loginPerMinute x " + strconv.Itoa(loginIPBurstFactor) + " per source address, per minute)"
 
 // authLoginRequest is POST /api/v1/auth/login's body.
 type authLoginRequest struct {
@@ -170,8 +173,6 @@ type authLoginRequest struct {
 	Password string `json:"password"` //nolint:gosec // G117: request field carrying a client-supplied plaintext password to verify, not a hardcoded credential
 }
 
-// handleAuthLogin verifies username/password against s.users (argon2id, via authn.VerifyPassword)
-// and mints a session.
 // sameOriginRequest reports whether this request came from the console's own origin.
 //
 // It is ws/conn.go's checkOrigin, deliberately identical: an ABSENT Origin passes, because a
@@ -195,6 +196,8 @@ func sameOriginRequest(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
+// handleAuthLogin verifies username/password against s.users (argon2id, via authn.VerifyPassword)
+// and mints a session.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Auth.Mode != "local" {
 		writeProblem(w, http.StatusNotFound, "not found", "")
@@ -207,14 +210,9 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	/* SAME-ORIGIN, and it is not belt-and-braces: this route is public, so authorize applies no CSRF
-	   gate to it, and a login is a state change on the victim's browser. evil.example can post a
-	   cross-site form with enctype=text/plain whose body parses as this JSON, and the 204's
-	   Set-Cookie then replaces the victim's session with the ATTACKER's: everything the victim goes
-	   on to write — annotations, incidents, maintenance windows — is written into the attacker's
-	   account, and everything they read is read from it. The socket's own upgrade already refuses a
-	   cross-origin request this way (ws/conn.go's checkOrigin); the shape is copied verbatim, an
-	   ABSENT Origin included, since a non-browser client never sends one. */
+	/* Same-origin only: the route is public, so authorize applies no CSRF gate, and a cross-site
+	   text/plain form whose body parses as this JSON would swap the victim's session for the
+	   attacker's (login CSRF). */
 	if !sameOriginRequest(r) {
 		writeProblem(w, http.StatusForbidden, "cross-origin login refused",
 			"a login must come from this console's own origin")
@@ -233,28 +231,34 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "invalid request", `body must be JSON with non-empty "username" and "password"`)
 		return
 	}
+	// The per-username counter below is keyed on this caller-chosen string and lives for a minute.
+	if len(req.Username) > maxLoginUsernameBytes {
+		writeProblem(w, http.StatusBadRequest, "invalid request", "username is too long")
+		return
+	}
 
-	/* Two counters, two BUDGETS, and that is the fix rather than a nicety. Behind the chart's own
-	   Ingress every request in the world arrives from the ingress-controller pod, so one address is
-	   not one person: at a shared budget, six bogus attempts a minute locked out every user of the
-	   console, correct password included, with no credentials needed to do it. The per-username
-	   counter stays narrow (it is what protects an account); the per-address one is a wide net for a
-	   single host hammering many usernames, and it counts the address the trusted-proxy
-	   configuration says is really the client. */
-	if !s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute, loginUserRateLimitKey(req.Username)) ||
-		!s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute*loginIPBurstFactor,
-			loginIPRateLimitKey(clientIP(r, s.trustedProxies))) {
+	/* The per-username budget protects an account; the wider per-address one (loginIPBurstFactor)
+	   bounds one host spraying usernames. Neither charges the trusted proxy, whose budget every user
+	   behind the ingress would share. */
+	clientAddr, _ := requestAddrs(r, s.trustedProxies)
+	if !s.rateLimitSpend(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute, nil, loginUserRateLimitKey(req.Username)) ||
+		!s.rateLimitSpend(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute*loginIPBurstFactor, nil,
+			loginIPRateLimitKey(clientAddr)) {
 		writeRateLimited(w, loginRateLimitDetail)
 		return
 	}
 
-	user, err := s.users.GetUserByUsername(r.Context(), req.Username)
+	// No user can be named with a control character or bytes that are not UTF-8, and the database
+	// refuses a NUL outright, which would read as the store being down.
+	user, err := store.User{}, store.ErrNotFound
+	if !invalidParamText(req.Username) {
+		user, err = s.users.GetUserByUsername(r.Context(), req.Username)
+	}
 	switch {
 	case err == nil:
 		// fall through to password verification below
 	case errors.Is(err, store.ErrNotFound):
-		// I-3: pay the same argon2 cost the real verification path below
-		// would, before answering -- see dummyPasswordHash's doc comment.
+		// Same argon2 cost as a real verify, so the timing does not reveal whether the username exists.
 		_, _ = authn.VerifyPassword(dummyPasswordHash, req.Password)
 		s.metrics.AuthRequests.WithLabelValues("local", "invalid").Inc()
 		writeProblem(w, http.StatusUnauthorized, "invalid credentials", "")
@@ -265,8 +269,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Same don't-narrow-the-oracle reasoning as csrfOK/authResultLabel and token.go's
-	// authenticateToken.
+	// Same answer and cost as a wrong password, so a disabled account is not revealed.
 	if user.Disabled {
 		_, _ = authn.VerifyPassword(dummyPasswordHash, req.Password)
 		s.metrics.AuthRequests.WithLabelValues("local", "invalid").Inc()
@@ -278,11 +281,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnauthorized, "invalid credentials", "")
 		return
 	}
+	s.upgradePasswordHash(r.Context(), &user, req.Password)
 
 	sessionID, err := s.sessions.Create(r.Context(), authn.Session{
 		Username:      user.Username,
 		DisplayName:   user.DisplayName,
-		PasswordStamp: authn.PasswordStamp(user.PasswordHash),
+		PasswordStamp: authn.SessionStamp(user.PasswordHash, user.SessionEpoch),
 	})
 	if err != nil {
 		slog.Warn("httpapi: create session on login failed", "error", err)
@@ -293,8 +297,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	s.metrics.AuthRequests.WithLabelValues("local", "ok").Inc()
 	s.setSessionCookie(w, sessionID)
 	if cerr := s.setCSRFCookie(w); cerr != nil {
-		// do not leave a session whose browser has no csrf cookie -- every subsequent mutation, including
-		// logout itself.
+		// A session without a csrf cookie could make no mutation, logout included.
 		slog.Error("httpapi: mint csrf cookie on login failed, aborting session", "error", cerr)
 		if delErr := s.sessions.Delete(r.Context(), sessionID); delErr != nil {
 			slog.Warn("httpapi: delete session after csrf mint failure failed", "error", delErr)
@@ -304,6 +307,44 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// passwordRehasher is a user store that replaces a password hash only while it is still oldHash.
+type passwordRehasher interface {
+	RehashUserPassword(ctx context.Context, id, oldHash, newHash string) (bool, error)
+}
+
+// The store must keep satisfying it: upgradePasswordHash finds it by type assertion and would
+// otherwise fall back to the read-compare-write path without a word.
+var _ passwordRehasher = (*store.DB)(nil)
+
+// upgradePasswordHash rewrites a hash made with other argon2 parameters at the current ones, after a
+// login verified it. Until then a wrong guess on that account takes a different time than one on an
+// unknown username, which checks the dummy hash. The salt is kept, so the password stamp and every
+// session stay valid. A failure only means the next login tries again.
+func (s *Server) upgradePasswordHash(ctx context.Context, user *store.User, plain string) {
+	if s.userAdmin == nil || !authn.NeedsRehash(user.PasswordHash) {
+		return
+	}
+	upgraded, err := authn.RehashPassword(user.PasswordHash, plain)
+	if err != nil {
+		slog.Warn("httpapi: upgrade password hash on login failed", "error", err)
+		return
+	}
+	// An admin reset landing after the verify must not be overwritten with the old password.
+	if cas, ok := s.userAdmin.(passwordRehasher); ok {
+		if _, err = cas.RehashUserPassword(ctx, user.ID, user.PasswordHash, upgraded); err != nil {
+			slog.Warn("httpapi: upgrade password hash on login failed", "error", err)
+		}
+		return
+	}
+	current, err := s.users.GetUserByUsername(ctx, user.Username)
+	if err != nil || current.ID != user.ID || current.PasswordHash != user.PasswordHash {
+		return
+	}
+	if err = s.userAdmin.UpdateUserPassword(ctx, user.ID, upgraded); err != nil {
+		slog.Warn("httpapi: upgrade password hash on login failed", "error", err)
+	}
 }
 
 // handleAuthLogout deletes the session server-side -- instant revocation; idempotent and
@@ -326,26 +367,20 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 // browser back to when the caller specifies no ?returnTo=.
 const oidcDefaultReturnTo = "/"
 
-// oidcMaxReturnToBytes caps the caller-controlled string the state stash carries.
+// oidcMaxReturnToBytes caps the caller-controlled string the sealed state carries.
 const oidcMaxReturnToBytes = 2048
 
-// isSafeReturnTo mirrors authn.OIDCAuthenticator.AuthorizeURL's own same-origin-relative-path check
-// (oidc.go's unexported isSafeReturnTo of the same name and behavior) so handleOIDCStart can
-// validate returnTo BEFORE calling AuthorizeURL; duplicated rather than exported from authn (I-4
-// keeps this package's OIDC seam to the narrow OIDCFlow interface, not authn internals).
-func isSafeReturnTo(returnTo string) bool {
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		return false
-	}
-	if strings.ContainsAny(returnTo, "\\") {
-		return false
-	}
-	u, err := url.Parse(returnTo)
-	if err != nil {
-		return false
-	}
-	return u.Scheme == "" && u.Host == ""
-}
+// sharedAddressHintOnce logs, once per process, the likely cause of a sign-in 429 that hits every
+// user at once.
+var sharedAddressHintOnce sync.Once
+
+// oidcStartRateLimitDetail is the 429 detail for GET /api/v1/auth/oidc/start.
+var oidcStartRateLimitDetail = "too many sign-in attempts from this address; retry shortly " +
+	"(limit: console.rateLimit.loginPerMinute x " + strconv.Itoa(loginIPBurstFactor) + " per source address per minute)"
+
+// oidcCallbackRateLimitDetail is the 429 detail for GET /api/v1/auth/oidc/callback.
+var oidcCallbackRateLimitDetail = "too many sign-in callbacks from this address; retry shortly " +
+	"(limit: console.rateLimit.loginPerMinute x " + strconv.Itoa(loginIPBurstFactor) + " per source address per minute)"
 
 /*
 oidcStateCookie binds the CSRF state to the browser that STARTED the flow (RFC 6749 section 10.12).
@@ -360,9 +395,6 @@ cleared on the way out whatever the outcome.
 */
 const oidcStateCookieName = "kconmon_oidc_state"
 
-// Mirrors authn's own state TTL.
-const oidcStateCookieMaxAge = 300
-
 const oidcCookiePath = "/api/v1/auth/oidc"
 
 func (s *Server) setOIDCStateCookie(w http.ResponseWriter, state string) {
@@ -373,7 +405,7 @@ func (s *Server) setOIDCStateCookie(w http.ResponseWriter, state string) {
 		HttpOnly: true,
 		Secure:   s.cfg.Auth.Session.Secure,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   oidcStateCookieMaxAge,
+		MaxAge:   int(authn.OIDCStateTTL / time.Second),
 	})
 }
 
@@ -410,16 +442,31 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	if returnTo == "" {
 		returnTo = oidcDefaultReturnTo
 	}
-	if !isSafeReturnTo(returnTo) {
+	if !authn.IsSafeReturnTo(returnTo) {
 		writeProblem(w, http.StatusBadRequest, "invalid oidc start request", "returnTo must be a same-origin relative path")
 		return
 	}
-	/* The route is PUBLIC and unrate-limited, and every call stashes this string in the KV for the
-	   state's lifetime. Uncapped, one unauthenticated request could park most of net/http's header
-	   budget there; a path this console can actually route is far shorter than the cap. */
+	/* This string travels sealed inside the state, which rides in the IdP's URL and in the state
+	   cookie; uncapped, it would outgrow what a browser keeps in one cookie. A path this console can
+	   actually route is far shorter than the cap. */
 	if len(returnTo) > oidcMaxReturnToBytes {
 		writeProblem(w, http.StatusBadRequest, "invalid oidc start request",
 			fmt.Sprintf("returnTo must be at most %d bytes", oidcMaxReturnToBytes))
+		return
+	}
+	// A start stores nothing (the state is sealed, authn's oidcState), so this is login's wide address
+	// net and no more; like login's, it charges no budget the whole ingress shares.
+	addr, _ := requestAddrs(r, s.trustedProxies)
+	if !s.rateLimitSpend(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute*loginIPBurstFactor, nil,
+		oidcStartIPRateLimitKey(addr)) {
+		if len(s.trustedProxies) == 0 {
+			sharedAddressHintOnce.Do(func() {
+				slog.Warn("httpapi: one client address spent its sign-in budget and no trusted proxies are configured; "+
+					"behind an Ingress or a NAT every browser shares that address: list the proxy networks in "+
+					"clientAddress.trustedProxyCIDRs", "address", addr)
+			})
+		}
+		writeRateLimited(w, oidcStartRateLimitDetail)
 		return
 	}
 	authURL, err := s.oidc.AuthorizeURL(r.Context(), returnTo)
@@ -435,7 +482,7 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setOIDCStateCookie(w, state)
-	//nolint:gosec // G710: authURL is built by AuthorizeURL from the operator-configured IdP endpoint; the only caller input (returnTo) was validated by isSafeReturnTo above and only rides inside the state stash
+	//nolint:gosec // G710: authURL is built by AuthorizeURL from the operator-configured IdP endpoint; the only caller input (returnTo) was validated by authn.IsSafeReturnTo above and only rides sealed inside the state
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -443,6 +490,14 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Auth.Mode != "oidc" || s.oidc == nil {
 		writeProblem(w, http.StatusNotFound, "not found", "")
+		return
+	}
+
+	// A refused callback writes an audit row, so it is bounded per address like the start.
+	addr, _ := requestAddrs(r, s.trustedProxies)
+	if !s.rateLimitSpend(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute*loginIPBurstFactor, nil,
+		oidcCallbackIPRateLimitKey(addr)) {
+		writeRateLimited(w, oidcCallbackRateLimitDetail)
 		return
 	}
 
@@ -458,6 +513,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		subtle.ConstantTimeCompare([]byte(bound.Value), []byte(state)) != 1 {
 		slog.Warn("httpapi: oidc callback state did not come from this browser")
 		s.metrics.AuthRequests.WithLabelValues("oidc", "invalid").Inc()
+		s.recordAudit(r, authz.Subject{}, auditOutcomeError, emptyDetail)
 		write401(w)
 		return
 	}
@@ -466,10 +522,14 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("httpapi: oidc callback failed", "error", err)
 		s.metrics.AuthRequests.WithLabelValues("oidc", authResultLabel(err)).Inc()
+		s.recordAudit(r, authz.Subject{}, auditOutcomeError, emptyDetail)
 		write401(w)
 		return
 	}
 
+	// Both OIDC routes are GETs, which authorize does not audit; a local login is recorded, so the
+	// sign-in is recorded here, as the identity it just signed in.
+	signedIn := s.sessionSubject(r.Context(), sessionID)
 	s.metrics.AuthRequests.WithLabelValues("oidc", "ok").Inc()
 	s.setSessionCookie(w, sessionID)
 	if cerr := s.setCSRFCookie(w); cerr != nil {
@@ -481,15 +541,30 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.clearSessionCookie(w)
+		s.recordAudit(r, signedIn, auditOutcomeError, emptyDetail)
 		writeProblem(w, http.StatusInternalServerError, "login failed", "")
 		return
 	}
-	// returnTo was validated by isSafeReturnTo before AuthorizeURL stashed
-	// it, but it round-trips through the KV store between then and now --
-	// re-check so a corrupted stash can never become an open redirect.
-	if !isSafeReturnTo(returnTo) {
+	s.recordAudit(r, signedIn, auditOutcomeAllowed, emptyDetail)
+	// returnTo was validated by authn.IsSafeReturnTo before AuthorizeURL sealed
+	// it into the state, which came back through the browser -- re-check so
+	// no state can ever become an open redirect.
+	if !authn.IsSafeReturnTo(returnTo) {
 		returnTo = oidcDefaultReturnTo
 	}
-	//nolint:gosec // G710: returnTo is re-validated by isSafeReturnTo immediately above (same-origin relative path only)
+	//nolint:gosec // G710: returnTo is re-validated by authn.IsSafeReturnTo immediately above (same-origin relative path only)
 	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+// sessionSubject is the identity a session the OIDC flow just minted belongs to, read back for the
+// sign-in's audit row; empty when it cannot be read.
+func (s *Server) sessionSubject(ctx context.Context, sessionID string) authz.Subject {
+	if s.sessions == nil {
+		return authz.Subject{}
+	}
+	sess, ok, err := s.sessions.Get(ctx, sessionID)
+	if err != nil || !ok {
+		return authz.Subject{}
+	}
+	return authz.Subject{Kind: authz.SubjectUser, ID: sess.Username, DisplayName: sess.DisplayName}
 }

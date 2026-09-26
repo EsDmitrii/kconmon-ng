@@ -308,7 +308,8 @@ func (r *Reader) handle(ctx context.Context, ev *corev1.Event, s stream) {
 	}
 }
 
-// keep is the whole filter (Decision 3).
+// keep is the whole filter: a node event only for a node the topology vouches for, a pod event only
+// from the watched namespace.
 func (r *Reader) keep(ctx context.Context, ev *corev1.Event, s stream) bool {
 	if s.kind == "Node" {
 		return r.nodeInTopology(ctx, ev.InvolvedObject.Name)

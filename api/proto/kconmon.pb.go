@@ -81,7 +81,7 @@ type AgentMeta struct {
 	Zone     string                 `protobuf:"bytes,5,opt,name=zone,proto3" json:"zone,omitempty"`
 	Labels   map[string]string      `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// capabilities are opt-in feature flags this agent build supports, e.g. "external-checks"; a
-	// pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs.
+	// pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs one.
 	Capabilities []string `protobuf:"bytes,7,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// Listener ports this agent serves PEERS on. 0 = not reported (an agent older
 	// than this field); the probing agent then falls back to its OWN configured
@@ -244,7 +244,9 @@ type RegisterResponse struct {
 	ServerTime *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
 	// agent is the resolved metadata for the registering agent (e.g. zone
 	// enriched by the controller from the node's failure-domain label).
-	Agent         *AgentMeta `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
+	Agent *AgentMeta `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
+	// fleet_echoes: see PeerUpdate.fleet_echoes.
+	FleetEchoes   []*EchoEndpoint `protobuf:"bytes,5,rep,name=fleet_echoes,json=fleetEchoes,proto3" json:"fleet_echoes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -303,6 +305,13 @@ func (x *RegisterResponse) GetServerTime() *timestamppb.Timestamp {
 func (x *RegisterResponse) GetAgent() *AgentMeta {
 	if x != nil {
 		return x.Agent
+	}
+	return nil
+}
+
+func (x *RegisterResponse) GetFleetEchoes() []*EchoEndpoint {
+	if x != nil {
+		return x.FleetEchoes
 	}
 	return nil
 }
@@ -448,10 +457,15 @@ func (x *DeregisterRequest) GetAgentId() string {
 }
 
 type PeerUpdate struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          PeerUpdate_UpdateType  `protobuf:"varint,1,opt,name=type,proto3,enum=kconmonng.v1.PeerUpdate_UpdateType" json:"type,omitempty"`
-	Peers         []*AgentMeta           `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Type      PeerUpdate_UpdateType  `protobuf:"varint,1,opt,name=type,proto3,enum=kconmonng.v1.PeerUpdate_UpdateType" json:"type,omitempty"`
+	Peers     []*AgentMeta           `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// fleet_echoes is the echo endpoint of every registered agent, the receiver included, whatever
+	// the probe plan: a datagram from one is another responder's echo, never a probe, so the receiver
+	// does not answer it. Empty from controllers older than 2.5.0; the agent then knows its planned
+	// peers' echoes only.
+	FleetEchoes   []*EchoEndpoint `protobuf:"bytes,4,rep,name=fleet_echoes,json=fleetEchoes,proto3" json:"fleet_echoes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -507,6 +521,67 @@ func (x *PeerUpdate) GetTimestamp() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *PeerUpdate) GetFleetEchoes() []*EchoEndpoint {
+	if x != nil {
+		return x.FleetEchoes
+	}
+	return nil
+}
+
+// EchoEndpoint is where a registered agent's UDP echo listens: its advertised address and echo
+// port (0 = an agent older than 2.4.0, which echoes on the fleet-wide port).
+type EchoEndpoint struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Port          uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EchoEndpoint) Reset() {
+	*x = EchoEndpoint{}
+	mi := &file_kconmon_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EchoEndpoint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EchoEndpoint) ProtoMessage() {}
+
+func (x *EchoEndpoint) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EchoEndpoint.ProtoReflect.Descriptor instead.
+func (*EchoEndpoint) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *EchoEndpoint) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *EchoEndpoint) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
 type WatchTasksRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
@@ -516,7 +591,7 @@ type WatchTasksRequest struct {
 
 func (x *WatchTasksRequest) Reset() {
 	*x = WatchTasksRequest{}
-	mi := &file_kconmon_proto_msgTypes[7]
+	mi := &file_kconmon_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -528,7 +603,7 @@ func (x *WatchTasksRequest) String() string {
 func (*WatchTasksRequest) ProtoMessage() {}
 
 func (x *WatchTasksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[7]
+	mi := &file_kconmon_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -541,7 +616,7 @@ func (x *WatchTasksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchTasksRequest.ProtoReflect.Descriptor instead.
 func (*WatchTasksRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{7}
+	return file_kconmon_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WatchTasksRequest) GetAgentId() string {
@@ -560,7 +635,7 @@ type WatchExternalChecksRequest struct {
 
 func (x *WatchExternalChecksRequest) Reset() {
 	*x = WatchExternalChecksRequest{}
-	mi := &file_kconmon_proto_msgTypes[8]
+	mi := &file_kconmon_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -572,7 +647,7 @@ func (x *WatchExternalChecksRequest) String() string {
 func (*WatchExternalChecksRequest) ProtoMessage() {}
 
 func (x *WatchExternalChecksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[8]
+	mi := &file_kconmon_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -585,7 +660,7 @@ func (x *WatchExternalChecksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchExternalChecksRequest.ProtoReflect.Descriptor instead.
 func (*WatchExternalChecksRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{8}
+	return file_kconmon_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *WatchExternalChecksRequest) GetAgentId() string {
@@ -610,7 +685,7 @@ type ExternalCheckSpec struct {
 
 func (x *ExternalCheckSpec) Reset() {
 	*x = ExternalCheckSpec{}
-	mi := &file_kconmon_proto_msgTypes[9]
+	mi := &file_kconmon_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -622,7 +697,7 @@ func (x *ExternalCheckSpec) String() string {
 func (*ExternalCheckSpec) ProtoMessage() {}
 
 func (x *ExternalCheckSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[9]
+	mi := &file_kconmon_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -635,7 +710,7 @@ func (x *ExternalCheckSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalCheckSpec.ProtoReflect.Descriptor instead.
 func (*ExternalCheckSpec) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{9}
+	return file_kconmon_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ExternalCheckSpec) GetDefinitionId() string {
@@ -693,7 +768,7 @@ type ExternalCheckAssignment struct {
 
 func (x *ExternalCheckAssignment) Reset() {
 	*x = ExternalCheckAssignment{}
-	mi := &file_kconmon_proto_msgTypes[10]
+	mi := &file_kconmon_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -705,7 +780,7 @@ func (x *ExternalCheckAssignment) String() string {
 func (*ExternalCheckAssignment) ProtoMessage() {}
 
 func (x *ExternalCheckAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[10]
+	mi := &file_kconmon_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -718,7 +793,7 @@ func (x *ExternalCheckAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalCheckAssignment.ProtoReflect.Descriptor instead.
 func (*ExternalCheckAssignment) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{10}
+	return file_kconmon_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ExternalCheckAssignment) GetSpecs() []*ExternalCheckSpec {
@@ -748,7 +823,7 @@ type ExternalTarget struct {
 
 func (x *ExternalTarget) Reset() {
 	*x = ExternalTarget{}
-	mi := &file_kconmon_proto_msgTypes[11]
+	mi := &file_kconmon_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +835,7 @@ func (x *ExternalTarget) String() string {
 func (*ExternalTarget) ProtoMessage() {}
 
 func (x *ExternalTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[11]
+	mi := &file_kconmon_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +848,7 @@ func (x *ExternalTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalTarget.ProtoReflect.Descriptor instead.
 func (*ExternalTarget) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{11}
+	return file_kconmon_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ExternalTarget) GetName() string {
@@ -807,9 +882,9 @@ func (x *ExternalTarget) GetPort() uint32 {
 type TaskRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	TaskId    string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	CheckType string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|dns|http|mtr
+	CheckType string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|pmtu|dns|http|mtr
 	Target    *AgentMeta             `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
-	Plane     string                 `protobuf:"bytes,4,opt,name=plane,proto3" json:"plane,omitempty"` // pod|host
+	Plane     string                 `protobuf:"bytes,4,opt,name=plane,proto3" json:"plane,omitempty"` // always "pod"; agents probe the pod network only and do not read it
 	// external_target is set INSTEAD OF target (field 3) when the destination is not a registered
 	// agent.
 	ExternalTarget *ExternalTarget `protobuf:"bytes,5,opt,name=external_target,json=externalTarget,proto3" json:"external_target,omitempty"`
@@ -819,7 +894,7 @@ type TaskRequest struct {
 
 func (x *TaskRequest) Reset() {
 	*x = TaskRequest{}
-	mi := &file_kconmon_proto_msgTypes[12]
+	mi := &file_kconmon_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -831,7 +906,7 @@ func (x *TaskRequest) String() string {
 func (*TaskRequest) ProtoMessage() {}
 
 func (x *TaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[12]
+	mi := &file_kconmon_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -844,7 +919,7 @@ func (x *TaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskRequest.ProtoReflect.Descriptor instead.
 func (*TaskRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{12}
+	return file_kconmon_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TaskRequest) GetTaskId() string {
@@ -896,7 +971,7 @@ type TaskResult struct {
 
 func (x *TaskResult) Reset() {
 	*x = TaskResult{}
-	mi := &file_kconmon_proto_msgTypes[13]
+	mi := &file_kconmon_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -908,7 +983,7 @@ func (x *TaskResult) String() string {
 func (*TaskResult) ProtoMessage() {}
 
 func (x *TaskResult) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[13]
+	mi := &file_kconmon_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -921,7 +996,7 @@ func (x *TaskResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
 func (*TaskResult) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{13}
+	return file_kconmon_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *TaskResult) GetTaskId() string {
@@ -976,7 +1051,7 @@ type TCPProbeRequest struct {
 
 func (x *TCPProbeRequest) Reset() {
 	*x = TCPProbeRequest{}
-	mi := &file_kconmon_proto_msgTypes[14]
+	mi := &file_kconmon_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -988,7 +1063,7 @@ func (x *TCPProbeRequest) String() string {
 func (*TCPProbeRequest) ProtoMessage() {}
 
 func (x *TCPProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[14]
+	mi := &file_kconmon_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1001,7 +1076,7 @@ func (x *TCPProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TCPProbeRequest.ProtoReflect.Descriptor instead.
 func (*TCPProbeRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{14}
+	return file_kconmon_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TCPProbeRequest) GetSourceAgentId() string {
@@ -1028,7 +1103,7 @@ type TCPProbeResponse struct {
 
 func (x *TCPProbeResponse) Reset() {
 	*x = TCPProbeResponse{}
-	mi := &file_kconmon_proto_msgTypes[15]
+	mi := &file_kconmon_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1040,7 +1115,7 @@ func (x *TCPProbeResponse) String() string {
 func (*TCPProbeResponse) ProtoMessage() {}
 
 func (x *TCPProbeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[15]
+	mi := &file_kconmon_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1053,7 +1128,7 @@ func (x *TCPProbeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TCPProbeResponse.ProtoReflect.Descriptor instead.
 func (*TCPProbeResponse) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{15}
+	return file_kconmon_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TCPProbeResponse) GetOk() bool {
@@ -1082,7 +1157,7 @@ type UDPProbeRequest struct {
 
 func (x *UDPProbeRequest) Reset() {
 	*x = UDPProbeRequest{}
-	mi := &file_kconmon_proto_msgTypes[16]
+	mi := &file_kconmon_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1094,7 +1169,7 @@ func (x *UDPProbeRequest) String() string {
 func (*UDPProbeRequest) ProtoMessage() {}
 
 func (x *UDPProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[16]
+	mi := &file_kconmon_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1107,7 +1182,7 @@ func (x *UDPProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UDPProbeRequest.ProtoReflect.Descriptor instead.
 func (*UDPProbeRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{16}
+	return file_kconmon_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *UDPProbeRequest) GetSourceAgentId() string {
@@ -1149,7 +1224,7 @@ type UDPProbeResponse struct {
 
 func (x *UDPProbeResponse) Reset() {
 	*x = UDPProbeResponse{}
-	mi := &file_kconmon_proto_msgTypes[17]
+	mi := &file_kconmon_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1161,7 +1236,7 @@ func (x *UDPProbeResponse) String() string {
 func (*UDPProbeResponse) ProtoMessage() {}
 
 func (x *UDPProbeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[17]
+	mi := &file_kconmon_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1174,7 +1249,7 @@ func (x *UDPProbeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UDPProbeResponse.ProtoReflect.Descriptor instead.
 func (*UDPProbeResponse) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{17}
+	return file_kconmon_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *UDPProbeResponse) GetSequence() uint32 {
@@ -1208,7 +1283,7 @@ type WatchEventsRequest struct {
 
 func (x *WatchEventsRequest) Reset() {
 	*x = WatchEventsRequest{}
-	mi := &file_kconmon_proto_msgTypes[18]
+	mi := &file_kconmon_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1220,7 +1295,7 @@ func (x *WatchEventsRequest) String() string {
 func (*WatchEventsRequest) ProtoMessage() {}
 
 func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[18]
+	mi := &file_kconmon_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1233,7 +1308,7 @@ func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEventsRequest.ProtoReflect.Descriptor instead.
 func (*WatchEventsRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{18}
+	return file_kconmon_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *WatchEventsRequest) GetLastSeq() uint64 {
@@ -1261,7 +1336,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_kconmon_proto_msgTypes[19]
+	mi := &file_kconmon_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1273,7 +1348,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[19]
+	mi := &file_kconmon_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1286,7 +1361,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{19}
+	return file_kconmon_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Event) GetSeq() uint64 {
@@ -1406,7 +1481,7 @@ type TopologyChanged struct {
 
 func (x *TopologyChanged) Reset() {
 	*x = TopologyChanged{}
-	mi := &file_kconmon_proto_msgTypes[20]
+	mi := &file_kconmon_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1418,7 +1493,7 @@ func (x *TopologyChanged) String() string {
 func (*TopologyChanged) ProtoMessage() {}
 
 func (x *TopologyChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[20]
+	mi := &file_kconmon_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1431,7 +1506,7 @@ func (x *TopologyChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopologyChanged.ProtoReflect.Descriptor instead.
 func (*TopologyChanged) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{20}
+	return file_kconmon_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *TopologyChanged) GetReason() string {
@@ -1474,7 +1549,7 @@ func (x *TopologyChanged) GetLabels() map[string]string {
 type CheckObserved struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	CheckType       string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
+	CheckType       string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|pmtu|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
 	SourceNode      string                 `protobuf:"bytes,3,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
 	DestinationNode string                 `protobuf:"bytes,4,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
 	Plane           string                 `protobuf:"bytes,5,opt,name=plane,proto3" json:"plane,omitempty"`
@@ -1487,7 +1562,7 @@ type CheckObserved struct {
 
 func (x *CheckObserved) Reset() {
 	*x = CheckObserved{}
-	mi := &file_kconmon_proto_msgTypes[21]
+	mi := &file_kconmon_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1499,7 +1574,7 @@ func (x *CheckObserved) String() string {
 func (*CheckObserved) ProtoMessage() {}
 
 func (x *CheckObserved) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[21]
+	mi := &file_kconmon_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1512,7 +1587,7 @@ func (x *CheckObserved) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckObserved.ProtoReflect.Descriptor instead.
 func (*CheckObserved) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{21}
+	return file_kconmon_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CheckObserved) GetTaskId() string {
@@ -1582,7 +1657,7 @@ type MTRTriggered struct {
 
 func (x *MTRTriggered) Reset() {
 	*x = MTRTriggered{}
-	mi := &file_kconmon_proto_msgTypes[22]
+	mi := &file_kconmon_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1594,7 +1669,7 @@ func (x *MTRTriggered) String() string {
 func (*MTRTriggered) ProtoMessage() {}
 
 func (x *MTRTriggered) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[22]
+	mi := &file_kconmon_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1607,7 +1682,7 @@ func (x *MTRTriggered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MTRTriggered.ProtoReflect.Descriptor instead.
 func (*MTRTriggered) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{22}
+	return file_kconmon_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *MTRTriggered) GetTaskId() string {
@@ -1644,7 +1719,7 @@ type MTRHop struct {
 
 func (x *MTRHop) Reset() {
 	*x = MTRHop{}
-	mi := &file_kconmon_proto_msgTypes[23]
+	mi := &file_kconmon_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1656,7 +1731,7 @@ func (x *MTRHop) String() string {
 func (*MTRHop) ProtoMessage() {}
 
 func (x *MTRHop) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[23]
+	mi := &file_kconmon_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1669,7 +1744,7 @@ func (x *MTRHop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MTRHop.ProtoReflect.Descriptor instead.
 func (*MTRHop) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{23}
+	return file_kconmon_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *MTRHop) GetNumber() int32 {
@@ -1721,7 +1796,7 @@ type MTRCompleted struct {
 
 func (x *MTRCompleted) Reset() {
 	*x = MTRCompleted{}
-	mi := &file_kconmon_proto_msgTypes[24]
+	mi := &file_kconmon_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1733,7 +1808,7 @@ func (x *MTRCompleted) String() string {
 func (*MTRCompleted) ProtoMessage() {}
 
 func (x *MTRCompleted) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[24]
+	mi := &file_kconmon_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1746,7 +1821,7 @@ func (x *MTRCompleted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MTRCompleted.ProtoReflect.Descriptor instead.
 func (*MTRCompleted) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{24}
+	return file_kconmon_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MTRCompleted) GetTaskId() string {
@@ -1793,21 +1868,22 @@ func (x *MTRCompleted) GetHops() []*MTRHop {
 
 // DiagnosticProgress fires at dispatch-start and on non-terminal-failure
 // paths; the terminal success outcome is a CheckObserved or MTRCompleted
-// instead, never a second DiagnosticProgress.
+// instead. Only undelivered follows one: the check ran, but its HTTP
+// response could not be written.
 type DiagnosticProgress struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	CheckType       string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"`
 	SourceNode      string                 `protobuf:"bytes,3,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
 	DestinationNode string                 `protobuf:"bytes,4,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
-	State           string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"` // dispatched|timeout|error
+	State           string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"` // dispatched|timeout|error|undelivered
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DiagnosticProgress) Reset() {
 	*x = DiagnosticProgress{}
-	mi := &file_kconmon_proto_msgTypes[25]
+	mi := &file_kconmon_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1819,7 +1895,7 @@ func (x *DiagnosticProgress) String() string {
 func (*DiagnosticProgress) ProtoMessage() {}
 
 func (x *DiagnosticProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[25]
+	mi := &file_kconmon_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1832,7 +1908,7 @@ func (x *DiagnosticProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiagnosticProgress.ProtoReflect.Descriptor instead.
 func (*DiagnosticProgress) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{25}
+	return file_kconmon_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *DiagnosticProgress) GetTaskId() string {
@@ -1891,31 +1967,36 @@ const file_kconmon_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
 	"\x0fRegisterRequest\x12-\n" +
-	"\x05agent\x18\x01 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"\xc8\x01\n" +
+	"\x05agent\x18\x01 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"\x87\x02\n" +
 	"\x10RegisterResponse\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12-\n" +
 	"\x05peers\x18\x02 \x03(\v2\x17.kconmonng.v1.AgentMetaR\x05peers\x12;\n" +
 	"\vserver_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"serverTime\x12-\n" +
-	"\x05agent\x18\x04 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"g\n" +
+	"\x05agent\x18\x04 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\x12=\n" +
+	"\ffleet_echoes\x18\x05 \x03(\v2\x1a.kconmonng.v1.EchoEndpointR\vfleetEchoes\"g\n" +
 	"\x10HeartbeatRequest\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\".\n" +
 	"\x11WatchPeersRequest\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\".\n" +
 	"\x11DeregisterRequest\x12\x19\n" +
-	"\bagent_id\x18\x01 \x01(\tR\aagentId\"\xed\x01\n" +
+	"\bagent_id\x18\x01 \x01(\tR\aagentId\"\xac\x02\n" +
 	"\n" +
 	"PeerUpdate\x127\n" +
 	"\x04type\x18\x01 \x01(\x0e2#.kconmonng.v1.PeerUpdate.UpdateTypeR\x04type\x12-\n" +
 	"\x05peers\x18\x02 \x03(\v2\x17.kconmonng.v1.AgentMetaR\x05peers\x128\n" +
-	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"=\n" +
+	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12=\n" +
+	"\ffleet_echoes\x18\x04 \x03(\v2\x1a.kconmonng.v1.EchoEndpointR\vfleetEchoes\"=\n" +
 	"\n" +
 	"UpdateType\x12\r\n" +
 	"\tFULL_SYNC\x10\x00\x12\x0e\n" +
 	"\n" +
 	"PEER_ADDED\x10\x01\x12\x10\n" +
-	"\fPEER_REMOVED\x10\x02\".\n" +
+	"\fPEER_REMOVED\x10\x02\"<\n" +
+	"\fEchoEndpoint\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\".\n" +
 	"\x11WatchTasksRequest\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\"7\n" +
 	"\x1aWatchExternalChecksRequest\x12\x19\n" +
@@ -2059,7 +2140,7 @@ func file_kconmon_proto_rawDescGZIP() []byte {
 }
 
 var file_kconmon_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_kconmon_proto_goTypes = []any{
 	(PeerUpdate_UpdateType)(0),         // 0: kconmonng.v1.PeerUpdate.UpdateType
 	(*AgentMeta)(nil),                  // 1: kconmonng.v1.AgentMeta
@@ -2069,83 +2150,86 @@ var file_kconmon_proto_goTypes = []any{
 	(*WatchPeersRequest)(nil),          // 5: kconmonng.v1.WatchPeersRequest
 	(*DeregisterRequest)(nil),          // 6: kconmonng.v1.DeregisterRequest
 	(*PeerUpdate)(nil),                 // 7: kconmonng.v1.PeerUpdate
-	(*WatchTasksRequest)(nil),          // 8: kconmonng.v1.WatchTasksRequest
-	(*WatchExternalChecksRequest)(nil), // 9: kconmonng.v1.WatchExternalChecksRequest
-	(*ExternalCheckSpec)(nil),          // 10: kconmonng.v1.ExternalCheckSpec
-	(*ExternalCheckAssignment)(nil),    // 11: kconmonng.v1.ExternalCheckAssignment
-	(*ExternalTarget)(nil),             // 12: kconmonng.v1.ExternalTarget
-	(*TaskRequest)(nil),                // 13: kconmonng.v1.TaskRequest
-	(*TaskResult)(nil),                 // 14: kconmonng.v1.TaskResult
-	(*TCPProbeRequest)(nil),            // 15: kconmonng.v1.TCPProbeRequest
-	(*TCPProbeResponse)(nil),           // 16: kconmonng.v1.TCPProbeResponse
-	(*UDPProbeRequest)(nil),            // 17: kconmonng.v1.UDPProbeRequest
-	(*UDPProbeResponse)(nil),           // 18: kconmonng.v1.UDPProbeResponse
-	(*WatchEventsRequest)(nil),         // 19: kconmonng.v1.WatchEventsRequest
-	(*Event)(nil),                      // 20: kconmonng.v1.Event
-	(*TopologyChanged)(nil),            // 21: kconmonng.v1.TopologyChanged
-	(*CheckObserved)(nil),              // 22: kconmonng.v1.CheckObserved
-	(*MTRTriggered)(nil),               // 23: kconmonng.v1.MTRTriggered
-	(*MTRHop)(nil),                     // 24: kconmonng.v1.MTRHop
-	(*MTRCompleted)(nil),               // 25: kconmonng.v1.MTRCompleted
-	(*DiagnosticProgress)(nil),         // 26: kconmonng.v1.DiagnosticProgress
-	nil,                                // 27: kconmonng.v1.AgentMeta.LabelsEntry
-	nil,                                // 28: kconmonng.v1.TopologyChanged.LabelsEntry
-	(*timestamppb.Timestamp)(nil),      // 29: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),              // 30: google.protobuf.Empty
+	(*EchoEndpoint)(nil),               // 8: kconmonng.v1.EchoEndpoint
+	(*WatchTasksRequest)(nil),          // 9: kconmonng.v1.WatchTasksRequest
+	(*WatchExternalChecksRequest)(nil), // 10: kconmonng.v1.WatchExternalChecksRequest
+	(*ExternalCheckSpec)(nil),          // 11: kconmonng.v1.ExternalCheckSpec
+	(*ExternalCheckAssignment)(nil),    // 12: kconmonng.v1.ExternalCheckAssignment
+	(*ExternalTarget)(nil),             // 13: kconmonng.v1.ExternalTarget
+	(*TaskRequest)(nil),                // 14: kconmonng.v1.TaskRequest
+	(*TaskResult)(nil),                 // 15: kconmonng.v1.TaskResult
+	(*TCPProbeRequest)(nil),            // 16: kconmonng.v1.TCPProbeRequest
+	(*TCPProbeResponse)(nil),           // 17: kconmonng.v1.TCPProbeResponse
+	(*UDPProbeRequest)(nil),            // 18: kconmonng.v1.UDPProbeRequest
+	(*UDPProbeResponse)(nil),           // 19: kconmonng.v1.UDPProbeResponse
+	(*WatchEventsRequest)(nil),         // 20: kconmonng.v1.WatchEventsRequest
+	(*Event)(nil),                      // 21: kconmonng.v1.Event
+	(*TopologyChanged)(nil),            // 22: kconmonng.v1.TopologyChanged
+	(*CheckObserved)(nil),              // 23: kconmonng.v1.CheckObserved
+	(*MTRTriggered)(nil),               // 24: kconmonng.v1.MTRTriggered
+	(*MTRHop)(nil),                     // 25: kconmonng.v1.MTRHop
+	(*MTRCompleted)(nil),               // 26: kconmonng.v1.MTRCompleted
+	(*DiagnosticProgress)(nil),         // 27: kconmonng.v1.DiagnosticProgress
+	nil,                                // 28: kconmonng.v1.AgentMeta.LabelsEntry
+	nil,                                // 29: kconmonng.v1.TopologyChanged.LabelsEntry
+	(*timestamppb.Timestamp)(nil),      // 30: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),              // 31: google.protobuf.Empty
 }
 var file_kconmon_proto_depIdxs = []int32{
-	27, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
+	28, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
 	1,  // 1: kconmonng.v1.RegisterRequest.agent:type_name -> kconmonng.v1.AgentMeta
 	1,  // 2: kconmonng.v1.RegisterResponse.peers:type_name -> kconmonng.v1.AgentMeta
-	29, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
+	30, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
 	1,  // 4: kconmonng.v1.RegisterResponse.agent:type_name -> kconmonng.v1.AgentMeta
-	29, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
-	0,  // 6: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
-	1,  // 7: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
-	29, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 9: kconmonng.v1.ExternalCheckSpec.target:type_name -> kconmonng.v1.ExternalTarget
-	10, // 10: kconmonng.v1.ExternalCheckAssignment.specs:type_name -> kconmonng.v1.ExternalCheckSpec
-	29, // 11: kconmonng.v1.ExternalCheckAssignment.timestamp:type_name -> google.protobuf.Timestamp
-	1,  // 12: kconmonng.v1.TaskRequest.target:type_name -> kconmonng.v1.AgentMeta
-	12, // 13: kconmonng.v1.TaskRequest.external_target:type_name -> kconmonng.v1.ExternalTarget
-	29, // 14: kconmonng.v1.TaskResult.timestamp:type_name -> google.protobuf.Timestamp
-	29, // 15: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	29, // 16: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	29, // 17: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	29, // 18: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	29, // 19: kconmonng.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
-	21, // 20: kconmonng.v1.Event.topology_changed:type_name -> kconmonng.v1.TopologyChanged
-	22, // 21: kconmonng.v1.Event.check_observed:type_name -> kconmonng.v1.CheckObserved
-	23, // 22: kconmonng.v1.Event.mtr_triggered:type_name -> kconmonng.v1.MTRTriggered
-	25, // 23: kconmonng.v1.Event.mtr_completed:type_name -> kconmonng.v1.MTRCompleted
-	26, // 24: kconmonng.v1.Event.diagnostic_progress:type_name -> kconmonng.v1.DiagnosticProgress
-	28, // 25: kconmonng.v1.TopologyChanged.labels:type_name -> kconmonng.v1.TopologyChanged.LabelsEntry
-	24, // 26: kconmonng.v1.MTRCompleted.hops:type_name -> kconmonng.v1.MTRHop
-	2,  // 27: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
-	4,  // 28: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
-	5,  // 29: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
-	6,  // 30: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
-	8,  // 31: kconmonng.v1.AgentRegistry.WatchTasks:input_type -> kconmonng.v1.WatchTasksRequest
-	14, // 32: kconmonng.v1.AgentRegistry.ReportTaskResult:input_type -> kconmonng.v1.TaskResult
-	9,  // 33: kconmonng.v1.AgentRegistry.WatchExternalChecks:input_type -> kconmonng.v1.WatchExternalChecksRequest
-	15, // 34: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
-	17, // 35: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
-	19, // 36: kconmonng.v1.EventStream.WatchEvents:input_type -> kconmonng.v1.WatchEventsRequest
-	3,  // 37: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
-	30, // 38: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
-	7,  // 39: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
-	30, // 40: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
-	13, // 41: kconmonng.v1.AgentRegistry.WatchTasks:output_type -> kconmonng.v1.TaskRequest
-	30, // 42: kconmonng.v1.AgentRegistry.ReportTaskResult:output_type -> google.protobuf.Empty
-	11, // 43: kconmonng.v1.AgentRegistry.WatchExternalChecks:output_type -> kconmonng.v1.ExternalCheckAssignment
-	16, // 44: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
-	18, // 45: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
-	20, // 46: kconmonng.v1.EventStream.WatchEvents:output_type -> kconmonng.v1.Event
-	37, // [37:47] is the sub-list for method output_type
-	27, // [27:37] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	8,  // 5: kconmonng.v1.RegisterResponse.fleet_echoes:type_name -> kconmonng.v1.EchoEndpoint
+	30, // 6: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
+	0,  // 7: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
+	1,  // 8: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
+	30, // 9: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
+	8,  // 10: kconmonng.v1.PeerUpdate.fleet_echoes:type_name -> kconmonng.v1.EchoEndpoint
+	13, // 11: kconmonng.v1.ExternalCheckSpec.target:type_name -> kconmonng.v1.ExternalTarget
+	11, // 12: kconmonng.v1.ExternalCheckAssignment.specs:type_name -> kconmonng.v1.ExternalCheckSpec
+	30, // 13: kconmonng.v1.ExternalCheckAssignment.timestamp:type_name -> google.protobuf.Timestamp
+	1,  // 14: kconmonng.v1.TaskRequest.target:type_name -> kconmonng.v1.AgentMeta
+	13, // 15: kconmonng.v1.TaskRequest.external_target:type_name -> kconmonng.v1.ExternalTarget
+	30, // 16: kconmonng.v1.TaskResult.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 17: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 18: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 19: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 20: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	30, // 21: kconmonng.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	22, // 22: kconmonng.v1.Event.topology_changed:type_name -> kconmonng.v1.TopologyChanged
+	23, // 23: kconmonng.v1.Event.check_observed:type_name -> kconmonng.v1.CheckObserved
+	24, // 24: kconmonng.v1.Event.mtr_triggered:type_name -> kconmonng.v1.MTRTriggered
+	26, // 25: kconmonng.v1.Event.mtr_completed:type_name -> kconmonng.v1.MTRCompleted
+	27, // 26: kconmonng.v1.Event.diagnostic_progress:type_name -> kconmonng.v1.DiagnosticProgress
+	29, // 27: kconmonng.v1.TopologyChanged.labels:type_name -> kconmonng.v1.TopologyChanged.LabelsEntry
+	25, // 28: kconmonng.v1.MTRCompleted.hops:type_name -> kconmonng.v1.MTRHop
+	2,  // 29: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
+	4,  // 30: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
+	5,  // 31: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
+	6,  // 32: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
+	9,  // 33: kconmonng.v1.AgentRegistry.WatchTasks:input_type -> kconmonng.v1.WatchTasksRequest
+	15, // 34: kconmonng.v1.AgentRegistry.ReportTaskResult:input_type -> kconmonng.v1.TaskResult
+	10, // 35: kconmonng.v1.AgentRegistry.WatchExternalChecks:input_type -> kconmonng.v1.WatchExternalChecksRequest
+	16, // 36: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
+	18, // 37: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
+	20, // 38: kconmonng.v1.EventStream.WatchEvents:input_type -> kconmonng.v1.WatchEventsRequest
+	3,  // 39: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
+	31, // 40: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
+	7,  // 41: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
+	31, // 42: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
+	14, // 43: kconmonng.v1.AgentRegistry.WatchTasks:output_type -> kconmonng.v1.TaskRequest
+	31, // 44: kconmonng.v1.AgentRegistry.ReportTaskResult:output_type -> google.protobuf.Empty
+	12, // 45: kconmonng.v1.AgentRegistry.WatchExternalChecks:output_type -> kconmonng.v1.ExternalCheckAssignment
+	17, // 46: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
+	19, // 47: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
+	21, // 48: kconmonng.v1.EventStream.WatchEvents:output_type -> kconmonng.v1.Event
+	39, // [39:49] is the sub-list for method output_type
+	29, // [29:39] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_kconmon_proto_init() }
@@ -2153,7 +2237,7 @@ func file_kconmon_proto_init() {
 	if File_kconmon_proto != nil {
 		return
 	}
-	file_kconmon_proto_msgTypes[19].OneofWrappers = []any{
+	file_kconmon_proto_msgTypes[20].OneofWrappers = []any{
 		(*Event_TopologyChanged)(nil),
 		(*Event_CheckObserved)(nil),
 		(*Event_MtrTriggered)(nil),
@@ -2166,7 +2250,7 @@ func file_kconmon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kconmon_proto_rawDesc), len(file_kconmon_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

@@ -27,3 +27,21 @@ func TestDrainConsoleFinishesRunsBeforeStoppingTheRealtimePipeline(t *testing.T)
 			"gone waits out its relay timeout and blames the bus for frames it delivered", order)
 	}
 }
+
+// The console's own RSS and goroutine count are what a leak or a body-limit regression shows up in;
+// the agent and the controller export them, so the console registry must too.
+func TestNewPromRegistryExportsGoAndProcessMetrics(t *testing.T) {
+	mfs, err := newPromRegistry().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	have := map[string]bool{}
+	for _, mf := range mfs {
+		have[mf.GetName()] = true
+	}
+	for _, name := range []string{"go_goroutines", "go_memstats_alloc_bytes", "process_resident_memory_bytes"} {
+		if !have[name] {
+			t.Errorf("console registry does not export %s", name)
+		}
+	}
+}

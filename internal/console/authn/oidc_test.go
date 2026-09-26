@@ -63,6 +63,14 @@ type fakeIDP struct {
 	refreshClaims    map[string]any
 	refreshToken     string
 	failRefresh      bool
+	refreshStatus    int // non-zero: the refresh grant answers this status instead
+	// rotateRefresh makes every accepted refresh grant mint a new refresh token and refuse the old one
+	// from then on (Keycloak with revokeRefreshToken, Auth0/Okta rotation); refreshDelay holds the
+	// response after the grant is accepted, and refreshAccepted is closed on the first acceptance.
+	rotateRefresh   bool
+	refreshDelay    time.Duration
+	refreshAccepted chan struct{}
+	refreshSeq      int
 
 	tokenRequests atomic.Int32
 }
@@ -118,6 +126,31 @@ func (f *fakeIDP) setFailRefresh(fail bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failRefresh = fail
+}
+
+// setRotatingRefresh turns on refresh token rotation with reuse refusal and returns a channel closed
+// when the first refresh grant is accepted, before its delayed response is written.
+func (f *fakeIDP) setRotatingRefresh(delay time.Duration) <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rotateRefresh = true
+	f.refreshDelay = delay
+	f.refreshAccepted = make(chan struct{})
+	return f.refreshAccepted
+}
+
+// currentRefreshToken is the one refresh token the IdP accepts right now.
+func (f *fakeIDP) currentRefreshToken() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refreshToken
+}
+
+// setRefreshStatus makes the refresh grant answer status with an OAuth2 error body; 0 restores it.
+func (f *fakeIDP) setRefreshStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshStatus = status
 }
 
 func (f *fakeIDP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
@@ -243,21 +276,45 @@ func (f *fakeIDP) serveAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeIDP) serveRefreshGrant(w http.ResponseWriter, r *http.Request) {
+	got := r.FormValue("refresh_token")
+	// The check and the rotation are one step, as at a real IdP: of two grants racing on the same
+	// token, exactly one is accepted.
 	f.mu.Lock()
-	fail, want, claims := f.failRefresh, f.refreshToken, f.refreshClaims
+	fail, want, claims, status := f.failRefresh, f.refreshToken, f.refreshClaims, f.refreshStatus
+	accepted := status == 0 && !fail && got != "" && got == want
+	rotated, delay := "", time.Duration(0)
+	if accepted && f.rotateRefresh {
+		f.refreshSeq++
+		rotated = fmt.Sprintf("rotated-refresh-token-%d", f.refreshSeq)
+		f.refreshToken = rotated
+		delay = f.refreshDelay
+		if f.refreshAccepted != nil {
+			close(f.refreshAccepted)
+			f.refreshAccepted = nil
+		}
+	}
 	f.mu.Unlock()
 
-	got := r.FormValue("refresh_token")
-	if fail || got == "" || got != want {
+	if status != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "temporarily_unavailable"})
+		return
+	}
+	if !accepted {
 		writeTokenError(w, "invalid_grant")
 		return
 	}
+	time.Sleep(delay)
 
-	// Deliberately no "refresh_token" key in the response.
+	// No "refresh_token" key in the response unless rotation is on.
 	body := map[string]any{
 		"access_token": "refreshed-access-token",
 		"token_type":   "Bearer",
 		"expires_in":   3600,
+	}
+	if rotated != "" {
+		body["refresh_token"] = rotated
 	}
 	// An id_token on the refresh response is OPTIONAL, so it is opt-in here: the default path stays
 	// the provider that returns none, which is the common one.
@@ -307,7 +364,7 @@ func signRS256(key *rsa.PrivateKey, kid string, claims map[string]any) (string, 
 
 // newOIDCFixture wires an OIDCAuthenticator against idp with a fresh
 // SessionStore/KV pair, returning the KV too so tests can assert directly on
-// the oidcstate:{state} entries AuthorizeURL writes.
+// what the authenticator stores in it.
 func newOIDCFixture(t *testing.T, idp *fakeIDP) (*authn.OIDCAuthenticator, *authn.SessionStore, *cache.InProcessKV) {
 	t.Helper()
 	return newOIDCFixtureWithCookieName(t, idp, authn.OIDCSessionCookieName)
@@ -407,22 +464,9 @@ func TestOIDCAuthorizeURLEmitsCodeFlowWithPKCEAndScopes(t *testing.T) {
 		}
 	}
 
-	data, ok, err := kv.Get(context.Background(), "oidcstate:"+state)
-	if err != nil || !ok {
-		t.Fatalf("expected oidcstate:%s in the KV, ok=%v err=%v", state, ok, err)
-	}
-	var st struct {
-		Verifier string `json:"verifier"`
-		ReturnTo string `json:"returnTo"`
-	}
-	if err := json.Unmarshal(data, &st); err != nil {
-		t.Fatalf("unmarshal stored state: %v", err)
-	}
-	if st.Verifier == "" {
-		t.Error("expected a non-empty PKCE verifier landed in the KV")
-	}
-	if st.ReturnTo != "/dashboard" {
-		t.Errorf("stored returnTo = %q, want %q", st.ReturnTo, "/dashboard")
+	// The verifier and returnTo travel sealed in the state; starting a sign-in stores nothing.
+	if _, ok, err := kv.Get(context.Background(), "oidcstate:"+state); err != nil || ok {
+		t.Fatalf("oidcstate:%s in the KV: ok=%v err=%v, want nothing stored", state, ok, err)
 	}
 }
 
@@ -1084,5 +1128,169 @@ func TestOIDCAuthenticateInvalidatesSessionWhenRefreshFails(t *testing.T) {
 	}
 	if ok {
 		t.Error("expected the session to be invalidated after a failed refresh")
+	}
+}
+
+// newNearExpirySession stores an OIDC session whose access token expires at accessExpiry.
+func newNearExpirySession(t *testing.T, sessions *authn.SessionStore, accessExpiry time.Time) string {
+	t.Helper()
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: accessExpiry,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return id
+}
+
+// Only the IdP refusing the grant ends a session. An IdP that is down or answers 5xx is no verdict
+// on the refresh token: the session keeps serving until its access token actually expires, and the
+// next refresh after the IdP recovers extends it.
+func TestOIDCRefreshThatFailsAtTheIdPServerKeepsTheSession(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			testOIDCRefreshKeepsTheSessionOn(t, status)
+		})
+	}
+}
+
+func testOIDCRefreshKeepsTheSessionOn(t *testing.T, status int) {
+	t.Helper()
+	idp := newFakeIDP(t)
+	idp.setRefreshStatus(status)
+	a, sessions, _ := newOIDCFixture(t, idp)
+	id := newNearExpirySession(t, sessions, time.Now().Add(30*time.Second))
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate with the IdP answering %d and the access token still valid: %v", status, err)
+	}
+	if subject.ID != "oidc:user-sub-1" {
+		t.Errorf("subject = %q, want oidc:user-sub-1", subject.ID)
+	}
+	if _, ok, _ := sessions.Get(context.Background(), id); !ok {
+		t.Fatalf("a %d from the token endpoint deleted the session", status)
+	}
+
+	idp.setRefreshStatus(0)
+	if _, err := a.Authenticate(cookieRequest(id)); err != nil {
+		t.Fatalf("Authenticate after the IdP recovered: %v", err)
+	}
+	sess, _, _ := sessions.Get(context.Background(), id)
+	if !sess.AccessExpiry.After(time.Now().Add(time.Minute)) {
+		t.Errorf("AccessExpiry = %v, want it refreshed once the IdP recovered", sess.AccessExpiry)
+	}
+}
+
+func TestOIDCRefreshFailureAfterTheAccessTokenExpiredRefusesButKeepsTheSession(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	idp.setRefreshStatus(http.StatusBadGateway)
+	a, sessions, _ := newOIDCFixture(t, idp)
+	id := newNearExpirySession(t, sessions, time.Now().Add(-time.Minute))
+
+	_, err := a.Authenticate(cookieRequest(id))
+	if err == nil {
+		t.Fatal("an expired access token with no refresh authenticated")
+	}
+	if errors.Is(err, authn.ErrExpired) {
+		t.Errorf("err = %v, want a transient error rather than ErrExpired", err)
+	}
+	if _, ok, _ := sessions.Get(context.Background(), id); !ok {
+		t.Fatal("a 502 from the token endpoint deleted the session")
+	}
+
+	idp.setRefreshStatus(0)
+	if _, err := a.Authenticate(cookieRequest(id)); err != nil {
+		t.Fatalf("Authenticate after the IdP recovered: %v", err)
+	}
+}
+
+// The refresh outlives the request that triggered it: a browser that navigates away mid-refresh (or
+// the WebSocket revalidator's short budget running out) must not cost the user their session.
+func TestOIDCRefreshOnACanceledRequestKeepsTheSession(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+	id := newNearExpirySession(t, sessions, time.Now().Add(30*time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = a.Authenticate(cookieRequest(id).WithContext(ctx))
+
+	if _, ok, _ := sessions.Get(context.Background(), id); !ok {
+		t.Fatal("a canceled request deleted a session whose refresh token is valid")
+	}
+	if _, err := a.Authenticate(cookieRequest(id)); err != nil {
+		t.Fatalf("Authenticate on a live request afterwards: %v", err)
+	}
+}
+
+// A 4xx from the token endpoint is the IdP's answer about this grant, like invalid_grant.
+func TestOIDCRefreshRefusedWithA4xxDeletesTheSession(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	idp.setRefreshStatus(http.StatusUnauthorized)
+	a, sessions, _ := newOIDCFixture(t, idp)
+	id := newNearExpirySession(t, sessions, time.Now().Add(30*time.Second))
+
+	if _, err := a.Authenticate(cookieRequest(id)); !errors.Is(err, authn.ErrExpired) {
+		t.Errorf("err = %v, want ErrExpired", err)
+	}
+	if _, ok, _ := sessions.Get(context.Background(), id); ok {
+		t.Error("a 401 from the token endpoint left the session in place")
+	}
+}
+
+// failingSessionDeleteKV refuses to delete session records.
+type failingSessionDeleteKV struct {
+	*cache.InProcessKV
+}
+
+func (kv failingSessionDeleteKV) Delete(ctx context.Context, key string) error {
+	if strings.HasPrefix(key, "sess:") {
+		return errors.New("kv unavailable")
+	}
+	return kv.InProcessKV.Delete(ctx, key)
+}
+
+// The session id is the bearer cookie value; the warning about a session that outlived a refused
+// refresh must not carry it.
+func TestOIDCRefusedRefreshDeleteFailureWarningOmitsTheSessionID(t *testing.T) {
+	logs := captureLogs(t)
+	idp := newFakeIDP(t)
+	idp.setFailRefresh(true)
+	inner := cache.NewInProcessKV()
+	t.Cleanup(inner.Close)
+	kv := failingSessionDeleteKV{InProcessKV: inner}
+	sessions := authn.NewSessionStore(kv, time.Hour, 0)
+	cfg := config.OIDCConfig{
+		Issuer:        idp.issuer(),
+		ClientID:      testClientID,
+		RedirectURL:   "http://console.example" + config.OIDCCallbackPath,
+		Scopes:        []string{"openid"},
+		UsernameClaim: "preferred_username",
+		GroupsClaim:   "groups",
+	}
+	a, err := authn.NewOIDC(context.Background(), cfg, testClientSecret, sessions, kv, authn.OIDCSessionCookieName)
+	if err != nil {
+		t.Fatalf("NewOIDC: %v", err)
+	}
+	id := newNearExpirySession(t, sessions, time.Now().Add(30*time.Second))
+
+	if _, err := a.Authenticate(cookieRequest(id)); !errors.Is(err, authn.ErrExpired) {
+		t.Fatalf("err = %v, want ErrExpired", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "delete session after failed refresh") {
+		t.Fatalf("no warning for the failed delete:\n%s", out)
+	}
+	if strings.Contains(out, id) {
+		t.Errorf("the warning carries the session id:\n%s", out)
 	}
 }

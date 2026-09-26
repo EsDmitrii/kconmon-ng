@@ -731,6 +731,8 @@ func TestRunsCreateDestinationValidation(t *testing.T) {
 		{"target id not a uuid", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"nope"}`, http.StatusBadRequest, true},
 		{"unknown target row", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusUnprocessableEntity, true},
 		{"target kind without targets store", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusServiceUnavailable, false},
+		{"pmtu towards an adhoc address", `{"sources":["n1"],"type":"pmtu","plane":"pod","destinationKind":"adhoc","destinationAddress":"192.0.2.7"}`, http.StatusUnprocessableEntity, false},
+		{"pmtu towards a target", `{"sources":["n1"],"type":"pmtu","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusUnprocessableEntity, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -745,10 +747,71 @@ func TestRunsCreateDestinationValidation(t *testing.T) {
 			if w.Code != c.want {
 				t.Fatalf("status = %d, want %d: %s", w.Code, c.want, w.Body)
 			}
+			if strings.HasPrefix(c.name, "pmtu") && !strings.Contains(w.Body.String(), "pmtu") {
+				t.Errorf("refusal must name pmtu, got %s", w.Body)
+			}
 			if len(runner.started) != 0 {
 				t.Errorf("refused request still started a run: %+v", runner.started)
 			}
 		})
+	}
+}
+
+// Toward an external destination the agent runs tcp, icmp and mtr only; every other type is refused
+// up front rather than dispatched to fail every pair.
+func TestRunsCreateExternalDestinationTakesOnlyExternalCapableTypes(t *testing.T) {
+	for _, c := range []struct {
+		checkType string
+		want      int
+	}{
+		{"tcp", http.StatusAccepted},
+		{"icmp", http.StatusAccepted},
+		{"mtr", http.StatusAccepted},
+		{"udp", http.StatusUnprocessableEntity},
+		{"dns", http.StatusUnprocessableEntity},
+		{"http", http.StatusUnprocessableEntity},
+		{"pmtu", http.StatusUnprocessableEntity},
+		{"traceroute", http.StatusUnprocessableEntity},
+	} {
+		for _, dest := range []struct{ kind, fields string }{
+			{"adhoc", `"destinationAddress":"192.0.2.7"`},
+			{"target", `"destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"`},
+		} {
+			if c.want == http.StatusAccepted && dest.kind == "target" {
+				continue // needs a saved target; the target-kind tests above cover acceptance
+			}
+			t.Run(c.checkType+" to "+dest.kind, func(t *testing.T) {
+				runner := newFakeRunner()
+				s := newRunsTargetsTestServer(t, runner, newFakeTargetService())
+				body := `{"sources":["n1"],"type":"` + c.checkType + `","plane":"pod","timeoutNs":1000000000,` +
+					`"destinationKind":"` + dest.kind + `",` + dest.fields + `}`
+				w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+				if w.Code != c.want {
+					t.Fatalf("status = %d, want %d: %s", w.Code, c.want, w.Body)
+				}
+				if c.want == http.StatusAccepted {
+					return
+				}
+				if !strings.Contains(w.Body.String(), c.checkType) || !strings.Contains(w.Body.String(), "invalid destination") {
+					t.Errorf("refusal must be an invalid destination naming %s, got %s", c.checkType, w.Body)
+				}
+				// udp gets the reason the definition and schedule routes give (errUDPNodesOnly), while
+				// dns and http toward an external resolver or URL are continuous checks.
+				want := map[string]string{
+					"udp":  "check type udp probes kconmon nodes only",
+					"dns":  "dns is not a one-off external check; use a node destination, or a continuous external check",
+					"http": "http is not a one-off external check; use a node destination, or a continuous external check",
+					// A type the console does not run is refused by the same allow-list, never dispatched.
+					"traceroute": "cannot run toward one",
+				}[c.checkType]
+				if want != "" && !strings.Contains(w.Body.String(), want) {
+					t.Errorf("refusal = %s, want it to say %q", w.Body, want)
+				}
+				if len(runner.started) != 0 {
+					t.Errorf("refused request still started a run: %+v", runner.started)
+				}
+			})
+		}
 	}
 }
 

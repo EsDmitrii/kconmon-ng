@@ -71,6 +71,9 @@ func newHandler(dist fs.FS) (http.Handler, error) {
 	fileServer := http.FileServer(http.FS(dist))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Nothing embeds the console, and a framed console is a clickjacking surface.
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("X-Frame-Options", "DENY")
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		// FileServer would 301 /index.html to ./; serve it directly so both
 		// spellings share the same no-cache+ETag contract.

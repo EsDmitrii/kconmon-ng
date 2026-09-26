@@ -28,6 +28,15 @@ import (
 // 64 hops and the console pod is sized at 256Mi.
 const maxConcurrentResolves = 8
 
+// failedLookupRetry is how long a row whose reverse-DNS lookup FAILED stays cached: long enough that
+// every view of a trace does not wait on a broken resolver again, short enough that a hostname comes
+// back soon after DNS does. Never longer than mtr.enrichment.ttl.
+const failedLookupRetry = 5 * time.Minute
+
+// maxRememberedFailures bounds the in-memory failed rows; past it a failed hop is simply looked up
+// again on its next view.
+const maxRememberedFailures = 4096
+
 // Store is the cache half of the resolver: store.EnrichmentStore; aliased rather than re-declared
 // so there is exactly ONE spelling of the read/write pair in the tree.
 type Store = store.EnrichmentStore
@@ -54,7 +63,8 @@ const (
 )
 
 // Resolver answers hop-address questions from the cache, resolving what the cache does not know;
-// safe for concurrent use: every field is read-only after New.
+// safe for concurrent use: every field is read-only after New except the two groups behind mu and
+// failedMu.
 type Resolver struct {
 	cache Store
 
@@ -78,6 +88,13 @@ type Resolver struct {
 
 	ttl time.Duration
 	m   *metrics.Metrics
+
+	/* failed holds the rows whose reverse-DNS lookup FAILED, keyed by IP, for failedRetryWindow.
+	   They stay out of the cache table: its resolved_at is both the row's age and the lookup time API
+	   clients are shown, so a row that must expire early could only be written with a false
+	   resolved_at. Per replica and lost on restart, which costs one more DNS wait per failed hop. */
+	failedMu sync.Mutex
+	failed   map[string]store.Enrichment
 
 	// now is time.Now except in tests. TTL expiry is the one behaviour here
 	// that cannot be exercised without controlling the clock, and sleeping for
@@ -281,6 +298,11 @@ func (r *Resolver) Resolve(ctx context.Context, ips []string) map[string]store.E
 			r.countCache(cacheHit)
 			continue
 		}
+		if row, ok := r.rememberedFailure(ip, now); ok {
+			out[ip] = row
+			r.countCache(cacheHit)
+			continue
+		}
 		r.countCache(cacheMiss)
 		misses = append(misses, ip)
 	}
@@ -288,9 +310,9 @@ func (r *Resolver) Resolve(ctx context.Context, ips []string) map[string]store.E
 		return out
 	}
 
-	resolved := r.resolveAll(ctx, misses)
+	resolved, retrySoon := r.resolveAll(ctx, misses)
 	maps.Copy(out, resolved)
-	r.writeBack(ctx, resolved)
+	r.writeBack(ctx, resolved, retrySoon)
 	return out
 }
 
@@ -314,12 +336,13 @@ func dedupe(ips []string) []string {
 // resolveAll runs the misses through a fixed pool of maxConcurrentResolves workers; the feed loop
 // selects on ctx.Done, so a cancelled request stops handing out work immediately and the pool
 // drains within one per-lookup budget instead of one budget per remaining hop.
-func (r *Resolver) resolveAll(ctx context.Context, ips []string) map[string]store.Enrichment {
+func (r *Resolver) resolveAll(ctx context.Context, ips []string) (out map[string]store.Enrichment, retrySoon map[string]bool) {
 	workers := min(len(ips), maxConcurrentResolves)
 
 	jobs := make(chan string)
 	var mu sync.Mutex
-	out := make(map[string]store.Enrichment, len(ips))
+	out = make(map[string]store.Enrichment, len(ips))
+	retrySoon = map[string]bool{}
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -327,12 +350,15 @@ func (r *Resolver) resolveAll(ctx context.Context, ips []string) map[string]stor
 		go func() {
 			defer wg.Done()
 			for ip := range jobs {
-				row, ok := r.resolveOne(ctx, ip)
+				row, ok, rdnsFailed := r.resolveOne(ctx, ip)
 				if !ok {
 					continue
 				}
 				mu.Lock()
 				out[ip] = row
+				if rdnsFailed {
+					retrySoon[ip] = true
+				}
 				mu.Unlock()
 			}
 		}()
@@ -348,18 +374,18 @@ feed:
 	}
 	close(jobs)
 	wg.Wait()
-	return out
+	return out, retrySoon
 }
 
-// resolveOne builds one cache row.
-func (r *Resolver) resolveOne(ctx context.Context, ip string) (store.Enrichment, bool) {
+// resolveOne builds one cache row and reports whether its reverse-DNS lookup failed.
+func (r *Resolver) resolveOne(ctx context.Context, ip string) (row store.Enrichment, ok, rdnsFailed bool) {
 	if ctx.Err() != nil {
-		return store.Enrichment{}, false
+		return store.Enrichment{}, false, false
 	}
-	row := store.Enrichment{IP: ip, ResolvedAt: r.now()}
+	row = store.Enrichment{IP: ip, ResolvedAt: r.now()}
 
 	if r.rdns != nil {
-		r.lookupRDNS(ctx, ip, &row)
+		rdnsFailed = r.lookupRDNS(ctx, ip, &row)
 	}
 	// One RLock for the whole geoip section: a lookup reads an mmap, so the reader must not be swapped
 	// out from under it. Uncontended RLock costs tens of nanoseconds against a multi-hop trace.
@@ -383,32 +409,37 @@ func (r *Resolver) resolveOne(ctx context.Context, ip string) (store.Enrichment,
 	}
 
 	if ctx.Err() != nil {
-		return store.Enrichment{}, false
+		return store.Enrichment{}, false, false
 	}
-	return row, true
+	return row, true, rdnsFailed
 }
 
 // lookupRDNS fills row.RDNS within its OWN budget, derived from the caller's
-// context so whichever expires first wins. The trailing dot of the PTR name is
-// stripped: it is correct DNS and noise in a hop table.
-func (r *Resolver) lookupRDNS(ctx context.Context, ip string, row *store.Enrichment) {
+// context so whichever expires first wins, and reports whether the lookup
+// failed rather than answered. The trailing dot of the PTR name is stripped: it
+// is correct DNS and noise in a hop table.
+func (r *Resolver) lookupRDNS(ctx context.Context, ip string, row *store.Enrichment) (failed bool) {
 	lctx, cancel := context.WithTimeout(ctx, r.rdnsTimeout)
 	defer cancel()
 
 	names, err := r.rdns(lctx, ip)
+	dnsErr, isDNSErr := errors.AsType[*net.DNSError](err)
 	switch {
+	case isDNSErr && dnsErr.IsNotFound,
+		err == nil && (len(names) == 0 || strings.TrimSuffix(names[0], ".") == ""):
+		// No PTR record is an ordinary answer about the address, not a
+		// failure of the source -- keeping the two apart is what makes the
+		// error series alertable. net.Resolver reports it as NXDOMAIN.
+		r.countLookup(sourceRDNS, resultMiss)
 	case err != nil:
 		r.countLookup(sourceRDNS, resultError)
 		slog.Debug("reverse DNS lookup failed", "ip", ip, "error", err) //nolint:gosec // G706: structured slog fields; IPs stay in the console's own logs
-	case len(names) == 0 || strings.TrimSuffix(names[0], ".") == "":
-		// No PTR record is an ordinary answer about the address, not a
-		// failure of the source -- keeping the two apart is what makes the
-		// error series alertable.
-		r.countLookup(sourceRDNS, resultMiss)
+		return true
 	default:
 		row.RDNS = strings.TrimSuffix(names[0], ".")
 		r.countLookup(sourceRDNS, resultOK)
 	}
+	return false
 }
 
 // asnRecord is the GeoLite2-ASN subset the console uses; provider is the organization string, which
@@ -501,17 +532,70 @@ func (r *Resolver) lookupCity(addr netip.Addr, row *store.Enrichment) {
 	r.countLookup(sourceCity, resultOK)
 }
 
-// writeBack persists what was resolved.
-func (r *Resolver) writeBack(ctx context.Context, rows map[string]store.Enrichment) {
+// writeBack persists what was resolved. A row whose rDNS lookup failed is remembered in memory for
+// failedRetryWindow instead, with its real resolve time, so the next view after that asks DNS again.
+func (r *Resolver) writeBack(ctx context.Context, rows map[string]store.Enrichment, retrySoon map[string]bool) {
 	if len(rows) == 0 {
 		return
 	}
 	batch := make([]store.Enrichment, 0, len(rows))
-	for _, row := range rows {
+	failed := make([]store.Enrichment, 0, len(retrySoon))
+	for ip, row := range rows {
+		if retrySoon[ip] {
+			failed = append(failed, row)
+			continue
+		}
 		batch = append(batch, row)
+	}
+	r.rememberFailures(failed, batch)
+	if len(batch) == 0 {
+		return
 	}
 	if err := r.cache.PutEnrichment(ctx, batch); err != nil {
 		slog.Warn("hop enrichment write-back failed — the next read will re-resolve", "rows", len(batch), "error", err)
+	}
+}
+
+// failedRetryWindow is how long a failed row answers: failedLookupRetry, never past the TTL.
+func (r *Resolver) failedRetryWindow() time.Duration {
+	return min(failedLookupRetry, r.ttl)
+}
+
+// rememberedFailure returns the failed row for ip while its retry window is open.
+func (r *Resolver) rememberedFailure(ip string, now time.Time) (store.Enrichment, bool) {
+	r.failedMu.Lock()
+	defer r.failedMu.Unlock()
+	row, ok := r.failed[ip]
+	if !ok || now.Sub(row.ResolvedAt) >= r.failedRetryWindow() {
+		return store.Enrichment{}, false
+	}
+	return row, true
+}
+
+// rememberFailures stores the failed rows, drops the expired ones and forgets the hops that resolved.
+func (r *Resolver) rememberFailures(failed, resolved []store.Enrichment) {
+	r.failedMu.Lock()
+	defer r.failedMu.Unlock()
+	for i := range resolved {
+		delete(r.failed, resolved[i].IP)
+	}
+	if len(failed) == 0 {
+		return
+	}
+	if r.failed == nil {
+		r.failed = make(map[string]store.Enrichment, len(failed))
+	}
+	now, window := r.now(), r.failedRetryWindow()
+	for ip, row := range r.failed {
+		if now.Sub(row.ResolvedAt) >= window {
+			delete(r.failed, ip)
+		}
+	}
+	for i := range failed {
+		if _, known := r.failed[failed[i].IP]; !known && len(r.failed) >= maxRememberedFailures {
+			continue
+		}
+		r.failed[failed[i].IP] = failed[i]
 	}
 }
 

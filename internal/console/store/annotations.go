@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -95,17 +93,14 @@ func (in *AnnotationInput) Validate() error {
 	if in.Text == "" {
 		return errors.New("store: annotation: text must not be empty")
 	}
-	/* NO CONTROL CHARACTERS. PostgreSQL cannot store a NUL in text (SQLSTATE 22021) and the driver
-	   refuses it, and the handler above turns any store error that is not a validation error into
-	   502 "annotations unavailable" — so one byte in the body reported the annotation subsystem as
-	   down. Refusing it here makes it what it is: a rejected value, with the same 422 the length and
-	   ordering rules produce. Every text FILTER in this package is already guarded the same way
-	   (httpapi.rejectControlChars); this is the write side of it. */
-	if idx := strings.IndexFunc(in.Text, unicode.IsControl); idx >= 0 {
-		return fmt.Errorf("store: annotation: text contains a control character at byte %d", idx)
+	// text is typed into a textarea (ValidateFreeText); scope and created by stay single-line.
+	if err := ValidateFreeText("text", in.Text); err != nil {
+		return fmt.Errorf("store: annotation: %w", err)
 	}
-	if idx := strings.IndexFunc(in.Scope, unicode.IsControl); idx >= 0 {
-		return fmt.Errorf("store: annotation: scope contains a control character at byte %d", idx)
+	for _, f := range [][2]string{{"scope", in.Scope}, {"created by", in.CreatedBy}} {
+		if err := validateNoControlChars(f[0], f[1]); err != nil {
+			return fmt.Errorf("store: annotation: %w", err)
+		}
 	}
 	if len(in.Text) > annotationTextMaxLen {
 		return fmt.Errorf("store: annotation: text is %d bytes, limit is %d", len(in.Text), annotationTextMaxLen)

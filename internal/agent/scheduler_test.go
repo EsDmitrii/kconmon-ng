@@ -394,3 +394,17 @@ func TestTriggerMTRSkipsPMTUFailures(t *testing.T) {
 		t.Fatal("a pmtu failure consumed the MTR cooldown token, so triggerMTR did not return early")
 	}
 }
+
+// The loader floors checker intervals, but the scheduler takes any SchedulerConfig: an interval
+// under 10ns left no room for jitter and rand.Int64N(0) panicked the agent.
+func TestRunCheckerSurvivesAnIntervalWithNoRoomForJitter(t *testing.T) {
+	s := NewScheduler(checker.Target{AgentID: "a", NodeName: "node-a"}, func(model.CheckResult) {})
+	mc := &mockChecker{name: model.CheckTCP}
+	s.UpdatePeers([]checker.Target{{AgentID: "b", NodeName: "node-b", PodIP: "10.0.0.2", Port: 8080}})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	s.runChecker(ctx, mc, SchedulerConfig{Interval: 5 * time.Nanosecond})
+	if mc.CallCount() == 0 {
+		t.Error("the checker never ran")
+	}
+}

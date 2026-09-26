@@ -88,8 +88,13 @@ func resolveAdvertiseAddress(cfg *config.Config) (string, error) {
 		return a, nil
 	}
 	if v := os.Getenv("KCONMON_NG_POD_IP"); v != "" {
-		if net.ParseIP(v) == nil {
+		ip := net.ParseIP(v)
+		if ip == nil {
 			return "", fmt.Errorf("KCONMON_NG_POD_IP %q is not an IP address", v)
+		}
+		if kind := config.UnreachableAdvertiseAddress(ip); kind != "" {
+			return "", fmt.Errorf("KCONMON_NG_POD_IP %q is %s, which peers cannot probe; "+
+				"set agent.advertiseAddress to an address they can reach", v, kind)
 		}
 		return v, nil
 	}
@@ -122,8 +127,9 @@ func detectOutboundAddress(controllerAddress string) (string, error) {
 	defer func() { _ = conn.Close() }()
 
 	local, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok || local.IP == nil || local.IP.IsUnspecified() {
-		return "", fmt.Errorf("autodetect found no usable source IP on the route to %s (got %v); "+
+	if !ok || local.IP == nil || config.UnreachableAdvertiseAddress(local.IP) != "" {
+		// A controller reached over a local tunnel gives a loopback source, which peers cannot probe.
+		return "", fmt.Errorf("autodetect found no source IP peers can reach on the route to %s (got %v); "+
 			"set agent.advertiseAddress explicitly", controllerAddress, conn.LocalAddr())
 	}
 	return local.IP.String(), nil

@@ -21,12 +21,6 @@ type TopologyHandler struct {
 	planSource atomic.Pointer[func() meshplan.Plan]
 }
 
-// leaderGate is the handler's leadership check, hot-injected like the node watcher.
-type leaderGate struct {
-	enabled  bool
-	isLeader func() bool
-}
-
 func NewTopologyHandler(registry *Registry, nodeWatcher *NodeWatcher) *TopologyHandler {
 	h := &TopologyHandler{registry: registry}
 	if nodeWatcher != nil {
@@ -57,17 +51,10 @@ func (h *TopologyHandler) SetLeaderGate(enabled bool, isLeader func() bool) {
 	h.gate.Store(&leaderGate{enabled: enabled, isLeader: isLeader})
 }
 
-// lostLeadership mirrors GRPCServer.lostLeadership.
-func (h *TopologyHandler) lostLeadership() bool {
-	g := h.gate.Load()
-	return g != nil && g.enabled && (g.isLeader == nil || !g.isLeader())
-}
-
 func (h *TopologyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A standby's registry is empty by design, so answering it would report a topology with no
 	// agents; the Console and CLI clients treat 503 as "ask another replica".
-	if h.lostLeadership() {
-		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+	if h.gate.Load().refuse(w) {
 		return
 	}
 

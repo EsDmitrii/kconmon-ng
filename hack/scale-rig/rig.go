@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -17,8 +18,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// RigConfig sizes one measurement run. Defaults implement the roadmap scenarios: cold start over
-// 10s, 10% rolling churn over 30s, 60s of steady heartbeats, then sequential propagation probes.
+// RigConfig sizes one measurement run. Defaults: cold start over 10s, 10% rolling churn over 30s,
+// 60s of steady heartbeats, then sequential propagation probes.
 type RigConfig struct {
 	N                 int
 	ColdSpread        time.Duration
@@ -131,7 +132,6 @@ func (r *Rig) Run(ctx context.Context) (*Report, error) {
 	rep.ChurnEvents = churnEvents
 	rep.ChurnWall = churnWall
 	rep.SteadyWall = steadyWall
-	rep.QuiesceTimeouts = 0
 	if !coldQuiesced {
 		rep.QuiesceTimeouts++
 	}
@@ -191,8 +191,8 @@ func (r *Rig) startController(ctx context.Context) error {
 	ctrl := controller.New(cfg)
 	go func() {
 		if runErr := ctrl.Run(ctx); runErr != nil && ctx.Err() == nil {
-			// Counted by the log tap and fatal to the canary below if it happens at startup.
-			fmt.Printf("controller exited: %v\n", runErr)
+			// Fatal to the canary below if it happens at startup.
+			slog.Error("controller exited", "err", runErr)
 		}
 	}()
 	return nil
@@ -326,7 +326,7 @@ func (r *Rig) runProbes(ctx context.Context) (failures int) {
 	// metrics listener; the rig's own count is the fallback.
 	base := r.cfg.N
 	if sc := scrapeMetrics(ctx, r.metricsURL); sc.OK && sc.Registered > 0 {
-		base = int(sc.Registered + 0.5)
+		base = int(math.Round(sc.Registered))
 	}
 	expected := int(r.counters.activeAgents.Load())
 

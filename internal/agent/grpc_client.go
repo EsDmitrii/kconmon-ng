@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +47,6 @@ type GRPCClient struct {
 	address  string
 	security ClientSecurity
 
-	// mu guards conn and client, which Reconnect swaps under the watch goroutines.
 	// mu guards conn and client, which Reconnect swaps under the watch goroutines, and agentID,
 	// which reregister() rewrites from two goroutines while the streams read it.
 	mu     sync.RWMutex
@@ -53,6 +55,7 @@ type GRPCClient struct {
 
 	agentID          string
 	onPeers          func([]checker.Target)
+	onFleetEchoes    func([]netip.AddrPort)
 	onNeedReregister func()
 	onTask           func(context.Context, *pb.TaskRequest)
 	onExternal       func(*pb.ExternalCheckAssignment)
@@ -77,8 +80,8 @@ const maxPeerRecvBytes = 16 * 1024 * 1024
 
 func dialController(address string, sec ClientSecurity) (*grpc.ClientConn, error) { //nolint:gocritic // hugeParam: value semantics intentional
 	opts := []grpc.DialOption{
-		/* The narrow peer projection keeps a FULL_SYNC to ~100 wire bytes per peer, so gRPC's 4MB
-		   default only breaks at tens of thousands of peers; this guard is for the day labels return
+		/* The narrow peer projection and the fleet's echo endpoints keep a FULL_SYNC to ~120 wire
+		   bytes per agent, so gRPC's 4MB default only breaks at tens of thousands of agents; this guard is for the day labels return
 		   to the projection or an external fleet grows past that, when the default would wedge every
 		   resubscribe permanently. */
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxPeerRecvBytes)),
@@ -89,7 +92,7 @@ func dialController(address string, sec ClientSecurity) (*grpc.ClientConn, error
 		}),
 	}
 
-	if sec.TLS.Enabled() {
+	if sec.TLS.InUse() {
 		tlsCfg, err := buildClientTLS(sec.TLS)
 		if err != nil {
 			return nil, err
@@ -205,6 +208,33 @@ func shouldRedial(err error) bool {
 	return ok && st.Code() == codes.Unavailable
 }
 
+// standbyRefusals are the controller's answers from a replica that does not hold the lease
+// (notLeaderMsg and errLeadershipLost in internal/controller).
+var standbyRefusals = []string{"not the leader", "leadership lost"}
+
+// isStandbyRefusal reports whether err is a replica saying it is not the leader. Unlike a dead
+// transport it proves the Service answers, and the leader is one redial away, so the caller retries
+// at once instead of backing off.
+func isStandbyRefusal(err error) bool {
+	// Unwrapped by hand: FromError on a wrapped status reports the whole wrapped text as its message.
+	var se interface{ GRPCStatus() *grpcstatus.Status }
+	if !errors.As(err, &se) {
+		return false
+	}
+	st := se.GRPCStatus()
+	return st.Code() == codes.Unavailable && slices.Contains(standbyRefusals, st.Message())
+}
+
+// redialIfRefused reconnects when err says this connection cannot serve us; see shouldRedial.
+func (c *GRPCClient) redialIfRefused(err error) {
+	if !shouldRedial(err) {
+		return
+	}
+	if rerr := c.Reconnect(); rerr != nil {
+		slog.Warn("redialling the controller failed", "error", rerr)
+	}
+}
+
 // isConfigRejection reports whether the controller refused the registration payload itself
 // (InvalidArgument): retrying the same payload can never succeed, so the caller must fail
 // loudly instead of looping behind a "controller not ready" message.
@@ -229,6 +259,13 @@ func (c *GRPCClient) id() string {
 
 func (c *GRPCClient) OnPeersUpdate(fn func([]checker.Target)) {
 	c.onPeers = fn
+}
+
+// OnFleetEchoes registers the handler that receives every registered agent's echo endpoint with each
+// Register response and peer update, before the peers themselves; empty from a controller older
+// than 2.5.0.
+func (c *GRPCClient) OnFleetEchoes(fn func([]netip.AddrPort)) {
+	c.onFleetEchoes = fn
 }
 
 func (c *GRPCClient) OnNeedReregister(fn func()) {
@@ -277,6 +314,9 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, own che
 	c.mu.Lock()
 	c.agentID = resp.GetAgentId()
 	c.mu.Unlock()
+	if c.onFleetEchoes != nil {
+		c.onFleetEchoes(protoToEchoes(resp.GetFleetEchoes(), own))
+	}
 	return protoToTargets(resp.GetPeers(), own), resp.GetAgent().GetZone(), nil
 }
 
@@ -338,6 +378,9 @@ func (c *GRPCClient) WatchPeers(ctx context.Context, own checker.PeerPorts) erro
 		targets := protoToTargets(update.GetPeers(), own)
 		slog.Info("peer update received", "type", update.GetType(), "count", len(targets))
 
+		if c.onFleetEchoes != nil {
+			c.onFleetEchoes(protoToEchoes(update.GetFleetEchoes(), own))
+		}
 		if c.onPeers != nil {
 			c.onPeers(targets)
 		}
@@ -435,6 +478,28 @@ func protoToTargets(peers []*pb.AgentMeta, own checker.PeerPorts) []checker.Targ
 		})
 	}
 	return targets
+}
+
+// protoToEchoes maps the fleet's echo endpoints onto addresses, with protoToTargets' port fallback;
+// an address that does not parse is skipped.
+func protoToEchoes(echoes []*pb.EchoEndpoint, own checker.PeerPorts) []netip.AddrPort {
+	out := make([]netip.AddrPort, 0, len(echoes))
+	for _, e := range echoes {
+		if ap, ok := echoEndpoint(e.GetAddress(), portOr(e.GetPort(), own.UDP)); ok {
+			out = append(out, ap)
+		}
+	}
+	return out
+}
+
+// echoEndpoint is addr:port as an echo address, false when addr does not parse or port is out of
+// range.
+func echoEndpoint(addr string, port int) (netip.AddrPort, bool) {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil || port < 1 || port > 65535 {
+		return netip.AddrPort{}, false
+	}
+	return netip.AddrPortFrom(ip, uint16(port)), true
 }
 
 // portOr returns the port a peer reported, or fallback when it reported none.

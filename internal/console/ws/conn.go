@@ -61,10 +61,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
  * ConnOptions are the per-connection gates: who may subscribe to what, and for how long that answer
  * stays good.
  *
- * Revalidate exists because authorization used to be evaluated exactly ONCE, at upgrade. Revoking a
- * token, deleting a role binding or ending a session did nothing to an already-open socket: it kept
- * streaming topology snapshots, matrix snapshots and every live event for as long as the browser
- * stayed open, and none of those reads produced an audit row either.
+ * Revalidate exists so that revoking a token, deleting a role binding or ending a session also ends
+ * an already-open socket, which would otherwise stream snapshots and live events, unaudited, for as
+ * long as the browser stays open.
  */
 type ConnOptions struct {
 	// Authorize gates each subscribe. nil admits every topic on the hub's static allowlist.
@@ -73,6 +72,25 @@ type ConnOptions struct {
 	   heartbeat the connection already pays for — and a non-nil error closes the socket. nil means
 	   the upgrade's answer stands for the life of the connection. */
 	Revalidate func() error
+	// Limits are the caps this connection counts against; one that is full refuses the socket.
+	Limits []ConnLimit
+}
+
+// The ConnLimit names; each is the limit label of the refusal counter.
+const (
+	LimitTotal   = "total"
+	LimitAddress = "address"
+	LimitSubject = "subject"
+)
+
+// ConnLimit caps how many open connections may share Key; Max <= 0 is no cap. Reason is the close
+// frame's text when the cap refuses a socket; Name is one of the Limit* names, the refusal counter's
+// label.
+type ConnLimit struct {
+	Name   string
+	Key    string
+	Max    int
+	Reason string
 }
 
 // ServeWSAuthorized upgrades one HTTP request to the multiplexed WebSocket protocol and runs its
@@ -92,16 +110,30 @@ func (h *Hub) ServeWSWithOptions(w http.ResponseWriter, r *http.Request, opts Co
 		return
 	}
 
-	c := h.register(opts.Authorize)
+	c, refusal := h.registerLimited(opts.Authorize, opts.Limits)
+	if refusal != nil {
+		h.refuse(conn, refusal)
+		return
+	}
 	slog.Debug("websocket client connected", "clients", h.ClientCount())
 
-	// Teardown is symmetric in both directions; that also covers register refusing a client on an
+	// Teardown is symmetric in both directions; that also covers registerLimited closing a client on an
 	// already-stopped hub.
 	go h.writePump(c, conn, opts.Revalidate)
 	h.readPump(c, conn)
 
 	h.unregister(c)
 	slog.Debug("websocket client disconnected", "clients", h.ClientCount())
+}
+
+// refuse closes a socket a connection limit turned away. The upgrade still happens so the browser
+// gets a close code and a reason instead of a bare failed handshake.
+func (h *Hub) refuse(conn *websocket.Conn, limit *ConnLimit) {
+	slog.Debug("websocket refused: connection limit reached", "limit", limit.Name, "max", limit.Max)
+	h.metrics.WSRefused.WithLabelValues(limit.Name).Inc()
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseTryAgainLater, limit.Reason), time.Now().Add(writeWait))
+	_ = conn.Close()
 }
 
 // readPump consumes client frames until the socket fails. It owns the read

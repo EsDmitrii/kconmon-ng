@@ -16,7 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	appconfig "github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
@@ -31,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/sync/singleflight"
 )
 
 // capabilityEvents is the flag the console advertises on GET /api/v1/version
@@ -54,9 +54,9 @@ var _ OIDCFlow = (*authn.OIDCAuthenticator)(nil)
 // Server serves the Console HTTP surface.
 type Server struct {
 	cfg *config.Config
-	/* The trusted-proxy networks, parsed once at construction: the ONLY place this package believes
-	   a forwarding header (ratelimit.go's clientIP). Empty by default, and then r.RemoteAddr is the
-	   whole truth. */
+	/* The client-address proxy networks (config.ForwardingProxyCIDRs), parsed once at construction:
+	   the ONLY place this package believes a forwarding header (ratelimit.go's clientIP). Empty by
+	   default, and then r.RemoteAddr is the whole truth. Identity headers never read this list. */
 	trustedProxies []*net.IPNet
 	metrics        *metrics.Metrics
 	router         chi.Router
@@ -70,6 +70,12 @@ type Server struct {
 	realtime    RealtimeStatus
 	events      EventLister
 
+	// GET /api/v1/matrix shares one computation per protocol between concurrent callers and serves
+	// the result for matrixCacheTTL (data.go's cachedMatrix).
+	matrixFlight singleflight.Group
+	matrixMu     sync.Mutex
+	matrixCache  map[string]matrixEntry
+
 	// Auth. authenticator and policy are never nil (NewServer defaults both); roles, sessions, users
 	// and oidc may all be nil.
 	authenticator authn.Authenticator
@@ -80,7 +86,7 @@ type Server struct {
 	userAdmin     UserAdmin
 	oidc          OIDCFlow
 
-	// Audit. audit is the async audit-log writer/reader (nil = database.mode=disabled -- the audit
+	// Audit. audit is the async audit-log writer/reader (nil = no database configured -- the audit
 	// middleware is then a complete no-op and GET /api/v1/audit answers 503).
 	audit     Auditor
 	auditCh   chan auditJob
@@ -90,7 +96,7 @@ type Server struct {
 	// runner backs POST/GET /api/v1/runs and GET /api/v1/runs/{id}.
 	runner RunService
 
-	// targets backs CRUD /api/v1/targets. nil means database.mode=disabled and all five routes answer
+	// targets backs CRUD /api/v1/targets. nil means no database is configured and all five routes answer
 	// 503.
 	targets TargetService
 
@@ -102,12 +108,12 @@ type Server struct {
 	// topologyHistory backs GET /api/v1/topology?at= ONLY.
 	topologyHistory TopologyHistory
 
-	// Same rule as targets: nil = database.mode=disabled = 503, never an in-memory fallback.
+	// Same rule as targets: nil = no database configured = 503, never an in-memory fallback.
 	mtr         MTRService
 	annotations AnnotationService
 
 	// incidents, maintenance and webhooks back the three; same rule as targets: nil =
-	// database.mode=disabled = 503, never an in-memory fallback.
+	// no database configured = 503, never an in-memory fallback.
 	incidents   IncidentService
 	maintenance MaintenanceService
 	webhooks    WebhookService
@@ -173,7 +179,7 @@ type Deps struct {
 	// roles, no custom roles.
 	Policy *authz.Policy
 	// Roles maps a Subject's identity+groups to role names via
-	// role_bindings. nil = built-in roles only (database.mode=disabled):
+	// role_bindings. nil = built-in roles only (no database configured):
 	// every non-anonymous subject falls back to auth.defaultRole.
 	Roles RoleResolver
 	// Sessions persists login sessions (POST /api/v1/auth/login, GET /api/v1/auth/oidc/callback) and
@@ -200,7 +206,7 @@ type Deps struct {
 	// Runner backs POST/GET /api/v1/runs and GET /api/v1/runs/{id}.
 	Runner RunService
 
-	// Targets backs CRUD /api/v1/targets. nil means database.mode=disabled and all five routes answer
+	// Targets backs CRUD /api/v1/targets. nil means no database is configured and all five routes answer
 	// 503.
 	Targets TargetService
 
@@ -210,13 +216,13 @@ type Deps struct {
 
 	// MTR backs the three GET /api/v1/mtr/* routes (path history + the hop enrichment cache read) and
 	// Annotations backs GET/POST/DELETE /api/v1/annotations; same rule as Targets: nil means
-	// database.mode=disabled and every one of those routes answers 503. Typed to the local
+	// no database is configured and every one of those routes answers 503. Typed to the local
 	// MTRService/AnnotationService interfaces.
 	MTR         MTRService
 	Annotations AnnotationService
 
 	// Incidents, Maintenance and Webhooks back the three; same rule as Targets: nil means
-	// database.mode=disabled and every one of those routes answers 503. Typed to the local service
+	// no database is configured and every one of those routes answers 503. Typed to the local service
 	// interfaces.
 	Incidents   IncidentService
 	Maintenance MaintenanceService
@@ -225,7 +231,7 @@ type Deps struct {
 
 	// AlertRules backs the alert_rules table for both the /api/v1/alert-rules CRUD routes and the
 	// configuration export/import pair; same rule as Targets otherwise: nil means
-	// database.mode=disabled.
+	// no database is configured.
 	AlertRules AlertRuleService
 
 	// RuleSync is the PrometheusRule reconciler, used by POST /api/v1/alert-rules/{id}/sync and GET
@@ -233,8 +239,8 @@ type Deps struct {
 	RuleSync RuleSyncer
 
 	// WebhookSealer seals a plaintext endpoint secret and WebhookTestDispatcher enqueues the /test
-	// ping; in production both are the dispatcher, built only when console.webhooks.encryptionKey is
-	// configured.
+	// ping; in production both are the dispatcher, built only when webhooks.encryptionKey or
+	// webhooks.encryptionKeyFile is configured.
 	WebhookSealer         SecretSealer
 	WebhookTestDispatcher TestDispatcher
 
@@ -249,7 +255,7 @@ type Deps struct {
 	Bus cache.Bus
 
 	// KV backs the fixed-window rate limiter (ratelimit.go); in production this is the very same
-	// cache.KV cmd/console builds for Sessions and the OIDC state stash.
+	// cache.KV cmd/console builds for Sessions and the OIDC sign-ins already used.
 	KV cache.KV
 
 	// Topology is the snapshot source the projection guard resolves a definition's agent selection
@@ -275,7 +281,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 	}
 
 	s := &Server{
-		cfg: d.Config, trustedProxies: parseCIDRs(d.Config.Auth.Header.TrustedProxyCIDRs),
+		cfg: d.Config, trustedProxies: parseCIDRs(d.Config.ForwardingProxyCIDRs()),
 		metrics: d.Metrics, ctrl: d.Controller, prom: d.Prometheus,
 		hub: d.Hub, realtime: d.Realtime, events: d.Events, promReg: d.PromRegistry, kvBus: d.Bus,
 		authenticator: authenticator, policy: policy, roles: d.Roles, sessions: d.Sessions,
@@ -314,7 +320,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 	r := chi.NewRouter()
 	// Order is load-bearing. instrument stays OUTERMOST so a panic-born 500 is still counted with its
 	// route pattern (the recoverer writes the status through instrument's own statusRecorder).
-	r.Use(s.instrument, s.recoverer, limitBody, rejectControlPath)
+	r.Use(s.instrument, s.recoverer, limitBody, rejectControlPath, rejectControlLenientQuery)
 
 	// Never authenticated: kubelet probes and the Prometheus scrape would fail every pod if these
 	// required credentials.
@@ -437,6 +443,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/users", s.handleUsersList)
 		api.Post("/api/v1/users", s.handleUsersCreate)
 		api.Patch("/api/v1/users/{id}", s.handleUsersPatch)
+		api.Delete("/api/v1/users/{id}", s.handleUsersDelete)
 		api.Post("/api/v1/users/{id}/password", s.handleUsersPassword)
 		api.Post("/api/v1/auth/password", s.handleAuthPassword)
 
@@ -482,7 +489,7 @@ func (s *Server) Run(ctx context.Context) error {
 		   goroutines and n sockets with no request to show for them.
 		   There is deliberately no ReadTimeout: it would apply to /ws as well and would tear down
 		   every WebSocket at the deadline. The body phase is bounded per request instead — see
-		   limitBody, which arms a read deadline for EVERY request; handleWS clears it once the
+		   limitBody, which arms a read deadline for every request with a body; handleWS clears it once the
 		   router, not the client's headers, has established that the request is the upgrade. */
 		IdleTimeout: 120 * time.Second,
 	}
@@ -591,10 +598,30 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	current.Store(&subject)
 	s.hub.ServeWSWithOptions(w, r, ws.ConnOptions{
 		Authorize: s.wsTopicAuthorizer(current),
-		/* The upgrade's answer does not stand forever: a revoked token or a deleted role binding
-		   used to leave the socket streaming until the browser closed it. See wsRevalidator. */
+		// The upgrade's answer does not stand forever: a revoked token or binding closes the socket.
 		Revalidate: s.wsRevalidator(r, current),
+		Limits:     s.wsConnLimits(subject),
 	})
+}
+
+// wsConnLimits are the socket caps from the websocket.* config. Anonymous callers share one
+// subject, so only the address cap holds them.
+func (s *Server) wsConnLimits(subject authz.Subject) []ws.ConnLimit { //nolint:gocritic // Subject is a value type by design
+	if s.cfg == nil {
+		return nil
+	}
+	c := s.cfg.WebSocket
+	limits := []ws.ConnLimit{
+		{Name: ws.LimitTotal, Key: "total", Max: c.MaxConnections,
+			Reason: "too many websocket connections on this console replica"},
+		{Name: ws.LimitAddress, Key: "addr:" + subject.ClientAddr, Max: c.MaxConnectionsPerAddress,
+			Reason: "too many websocket connections from this address"},
+	}
+	if subject.Kind != authz.SubjectAnonymous {
+		limits = append(limits, ws.ConnLimit{Name: ws.LimitSubject, Key: "subject:" + string(subject.Kind) + ":" + subject.ID,
+			Max: c.MaxConnectionsPerSubject, Reason: "too many websocket connections for this user or token"})
+	}
+	return limits
 }
 
 // authLoginPath returns the endpoint the frontend should navigate to (GET, full-page navigation for
@@ -690,6 +717,11 @@ RESPONSE at 8 MiB; this is the request side of the same idea.
 */
 const maxRequestBodyBytes = 16 << 20
 
+// publicRouteBodyBytes caps the body of a route that needs no credentials. The largest one is a
+// login or a password change: a name and passwords of at most a few hundred bytes each, escapes
+// included. authorize applies it before the audit or the handler reads anything.
+const publicRouteBodyBytes = 8 << 10
+
 // bodyReadTimeout bounds the BODY phase of one request. Generous next to any real client and finite
 // next to a client that sends its headers and then stops.
 const bodyReadTimeout = 30 * time.Second
@@ -703,32 +735,31 @@ const bodyReadTimeout = 30 * time.Second
  * MaxBytesReader bounds size but not duration, so a client that announced a Content-Length and then
  * sent nothing parked a handler goroutine for as long as it liked. A server-wide ReadTimeout cannot
  * be used here because it would also apply to /ws and cut every WebSocket at the deadline; the
- * deadline is therefore set per request, and skipped for upgrades.
+ * deadline is therefore set per request, and handleWS clears it once the router has matched /ws.
  */
-func limitBody(next http.Handler) http.Handler {
+func limitBody(next http.Handler) http.Handler { return limitBodyFor(bodyReadTimeout, next) }
+
+func limitBodyFor(timeout time.Duration, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		if r.Body == nil || r.Body == http.NoBody {
+			/* No body phase to bound, and a deadline here would do harm: net/http's background read
+			   of a bodiless request shares the connection, times out at it and cancels r.Context(),
+			   so any GET running past it failed with "context canceled". */
+			next.ServeHTTP(w, r)
+			return
 		}
-		/* UNCONDITIONAL. The deadline used to be skipped for anything that LOOKED like a protocol
-		   upgrade, and "looked like" meant two request headers — so `Connection: upgrade` on a plain
-		   POST to a public route removed the only bound on the body phase. There is no ReadTimeout on
-		   the server (it would cut every WebSocket), and IdleTimeout only covers a connection between
-		   requests, so such a request held its goroutine and its socket for as long as the client
-		   cared to keep the connection open, with no credentials and a couple of hundred bytes each.
-
-		   The real upgrade clears this deadline itself, from inside handleWS, once the ROUTER has
-		   decided the request is /ws. That decision is the server's; a header is the client's.
-
-		   Best effort: a ResponseWriter that cannot set deadlines (httptest's, a wrapper) simply
-		   leaves the phase unbounded, exactly as before. */
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		/* Whatever the headers claim: an upgrade header on a plain POST must not lift the only bound on
+		   the body phase. The real upgrade clears the deadline in handleWS, once the router, not a
+		   header, has decided the request is /ws. Best effort: a ResponseWriter that cannot set
+		   deadlines leaves the phase unbounded. */
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(timeout))
 		next.ServeHTTP(w, r)
 	})
 }
 
 /*
-rejectControlPath refuses a request whose PATH carries a control character, before routing.
+rejectControlPath refuses a request whose PATH carries a control character or invalid UTF-8, before routing.
 
 net/http hands the handler a percent-DECODED URL.Path, so `%00` in a URL arrives as a literal NUL
 byte in a path parameter — and PostgreSQL cannot store one in a text column. Every route that put a
@@ -745,10 +776,32 @@ Query parameters have had this guard for a while (rejectControlChars); this is t
 */
 func rejectControlPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.IndexFunc(r.URL.Path, unicode.IsControl) >= 0 {
+		if invalidParamText(r.URL.Path) {
 			writeProblem(w, http.StatusBadRequest, "invalid path",
-				"the request path contains a control character")
+				"the request path must be valid UTF-8 without control characters")
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// lenientQueryParams are the query parameters whose unparseable value reads as unset, so their
+// handlers never see garbage bytes as an error; every other parameter goes through rejectControlChars.
+var lenientQueryParams = []string{"limit", "enabled", "enrich"}
+
+// rejectControlLenientQuery gives lenientQueryParams the 400 every other parameter already answers
+// for a control character or invalid UTF-8: that is malformed input, not an unparseable number.
+func rejectControlLenientQuery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" && strings.HasPrefix(r.URL.Path, "/api/") {
+			q := r.URL.Query()
+			for _, name := range lenientQueryParams {
+				for _, v := range q[name] {
+					if rejectControlChars(w, name, v) {
+						return
+					}
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

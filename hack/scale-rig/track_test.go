@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,5 +130,25 @@ func TestPropTrackerConcurrentProperty(t *testing.T) {
 		if got := p.remaining.Load(); got != 0 {
 			t.Fatalf("probe %d remaining=%d, want 0", i, got)
 		}
+	}
+}
+
+func TestLogCounterCountsWarnAndPrintsErrorWithAttrs(t *testing.T) {
+	var out strings.Builder
+	h := newLogCounter(&out)
+	logger := slog.New(h)
+	logger.Info("registered", "agent", "a1")
+	logger.Warn("heartbeat failed", "agent", "a1")
+	logger.Error("controller exited", "err", errors.New("listen tcp: address in use"))
+
+	if counts := h.snapshot(); counts["registered"] != 0 || counts["heartbeat failed"] != 1 || counts["controller exited"] != 1 {
+		t.Fatalf("counts=%v, want only the Warn and the Error counted once each", counts)
+	}
+	got := out.String()
+	if strings.Contains(got, "heartbeat failed") {
+		t.Fatalf("Warn records must only be counted, printed %q", got)
+	}
+	if !strings.Contains(got, "controller exited err=listen tcp: address in use") {
+		t.Fatalf("Error line %q lacks its attrs", got)
 	}
 }

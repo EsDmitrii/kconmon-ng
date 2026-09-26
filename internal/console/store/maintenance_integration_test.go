@@ -79,7 +79,7 @@ func TestMaintenanceLifecycle(t *testing.T) {
 		t.Fatalf("ListMaintenanceWindows = %+v, want the one created window", page.Windows)
 	}
 
-	if err := db.DeleteMaintenanceWindow(ctx, created.ID); err != nil {
+	if err = db.DeleteMaintenanceWindow(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteMaintenanceWindow: %v", err)
 	}
 	page, err = db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{})
@@ -123,10 +123,10 @@ func TestMaintenanceCheckConstraintRejectsAnInvertedWindow(t *testing.T) {
 		{"end equal to start", start},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := pool.Exec(ctx, `
+			_, insertErr := pool.Exec(ctx, `
 				INSERT INTO maintenance_windows (scope, start_at, end_at, reason, created_by)
 				VALUES ('node-a', $1, $2, 'raw', 'test')`, start, tc.end)
-			if err == nil {
+			if insertErr == nil {
 				t.Fatal("the raw INSERT succeeded; maintenance_end_after_start is not enforcing end_at > start_at")
 			}
 		})
@@ -216,7 +216,7 @@ func TestListMaintenanceWindowsScopeFilterCanSelectTheGlobalOnes(t *testing.T) {
 		t.Errorf("a nil scope returned %d windows, want all 4", len(all.Windows))
 	}
 
-	global, err := db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{Scope: scopePtr("")})
+	global, err := db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{Scope: new("")})
 	if err != nil {
 		t.Fatalf("ListMaintenanceWindows(global): %v", err)
 	}
@@ -229,7 +229,7 @@ func TestListMaintenanceWindowsScopeFilterCanSelectTheGlobalOnes(t *testing.T) {
 		}
 	}
 
-	scoped, err := db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{Scope: scopePtr("node-a")})
+	scoped, err := db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{Scope: new("node-a")})
 	if err != nil {
 		t.Fatalf("ListMaintenanceWindows(node-a): %v", err)
 	}
@@ -245,7 +245,7 @@ func TestListMaintenanceWindowsPagesNewestFirst(t *testing.T) {
 
 	const total = 7
 	base := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		in := maintenanceInput("node-"+strconv.Itoa(i), base.Add(time.Duration(i)*time.Hour), time.Minute)
 		if _, err := db.CreateMaintenanceWindow(ctx, in); err != nil {
 			t.Fatalf("seed %d: %v", i, err)

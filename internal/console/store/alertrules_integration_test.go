@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,22 @@ import (
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
+
+// syncAlertRule records a reconcile outcome onto rule's current version, as the reconciler does, and
+// returns the row as stored.
+func syncAlertRule(t *testing.T, db *store.DB, rule store.AlertRule, status, message string, lastSyncedAt *time.Time) store.AlertRule {
+	t.Helper()
+	ctx := context.Background()
+	applied, err := db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, rule.ID, rule.UpdatedAt, status, message, lastSyncedAt)
+	if err != nil || !applied {
+		t.Fatalf("UpdateAlertRuleSyncStatusIfUnchanged(%s) = %v, %v; want true, nil", status, applied, err)
+	}
+	got, err := db.GetAlertRule(ctx, rule.ID)
+	if err != nil {
+		t.Fatalf("GetAlertRule: %v", err)
+	}
+	return got
+}
 
 // newAlertRulesDB opens a *store.DB with migrations applied, dropping and re-creating the schema
 // first.
@@ -132,16 +149,13 @@ func TestAlertRuleLifecycle(t *testing.T) {
 
 	// The sync update.
 	syncedAt := time.Now().UTC().Truncate(time.Microsecond)
-	synced, err := db.UpdateAlertRuleSyncStatus(ctx, created.ID, store.AlertSyncStatusSynced, "applied", &syncedAt)
-	if err != nil {
-		t.Fatalf("UpdateAlertRuleSyncStatus: %v", err)
-	}
+	synced := syncAlertRule(t, db, updated, store.AlertSyncStatusSynced, "applied", &syncedAt)
 	if synced.SyncStatus != store.AlertSyncStatusSynced || synced.SyncMessage != "applied" {
-		t.Errorf("UpdateAlertRuleSyncStatus: got status=%q message=%q, want synced/applied",
+		t.Errorf("sync update: got status=%q message=%q, want synced/applied",
 			synced.SyncStatus, synced.SyncMessage)
 	}
 	if synced.LastSyncedAt == nil || !synced.LastSyncedAt.Equal(syncedAt) {
-		t.Errorf("UpdateAlertRuleSyncStatus: LastSyncedAt = %v, want %v", synced.LastSyncedAt, syncedAt)
+		t.Errorf("sync update: LastSyncedAt = %v, want %v", synced.LastSyncedAt, syncedAt)
 	}
 
 	if err := db.DeleteAlertRule(ctx, created.ID); err != nil {
@@ -274,17 +288,13 @@ func TestAlertRuleUpdatesAreTwoDisjointHalves(t *testing.T) {
 	}
 
 	syncedAt := time.Now().UTC().Truncate(time.Microsecond)
-	synced, err := db.UpdateAlertRuleSyncStatus(ctx, created.ID,
-		store.AlertSyncStatusSynced, "applied to kconmon-ng-console", &syncedAt)
-	if err != nil {
-		t.Fatalf("UpdateAlertRuleSyncStatus: %v", err)
-	}
+	synced := syncAlertRule(t, db, created, store.AlertSyncStatusSynced, "applied to kconmon-ng-console", &syncedAt)
 
 	// Direction 1: the sync update touched NOTHING the operator typed.
 	if synced.Name != created.Name || synced.Kind != created.Kind || synced.Severity != created.Severity ||
 		synced.ForNs != created.ForNs || synced.Enabled != created.Enabled ||
 		synced.RenderedExpr != created.RenderedExpr {
-		t.Errorf("UpdateAlertRuleSyncStatus changed a builder field: got %+v, want %+v", synced, created)
+		t.Errorf("the sync update changed a builder field: got %+v, want %+v", synced, created)
 	}
 	assertJSONEqual(t, "Params", synced.Params, string(created.Params))
 	assertJSONEqual(t, "Labels", synced.Labels, string(created.Labels))
@@ -292,7 +302,7 @@ func TestAlertRuleUpdatesAreTwoDisjointHalves(t *testing.T) {
 	// Not even updated_at: a 60s reconcile loop bumping it would make every
 	// rule look freshly edited every minute.
 	if !synced.UpdatedAt.Equal(created.UpdatedAt) {
-		t.Errorf("UpdateAlertRuleSyncStatus moved UpdatedAt from %v to %v", created.UpdatedAt, synced.UpdatedAt)
+		t.Errorf("the sync update moved UpdatedAt from %v to %v", created.UpdatedAt, synced.UpdatedAt)
 	}
 
 	// Direction 2: the builder update resets the sync verdict, and keeps
@@ -318,16 +328,12 @@ func TestAlertRuleUpdatesAreTwoDisjointHalves(t *testing.T) {
 
 	// And an error outcome with a nil lastSyncedAt writes SQL NULL rather than
 	// year 1.
-	errored, err := db.UpdateAlertRuleSyncStatus(ctx, created.ID,
-		store.AlertSyncStatusError, "PrometheusRule CRD is absent", nil)
-	if err != nil {
-		t.Fatalf("UpdateAlertRuleSyncStatus(error): %v", err)
-	}
+	errored := syncAlertRule(t, db, updated, store.AlertSyncStatusError, "PrometheusRule CRD is absent", nil)
 	if errored.LastSyncedAt != nil {
-		t.Errorf("UpdateAlertRuleSyncStatus(nil lastSyncedAt): LastSyncedAt = %v, want nil", errored.LastSyncedAt)
+		t.Errorf("sync update with a nil lastSyncedAt: LastSyncedAt = %v, want nil", errored.LastSyncedAt)
 	}
 	if errored.SyncStatus != store.AlertSyncStatusError || errored.SyncMessage != "PrometheusRule CRD is absent" {
-		t.Errorf("UpdateAlertRuleSyncStatus(error): got status=%q message=%q",
+		t.Errorf("sync update (error): got status=%q message=%q",
 			errored.SyncStatus, errored.SyncMessage)
 	}
 }
@@ -442,9 +448,8 @@ func TestAlertRuleUnknownIDIsNotFound(t *testing.T) {
 	if _, err := db.UpdateAlertRule(ctx, missing, alertRuleInput("PairLossHigh")); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateAlertRule(unknown) = %v, want ErrNotFound", err)
 	}
-	_, err := db.UpdateAlertRuleSyncStatus(ctx, missing, store.AlertSyncStatusSynced, "", nil)
-	if !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("UpdateAlertRuleSyncStatus(unknown) = %v, want ErrNotFound", err)
+	if applied, err := db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, missing, time.Now(), store.AlertSyncStatusSynced, "", nil); err != nil || applied {
+		t.Errorf("UpdateAlertRuleSyncStatusIfUnchanged(unknown) = %v, %v; want false, nil", applied, err)
 	}
 	if err := db.DeleteAlertRule(ctx, missing); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("DeleteAlertRule(unknown) = %v, want ErrNotFound", err)
@@ -556,5 +561,137 @@ func assertJSONEqual(t *testing.T, field string, got json.RawMessage, want strin
 	wantJSON, _ := json.Marshal(wantVal)
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("%s = %s, want %s", field, gotJSON, wantJSON)
+	}
+}
+
+// The reconciler's guarded write-back lands only on the version it rendered: an edit since the pass
+// read the row, or a delete, leaves the row alone and reports false.
+func TestUpdateAlertRuleSyncStatusIfUnchangedSkipsAnEditedRule(t *testing.T) {
+	db, _ := newAlertRulesDB(t)
+	ctx := context.Background()
+
+	created, err := db.CreateAlertRule(ctx, alertRuleInput("PairLossHigh"))
+	if err != nil {
+		t.Fatalf("CreateAlertRule: %v", err)
+	}
+	read, err := db.GetAlertRule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetAlertRule: %v", err)
+	}
+	syncedAt := time.Now().UTC().Truncate(time.Microsecond)
+
+	applied, err := db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, read.ID, read.UpdatedAt,
+		store.AlertSyncStatusSynced, "", &syncedAt)
+	if err != nil || !applied {
+		t.Fatalf("write-back on the version that was read = (%v, %v), want (true, nil)", applied, err)
+	}
+	got, err := db.GetAlertRule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetAlertRule: %v", err)
+	}
+	if got.SyncStatus != store.AlertSyncStatusSynced || got.LastSyncedAt == nil || !got.LastSyncedAt.Equal(syncedAt) {
+		t.Fatalf("after the write-back: status %q, lastSyncedAt %v, want synced at %v", got.SyncStatus, got.LastSyncedAt, syncedAt)
+	}
+	if !got.UpdatedAt.Equal(read.UpdatedAt) {
+		t.Errorf("the write-back moved UpdatedAt from %v to %v", read.UpdatedAt, got.UpdatedAt)
+	}
+
+	if _, uerr := db.UpdateAlertRule(ctx, created.ID, alertRuleInput("PairLossHigher")); uerr != nil {
+		t.Fatalf("UpdateAlertRule: %v", uerr)
+	}
+	later := syncedAt.Add(time.Minute)
+	applied, err = db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, read.ID, read.UpdatedAt,
+		store.AlertSyncStatusSynced, "", &later)
+	if err != nil || applied {
+		t.Fatalf("write-back over an edit = (%v, %v), want (false, nil)", applied, err)
+	}
+	got, err = db.GetAlertRule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetAlertRule: %v", err)
+	}
+	if got.SyncStatus != store.AlertSyncStatusUnsynced {
+		t.Errorf("an edited rule was stamped %q by a pass that rendered the version before the edit", got.SyncStatus)
+	}
+
+	if derr := db.DeleteAlertRule(ctx, created.ID); derr != nil {
+		t.Fatalf("DeleteAlertRule: %v", derr)
+	}
+	applied, err = db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, got.ID, got.UpdatedAt,
+		store.AlertSyncStatusSynced, "", &later)
+	if err != nil || applied {
+		t.Errorf("write-back on a deleted rule = (%v, %v), want (false, nil)", applied, err)
+	}
+}
+
+// Two rule names that differ under lower() can still sanitize to one Prometheus alert name
+// ('pair-loss', 'pair.loss', 'PairLoss'), and a bundle holding both is refused as a whole. The write
+// that would create the clash is refused; a row already clashing can still be edited and disabled.
+func TestAlertRuleWriteRefusesANameThatTakesAnotherRulesAlertName(t *testing.T) {
+	db, dsn := newAlertRulesDB(t)
+	ctx := context.Background()
+
+	if _, err := db.CreateAlertRule(ctx, alertRuleInput("pair-loss")); err != nil {
+		t.Fatalf("CreateAlertRule(pair-loss): %v", err)
+	}
+	zone, err := db.CreateAlertRule(ctx, alertRuleInput("zone-latency"))
+	if err != nil {
+		t.Fatalf("CreateAlertRule(zone-latency): %v", err)
+	}
+
+	for _, name := range []string{"pair.loss", "PairLoss", "Pair.Loss"} {
+		_, err = db.CreateAlertRule(ctx, alertRuleInput(name))
+		if err == nil || !strings.HasPrefix(err.Error(), "store: alert rule: ") ||
+			!strings.Contains(err.Error(), `"PairLoss"`) || !strings.Contains(err.Error(), `"pair-loss"`) {
+			t.Errorf("CreateAlertRule(%q) = %v, want a validation error naming PairLoss and pair-loss", name, err)
+		}
+	}
+	if _, err = db.CreateAlertRule(ctx, alertRuleInput("PAIR-LOSS")); !errors.Is(err, store.ErrAlreadyExists) {
+		t.Errorf("CreateAlertRule(PAIR-LOSS) = %v, want ErrAlreadyExists from the lower(name) index", err)
+	}
+	if _, err = db.UpdateAlertRule(ctx, zone.ID, alertRuleInput("Pair_Loss")); err != nil {
+		t.Errorf("UpdateAlertRule to Pair_Loss (a different alert name) = %v", err)
+	}
+	if _, err = db.UpdateAlertRule(ctx, zone.ID, alertRuleInput("pair.loss")); err == nil ||
+		!strings.HasPrefix(err.Error(), "store: alert rule: ") {
+		t.Errorf("UpdateAlertRule renaming into the clash = %v, want a validation error", err)
+	}
+
+	// A clash an older version let in stays editable, so the operator can disable or rename it.
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	legacy := uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO alert_rules (id, name, kind, params, severity, for_ns, labels, annotations, enabled, rendered_expr)
+		SELECT $1, 'Pair.Loss', kind, params, severity, for_ns, labels, annotations, enabled, rendered_expr
+		FROM alert_rules WHERE name = 'pair-loss'`, legacy); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	in := alertRuleInput("Pair.Loss")
+	in.Enabled = false
+	if _, err := db.UpdateAlertRule(ctx, legacy, in); err != nil {
+		t.Errorf("disabling a row that already clashed = %v, want it accepted", err)
+	}
+}
+
+// uuid.Parse accepts a rule id in upper case, braced or without hyphens, and the route passes it on
+// as sent. It is still the same rule, so renaming it to another spelling of its own alert name is not
+// a clash with itself.
+func TestAlertRuleRenameWithinItsAlertNameTakesAnyIDSpelling(t *testing.T) {
+	db, _ := newAlertRulesDB(t)
+	ctx := context.Background()
+	rule, err := db.CreateAlertRule(ctx, alertRuleInput("pair-loss"))
+	if err != nil {
+		t.Fatalf("CreateAlertRule(pair-loss): %v", err)
+	}
+	for _, tc := range []struct{ id, name string }{
+		{strings.ToUpper(rule.ID), "pair.loss"},
+		{"{" + rule.ID + "}", "PairLoss"},
+		{strings.ReplaceAll(rule.ID, "-", ""), "pair-loss"},
+	} {
+		if _, err := db.UpdateAlertRule(ctx, tc.id, alertRuleInput(tc.name)); err != nil {
+			t.Errorf("UpdateAlertRule(%s, %q) = %v, want the rename accepted", tc.id, tc.name, err)
+		}
 	}
 }

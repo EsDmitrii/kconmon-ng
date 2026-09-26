@@ -3,6 +3,7 @@ package checks_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
@@ -160,4 +161,35 @@ func TestPlanTypedNodeDestinationDedupesAgainstStringDestinations(t *testing.T) 
 		t.Fatalf("Plan: %v", err)
 	}
 	equalPairs(t, pairs, []checks.Pair{nodePair("n1", "n2")})
+}
+
+// Every type runs toward a node; toward anything else only the types the agent accepts, and the
+// refusal names them.
+func TestRefuseExternalRun(t *testing.T) {
+	for _, tc := range []struct {
+		checkType, destinationKind string
+		refused                    bool
+	}{
+		{"udp", checks.DestKindNode, false},
+		{"tcp", checks.DestKindTarget, false},
+		{"mtr", checks.DestKindAdhoc, false},
+		{"udp", checks.DestKindTarget, true},
+		{"dns", checks.DestKindAdhoc, true},
+	} {
+		err := checks.RefuseExternalRun(tc.checkType, tc.destinationKind)
+		if (err != nil) != tc.refused {
+			t.Errorf("%s toward %s: err = %v, want refused %v", tc.checkType, tc.destinationKind, err, tc.refused)
+			continue
+		}
+		if err != nil && !strings.Contains(err.Error(), "tcp, icmp and mtr") {
+			t.Errorf("%s toward %s: %q does not name the types that run", tc.checkType, tc.destinationKind, err)
+		}
+	}
+
+	// The schedule API answers with this text verbatim, so it names the kind of schedule it judges.
+	const want = `check type dns cannot run toward destination kind "adhoc" as a one-off or repeating run: ` +
+		`the agents run only tcp, icmp and mtr checks toward one`
+	if err := checks.RefuseExternalRun("dns", checks.DestKindAdhoc); err == nil || err.Error() != want {
+		t.Errorf("RefuseExternalRun(dns, adhoc) = %v, want %q", err, want)
+	}
 }

@@ -4,6 +4,8 @@ package checks
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
@@ -39,9 +41,10 @@ const (
 	udpMinPerPairTimeout = 5 * time.Second
 
 	/* pmtuMinPerPairTimeout is the same floor for the path MTU probe. On a black hole the search
-	   waits out a read deadline for both full-size attempts and for up to half of its 16 bisection
-	   steps: about 9s with the shipped 500ms timeout. A shorter deadline cancels the search midway,
-	   and the pair reads "unreachable" instead of the black hole the run was started to find. */
+	   waits out a read deadline per lost datagram: both full-size attempts, up to 16 bisection steps
+	   and the two confirmation sends, at most about 10s with the shipped 500ms timeout. A shorter
+	   deadline cancels the search midway, and the pair reads "unreachable" instead of the black hole
+	   the run was started to find. */
 	pmtuMinPerPairTimeout = 15 * time.Second
 
 	// minPerPairTimeout / maxPerPairTimeout clamp Spec.Timeout.
@@ -119,6 +122,9 @@ var (
 	// ErrInvalidDestination is returned when a Spec.TypedDestinations entry names a Kind that is not
 	// node|target|adhoc; rejected up front for the same reason ErrUnknownType.
 	ErrInvalidDestination = errors.New("invalid destination")
+	// ErrInvalidPlane is returned when Spec.Plane names a plane other than PodPlane; its text is the
+	// whole rule, so callers pass it through as the detail.
+	ErrInvalidPlane = errors.New(`plane must be "pod": agents probe the pod network only`)
 	// ErrDurationOutOfRange is returned when Spec.Duration is non-zero but
 	// outside [MinRunDuration, MaxRunDuration]. Refused rather than clamped --
 	// see Spec.Duration's own comment for why a duration is not a timeout.
@@ -152,6 +158,27 @@ const (
 	// DestKindAdhoc is an operator-typed address that no targets row backs.
 	DestKindAdhoc = "adhoc"
 )
+
+// A run stores every node name and its destination in its spec, and every result row repeats the
+// destination's label; every run list re-reads them for each viewer. So each of them is bounded.
+const (
+	// MaxNodeNameLen is a Kubernetes node name's own limit, a DNS subdomain.
+	MaxNodeNameLen = 253
+	// MaxAddressLen bounds an external destination's address, which is a URL at its longest.
+	MaxAddressLen = 2048
+)
+
+// PodPlane is the only network plane the agents probe, and the only one the controller accepts.
+const PodPlane = "pod"
+
+// ValidatePlane refuses any plane but PodPlane; empty means PodPlane. The plane is never quoted
+// back: it may be megabytes long.
+func ValidatePlane(plane string) error {
+	if plane == "" || plane == PodPlane {
+		return nil
+	}
+	return ErrInvalidPlane
+}
 
 // Destination is one resolved destination for a run; address is the thing actually probed and is
 // deliberately NOT an identifier.
@@ -215,6 +242,29 @@ var validCheckTypes = map[string]struct{}{
 	"dns":  {},
 	"http": {},
 	"mtr":  {},
+}
+
+// externalRunCheckTypes mirrors the agent's externalCapableChecks (internal/agent/tasks.go), a
+// deliberate copy for the same reason as validCheckTypes: the agent refuses every pair of a run of
+// any other type toward a target or ad-hoc destination.
+var externalRunCheckTypes = []string{"tcp", "icmp", "mtr"}
+
+// RunsTowardExternal reports whether a run of checkType can probe a target or ad-hoc destination.
+func RunsTowardExternal(checkType string) bool {
+	return slices.Contains(externalRunCheckTypes, checkType)
+}
+
+// RefuseExternalRun says why a run of checkType cannot probe a destination of destinationKind, or
+// returns nil: every type runs toward a node, only externalRunCheckTypes toward anything else. The
+// text names one-off and repeating runs because a continuous check toward a target is judged apart.
+func RefuseExternalRun(checkType, destinationKind string) error {
+	if destinationKind == DestKindNode || RunsTowardExternal(checkType) {
+		return nil
+	}
+	last := len(externalRunCheckTypes) - 1
+	return fmt.Errorf("check type %s cannot run toward destination kind %q as a one-off or repeating run: "+
+		"the agents run only %s and %s checks toward one",
+		checkType, destinationKind, strings.Join(externalRunCheckTypes[:last], ", "), externalRunCheckTypes[last])
 }
 
 // Pair is one (source, destination) dispatch within a run.
@@ -494,10 +544,12 @@ func EffectiveSampleInterval(spec *Spec, pairs []Pair, perPairTimeout time.Durat
 // icmp, dns or http probe answers in milliseconds and its timeout is only the ceiling on a probe
 // that has already failed, so planning a cadence around it would slow down every healthy run.
 // A traceroute is different in kind: it walks up to 30 hops in sequence and routinely spends tens
-// of seconds doing it, so for mtr the budget is the real thing to plan around. A trace that
-// finishes early still densifies on its own, because rounds run back to back.
+// of seconds doing it, so for mtr the budget is the real thing to plan around. pmtu is planned the
+// same way: over a black hole it waits out a read deadline per lost datagram, about 10s a probe (see
+// pmtuMinPerPairTimeout). A probe that finishes early still densifies on its own, because rounds run
+// back to back.
 func perPairBudget(checkType string, perPairTimeout time.Duration) time.Duration {
-	if checkType == string(model.CheckMTR) {
+	if checkType == string(model.CheckMTR) || checkType == string(model.CheckPMTU) {
 		return perPairTimeout
 	}
 	return 0

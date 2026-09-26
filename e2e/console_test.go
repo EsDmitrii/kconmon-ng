@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -230,7 +231,7 @@ type scheduleRow struct {
 // than a full exposition parse.
 func metricSamples(text, name string, labels map[string]string) []string {
 	var out []string
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if !strings.HasPrefix(line, name+"{") {
 			continue
 		}
@@ -263,7 +264,8 @@ func sampleValue(t *testing.T, line string) float64 {
 }
 
 // scrapeAgentMetrics fetches one agent's /metrics, returning "" (and logging)
-// on anything that is not a 200 -- poll bodies treat that as "not yet".
+// on anything that is not a 200 -- poll bodies treat that as "not yet". It goes through request, so
+// a stalled port-forward fails within requestTimeout instead of hanging until the go test timeout.
 func scrapeAgentMetrics(t *testing.T, agentBase string) string {
 	t.Helper()
 	status, _, data, err := request(t, http.MethodGet, agentBase+"/metrics", nil)
@@ -413,6 +415,13 @@ func TestConsoleRuns(t *testing.T) {
 	var final struct {
 		Status    string `json:"status"`
 		PairTotal int32  `json:"pairTotal"`
+		PairOK    int32  `json:"pairOk"`
+		Results   []struct {
+			SourceNode      string `json:"sourceNode"`
+			DestinationNode string `json:"destinationNode"`
+			Success         bool   `json:"success"`
+			Error           string `json:"error"`
+		} `json:"results"`
 	}
 	pollUntil(t, 60*time.Second, 2*time.Second,
 		fmt.Sprintf("run %s to reach a terminal status", created.ID), func() bool {
@@ -442,6 +451,18 @@ func TestConsoleRuns(t *testing.T) {
 
 	if final.PairTotal <= 0 {
 		t.Errorf("expected pairTotal > 0, got %d", final.PairTotal)
+	}
+	// A terminal status alone proves nothing reached an agent: a run whose every pair failed is
+	// terminal too. In kind every pod-plane TCP pair should connect, so demand real successes.
+	succeeded := 0
+	for _, r := range final.Results {
+		if r.Success {
+			succeeded++
+		}
+	}
+	if final.Status == "failed" || final.PairOK <= 0 || succeeded == 0 {
+		t.Errorf("run %s: status=%s pairOk=%d/%d, %d of %d results succeeded; want at least one successful pair: %+v",
+			created.ID, final.Status, final.PairOK, final.PairTotal, succeeded, len(final.Results), final.Results)
 	}
 
 	listStatus, _, listData := mustRequest(t, http.MethodGet, base+"/api/v1/runs?limit=500", nil)
@@ -679,7 +700,8 @@ func TestConsoleSchedule(t *testing.T) {
 	// controller, so 120s is several whole cycles rather than a tight race.
 	pollUntil(t, 120*time.Second, 3*time.Second,
 		fmt.Sprintf("a run initiated by scheduler schedule %s", sched.ID), func() bool {
-			return scheduledRunCount(t, base, sched.ID) > 0
+			count, _ := scheduledRunCount(t, base, sched.ID)
+			return count > 0
 		})
 
 	// Disable it, then let anything already in flight land before taking the baseline.
@@ -699,29 +721,36 @@ func TestConsoleSchedule(t *testing.T) {
 	}
 
 	time.Sleep(interval + 5*time.Second)
-	baseline := scheduledRunCount(t, base, sched.ID)
+	baseline, ok := scheduledRunCount(t, base, sched.ID)
+	if !ok {
+		t.Fatalf("could not read the runs list for the baseline after disabling schedule %s", sched.ID)
+	}
 
 	// Two and a half intervals of quiet. A disabled schedule that still fires
 	// would produce at least two more runs in that window.
 	time.Sleep(interval*2 + interval/2)
-	after := scheduledRunCount(t, base, sched.ID)
+	after, ok := scheduledRunCount(t, base, sched.ID)
+	if !ok {
+		t.Fatalf("could not read the runs list after the quiet window for schedule %s", sched.ID)
+	}
 	if after != baseline {
 		t.Errorf("expected no further runs after disabling schedule %s, count went %d -> %d",
 			sched.ID, baseline, after)
 	}
 }
 
-// scheduledRunCount counts the runs on the newest page that were initiated by scheduleID.
-func scheduledRunCount(t *testing.T, base, scheduleID string) int {
+// scheduledRunCount counts the runs on the newest page that were initiated by scheduleID; ok is false
+// when the list could not be read, so a comparison of two failed reads cannot pass as "no new runs".
+func scheduledRunCount(t *testing.T, base, scheduleID string) (count int, ok bool) {
 	t.Helper()
 	status, _, data, err := request(t, http.MethodGet, base+"/api/v1/runs?limit=500", nil)
 	if err != nil {
-		t.Logf("list runs failed (treated as 0): %v", err)
-		return 0
+		t.Logf("list runs failed: %v", err)
+		return 0, false
 	}
 	if status != http.StatusOK {
-		t.Logf("list runs returned %d (treated as 0)", status)
-		return 0
+		t.Logf("list runs returned %d", status)
+		return 0, false
 	}
 
 	var page struct {
@@ -732,17 +761,16 @@ func scheduledRunCount(t *testing.T, base, scheduleID string) int {
 		} `json:"runs"`
 	}
 	if err := json.Unmarshal(data, &page); err != nil {
-		t.Logf("decode runs list failed (treated as 0): %v", err)
-		return 0
+		t.Logf("decode runs list failed: %v", err)
+		return 0, false
 	}
 
-	count := 0
 	for _, run := range page.Runs {
 		if run.InitiatorKind == "scheduler" && run.InitiatorID == scheduleID {
 			count++
 		}
 	}
-	return count
+	return count, true
 }
 
 // TestConsoleExternalCheckAssignment is the continuous external-check path end to end; none of that
@@ -1103,28 +1131,8 @@ func silentHopIP(ip string) bool {
 	return trimmed == "" || trimmed == "*"
 }
 
-// hoplessTrace reports whether the run produced results and not one of them
-// recorded a hop -- the only trace ProjectMTRSnapshot still refuses.
-//
-// An ALL-SILENT trace is not that case: the projector records it under the one
-// reserved silent identity, precisely so a destination that eats ICMP
-// TTL-exceeded keeps a history instead of vanishing from MTR Explorer. A trace
-// with no hops at all never walked a path, so there is nothing to record.
-func hoplessTrace(detail *mtrRunDetail) bool {
-	if len(detail.Results) == 0 {
-		return false
-	}
-	for i := range detail.Results {
-		if len(detail.Results[i].Result.Details.Hops) > 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // mtrRunEvidence renders what a run's pairs actually reported, hop addresses
-// included. It is what turns the skip below into a statement with proof
-// attached instead of a shrug.
+// included, so the failure below says where the trace was lost.
 func mtrRunEvidence(detail *mtrRunDetail) string {
 	parts := make([]string, 0, len(detail.Results)+1)
 	parts = append(parts, fmt.Sprintf("run %s status=%s results=%d", detail.ID, detail.Status, len(detail.Results)))
@@ -1141,8 +1149,9 @@ func mtrRunEvidence(detail *mtrRunDetail) string {
 	return strings.Join(parts, "; ")
 }
 
-// endUnprojected ends the test after a dispatched trace produced no path history; anything else --
-// a pair that never produced a payload, a checker error.
+// endUnprojected fails the test after a dispatched trace produced no path history. There is no
+// environment to excuse: a trace that reaches the destination always carries at least the destination
+// hop (internal/checker/mtr.go), and one that does not reach it reports success=false.
 func endUnprojected(t *testing.T, base, runID, source, destination string) {
 	t.Helper()
 	detail, ok := getRunDetail(t, base, runID)
@@ -1150,14 +1159,7 @@ func endUnprojected(t *testing.T, base, runID, source, destination string) {
 		t.Fatalf("no path-history row appeared for %s -> %s after run %s, and the run itself could not be read",
 			source, destination, runID)
 	}
-	if hoplessTrace(&detail) {
-		t.Skipf("traceroute inside this kind cluster recorded no hop at all for %s -> %s, so there is no "+
-			"path to project (internal/console/checks/mtrproject.go returns false for a hopless trace). "+
-			"Environment limitation, not a console defect -- evidence: %s",
-			source, destination, mtrRunEvidence(&detail))
-	}
-	t.Fatalf("no path-history row appeared for %s -> %s within %s, and the run's trace DID record hops, "+
-		"so the projector should have written one: %s",
+	t.Fatalf("no path-history row appeared for %s -> %s within %s: %s",
 		source, destination, mtrProjectionBudget, mtrRunEvidence(&detail))
 }
 
@@ -1452,9 +1454,7 @@ func TestConsoleAnnotations(t *testing.T) {
 
 	// 1. scope present and exact: the mark comes back, and nothing else does.
 	exact := url.Values{}
-	for key, values := range window {
-		exact[key] = values
-	}
+	maps.Copy(exact, window)
 	exact.Set("scope", scope)
 	page := listAnnotations(t, base, exact)
 	if !containsAnnotation(page, created.ID) {
@@ -1469,9 +1469,7 @@ func TestConsoleAnnotations(t *testing.T) {
 	// 2. scope PRESENT AND EMPTY: the global marks only, so a scoped mark must
 	// not appear -- the assertion this whole test exists for.
 	globalOnly := url.Values{}
-	for key, values := range window {
-		globalOnly[key] = values
-	}
+	maps.Copy(globalOnly, window)
 	globalOnly.Set("scope", "")
 	page = listAnnotations(t, base, globalOnly)
 	if containsAnnotation(page, created.ID) {
@@ -3615,8 +3613,8 @@ func TestConsoleWSSubscribeGate(t *testing.T) {
 	}
 }
 
-// TestConsoleDegradedMode runs against a SEPARATE console rollout with
-// console.database.mode=disabled (.github/workflows/e2e.yaml's "Reinstall console with database
+// TestConsoleDegradedMode runs against a SEPARATE console rollout with no database configured
+// (database.existingSecret unset; .github/workflows/e2e.yaml's "Reinstall console with database
 // disabled" + "Run degraded-mode E2E tests" steps redeploy and re-forward before invoking just this
 // test by name) -- it reuses KCONMON_CONSOLE_URL, now pointed at that rollout's fresh port-forward;
 // so all three CRUD surfaces must answer 503 here.

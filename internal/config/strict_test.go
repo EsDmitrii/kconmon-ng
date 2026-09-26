@@ -78,13 +78,24 @@ checkers:
 	}
 }
 
+// helmBinary returns the helm the chart-render tests shell out to. CI pins one (ci.yaml's Test job),
+// so there a missing helm fails instead of skipping the strict-decode gate.
+func helmBinary(t *testing.T) string {
+	t.Helper()
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm not found in PATH; CI sets it up with azure/setup-helm in the Test job")
+		}
+		t.Skip("helm not found in PATH, skipping chart render validation")
+	}
+	return helm
+}
+
 // TestHelmRenderedConfigIsValid renders the chart, extracts the ConfigMap's config.yaml; this
 // guards against the chart emitting a key that strict decode would reject.
 func TestHelmRenderedConfigIsValid(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm not found in PATH, skipping chart render validation")
-	}
+	helm := helmBinary(t)
 
 	// Repo root is two levels up from internal/config.
 	chartPath := filepath.Join("..", "..", "charts", "kconmon-ng")
@@ -107,10 +118,7 @@ func TestHelmRenderedConfigIsValid(t *testing.T) {
 // TestValuesLocalConfigIsValid renders the chart with hack/values-local.yaml
 // and validates the resulting app config under strict decoding.
 func TestValuesLocalConfigIsValid(t *testing.T) {
-	helm, err := exec.LookPath("helm")
-	if err != nil {
-		t.Skip("helm not found in PATH, skipping values-local render validation")
-	}
+	helm := helmBinary(t)
 
 	chartPath := filepath.Join("..", "..", "charts", "kconmon-ng")
 	valuesPath := filepath.Join("..", "..", "hack", "values-local.yaml")
@@ -130,16 +138,9 @@ func TestValuesLocalConfigIsValid(t *testing.T) {
 	}
 }
 
-/*
- * extractConfigMapConfig pulls the AGENT/CONTROLLER "config.yaml: |" block out of the rendered helm
- * manifest and returns its dedented content.
- *
- * The console renders a config.yaml of its own (a different struct: auth, prometheus, database…),
- * and this test validates the SHARED one against config.Config. It used to take whichever came
- * first, which was a property of template ordering — regrouping templates/ into per-component
- * directories moved the console's ahead of it and the test started validating the wrong document.
- * The source document is now chosen by name, which is what it always meant.
- */
+// extractConfigMapConfig pulls the agent/controller "config.yaml: |" block out of the rendered helm
+// manifest and returns its dedented content. The console renders a config.yaml of its own (a
+// different struct), so the document is chosen by name, never by template order.
 func extractConfigMapConfig(t *testing.T, manifest string) string {
 	t.Helper()
 	manifest = sharedConfigMapDoc(t, manifest)

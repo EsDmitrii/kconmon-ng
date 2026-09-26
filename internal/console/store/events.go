@@ -76,9 +76,11 @@ const (
 	queryGetUserByUsername        = "GetUserByUsername"
 	queryCreateUser               = "CreateUser"
 	queryUpdateUserPassword       = "UpdateUserPassword"
+	queryRehashUserPassword       = "RehashUserPassword"
 	queryListUsers                = "ListUsers"
 	queryCountUsers               = "CountUsers"
-	querySetUserDisabled          = "SetUserDisabled"
+	queryUpdateUser               = "UpdateUser"
+	queryDeleteUser               = "DeleteUser"
 	queryListRoles                = "ListRoles"
 	queryUpsertRole               = "UpsertRole"
 	queryDeleteRole               = "DeleteRole"
@@ -131,12 +133,12 @@ const (
 	queryUpdateWebhookDelivery   = "UpdateWebhookDelivery"
 	queryDeleteWebhook           = "DeleteWebhook"
 
-	queryCreateAlertRule           = "CreateAlertRule"
-	queryGetAlertRule              = "GetAlertRule"
-	queryListAlertRules            = "ListAlertRules"
-	queryUpdateAlertRule           = "UpdateAlertRule"
-	queryUpdateAlertRuleSyncStatus = "UpdateAlertRuleSyncStatus"
-	queryDeleteAlertRule           = "DeleteAlertRule"
+	queryCreateAlertRule                      = "CreateAlertRule"
+	queryGetAlertRule                         = "GetAlertRule"
+	queryListAlertRules                       = "ListAlertRules"
+	queryUpdateAlertRule                      = "UpdateAlertRule"
+	queryUpdateAlertRuleSyncStatusIfUnchanged = "UpdateAlertRuleSyncStatusIfUnchanged"
+	queryDeleteAlertRule                      = "DeleteAlertRule"
 
 	resultOK       = "ok"
 	resultConflict = "conflict"
@@ -633,8 +635,21 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 		case topologyReasonDeregistered, topologyReasonEvicted:
 			// Removing something absent is a no-op, not an error: retention
 			// can cut a subject's registration away and keep its removal.
-			delete(nodes, d.NodeName)
 			delete(agents, d.AgentID)
+			// The node goes only with its last agent: an old pod evicted after its replacement
+			// registered on the same node leaves the node in place.
+			nodeStillPopulated := false
+			if d.AgentID != "" {
+				for _, p := range agents {
+					if p.nodeName == d.NodeName {
+						nodeStillPopulated = true
+						break
+					}
+				}
+			}
+			if !nodeStillPopulated {
+				delete(nodes, d.NodeName)
+			}
 		default:
 			// A reason a newer controller invented. Folding it in either
 			// direction would be a guess, so membership is left untouched.

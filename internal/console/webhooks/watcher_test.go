@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -671,13 +677,32 @@ func TestFingerprintIsStableAndPerLabelSet(t *testing.T) {
 type fakeMaintenance struct {
 	windows []store.MaintenanceWindow
 	err     error
+	// pages, when set, replaces windows: page i is answered for cursor "page-i", the first for "".
+	pages [][]store.MaintenanceWindow
+	calls int
 }
 
-func (f *fakeMaintenance) ListMaintenanceWindows(context.Context, store.MaintenanceFilter) (store.MaintenancePage, error) {
+func (f *fakeMaintenance) ListMaintenanceWindows(_ context.Context, mf store.MaintenanceFilter) (store.MaintenancePage, error) {
+	f.calls++
 	if f.err != nil {
 		return store.MaintenancePage{}, f.err
 	}
-	return store.MaintenancePage{Windows: f.windows}, nil
+	if f.pages == nil {
+		return store.MaintenancePage{Windows: f.windows}, nil
+	}
+	i := 0
+	if mf.Cursor != "" {
+		n, err := strconv.Atoi(strings.TrimPrefix(mf.Cursor, "page-"))
+		if err != nil {
+			return store.MaintenancePage{}, err
+		}
+		i = n
+	}
+	page := store.MaintenancePage{Windows: f.pages[i]}
+	if i+1 < len(f.pages) {
+		page.NextCursor = "page-" + strconv.Itoa(i+1)
+	}
+	return page, nil
 }
 
 func windowAround(scope string) store.MaintenanceWindow {
@@ -800,6 +825,340 @@ func TestAlertWatcherFailsOpenWhenWindowsCannotBeRead(t *testing.T) {
 	w.poll(context.Background())
 	if got := n.recorded(); len(got) != 1 {
 		t.Fatalf("got %d notifications with the store down, want the fired edge delivered", len(got))
+	}
+}
+
+// newMaintenanceWatcherWith wires rules and metrics too, for the tests that count held edges or need a
+// rule's `for`.
+func newMaintenanceWatcherWith(t *testing.T, src AlertSource, mt MaintenanceSource, rules RuleSource) (*AlertWatcher, *fakeAlertNotifier, *metrics.Metrics) {
+	t.Helper()
+	n := &fakeAlertNotifier{}
+	m := metrics.New("kconmon_ng", prometheus.NewRegistry())
+	w, err := NewAlertWatcher(AlertWatcherDeps{Alerts: src, Notifier: n, Rules: rules, Maintenance: mt,
+		Metrics: m, Interval: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("NewAlertWatcher: %v", err)
+	}
+	w.now = func() time.Time { return testNow }
+	return w, n, m
+}
+
+// pairAlertActiveAt is pairAlert with Prometheus' activeAt moved to at.
+func pairAlertActiveAt(at time.Time) promAlert {
+	a := pairAlert()
+	a.ActiveAt = &at
+	return a
+}
+
+func suppressedCount(m *metrics.Metrics, event string) float64 {
+	return testutil.ToFloat64(m.WebhookSuppressed.WithLabelValues(event))
+}
+
+func assertOneFired(t *testing.T, got []sentAlert, firedAt time.Time) {
+	t.Helper()
+	if len(got) != 1 || got[0].event != store.WebhookEventAlertFired {
+		t.Fatalf("delivered %+v, want exactly one alert.fired", got)
+	}
+	if !got[0].alert.FiredAt.Equal(firedAt) {
+		t.Errorf("firedAt = %v, want the original activeAt %v", got[0].alert.FiredAt, firedAt)
+	}
+}
+
+// suppressed lives in memory, so a console restarted inside a window (a drain or an upgrade, which is
+// what windows are declared for) must hold again what the previous process held: an alert that began
+// inside the window and outlives it still gets its alert.fired when the window closes.
+func TestAlertWatcherRestartInsideAWindowStillDeliversWhenItCloses(t *testing.T) {
+	activeAt := testNow.Add(-30 * time.Minute) // the window opened an hour before testNow
+	firing := promBody(t, pairAlertActiveAt(activeAt))
+	src := newFakeAlertSource(
+		alertReply{body: firing},
+		alertReply{body: firing},
+		alertReply{body: firing},
+		alertReply{body: promBody(t)},
+	)
+	w, n, m := newMaintenanceWatcherWith(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}}, nil)
+
+	w.poll(context.Background()) // the restarted process takes its baseline inside the window
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered inside the window: %+v", got)
+	}
+	if got := suppressedCount(m, store.WebhookEventAlertFired); got != 1 {
+		t.Errorf("WebhookSuppressed(alert.fired) = %v, want 1 for the edge the baseline held again", got)
+	}
+
+	w.now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	w.poll(context.Background()) // the window has closed, the alert still fires
+	assertOneFired(t, n.recorded(), activeAt)
+
+	w.poll(context.Background()) // it resolves after the window
+	got := n.recorded()
+	if len(got) != 2 || got[1].event != store.WebhookEventAlertResolved {
+		t.Fatalf("after the resolve: %+v, want alert.fired then alert.resolved", got)
+	}
+}
+
+// The other half of a restart inside a window: an alert held again at baseline that resolves inside
+// the window sends nothing, not a lone alert.resolved.
+func TestAlertWatcherRestartInsideAWindowHoldsTheResolveToo(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t, pairAlertActiveAt(testNow.Add(-30*time.Minute)))},
+		alertReply{body: promBody(t)},
+	)
+	w, n, m := newMaintenanceWatcherWith(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("n1")}}, nil)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered %+v, want nothing for an alert that began and ended inside the window", got)
+	}
+	if got := suppressedCount(m, store.WebhookEventAlertResolved); got != 1 {
+		t.Errorf("WebhookSuppressed(alert.resolved) = %v, want 1", got)
+	}
+}
+
+// An alert that fired before the window opened was delivered then, so a restart inside the window must
+// not hold it: its resolve inside the window still goes out.
+func TestAlertWatcherRestartInsideAWindowKeepsPreWindowAlertsDelivered(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t, pairAlertActiveAt(testNow.Add(-3*time.Hour)))},
+		alertReply{body: promBody(t)},
+	)
+	w, n, _ := newMaintenanceWatcherWith(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}}, nil)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	got := n.recorded()
+	if len(got) != 1 || got[0].event != store.WebhookEventAlertResolved {
+		t.Fatalf("delivered %+v, want the alert.resolved of an alert that fired before the window", got)
+	}
+}
+
+// activeAt is when the alert went PENDING; it fires `for` later. An alert pending when the window opened
+// and firing inside it was held by the previous process, so the baseline counts the rule's `for`.
+func TestAlertWatcherRestartInsideAWindowCountsTheRulesFor(t *testing.T) {
+	activeAt := testNow.Add(-time.Hour - 2*time.Minute) // two minutes before the window opened
+	firing := promBody(t, pairAlertActiveAt(activeAt))
+	src := newFakeAlertSource(alertReply{body: firing})
+	rules := &fakeRuleSource{rules: []store.AlertRule{{ID: testRuleID, Name: "pair-loss-high",
+		ForNs: int64(5 * time.Minute)}}}
+	w, n, _ := newMaintenanceWatcherWith(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}}, rules)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered inside the window: %+v", got)
+	}
+	w.now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	w.poll(context.Background())
+	assertOneFired(t, n.recorded(), activeAt)
+}
+
+// A window declared after the alert fired did not hold it in the previous process either.
+func TestAlertWatcherRestartDoesNotHoldAlertsOlderThanTheWindowsCreation(t *testing.T) {
+	retro := windowAround("")
+	retro.StartAt = testNow.Add(-2 * time.Hour)
+	retro.CreatedAt = testNow.Add(-10 * time.Minute)
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t, pairAlertActiveAt(testNow.Add(-time.Hour)))},
+		alertReply{body: promBody(t)},
+	)
+	w, n, _ := newMaintenanceWatcherWith(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{retro}}, nil)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	got := n.recorded()
+	if len(got) != 1 || got[0].event != store.WebhookEventAlertResolved {
+		t.Fatalf("delivered %+v, want the alert.resolved of an alert older than the window's creation", got)
+	}
+}
+
+// A restart inside a window while the database is still coming back: the baseline cannot read the
+// windows, so the hold is decided on the first poll that can.
+func TestAlertWatcherRestartDecidesTheHoldOnceWindowsAreReadable(t *testing.T) {
+	activeAt := testNow.Add(-30 * time.Minute)
+	firing := promBody(t, pairAlertActiveAt(activeAt))
+	src := newFakeAlertSource(alertReply{body: firing})
+	mt := &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}, err: errors.New("db starting")}
+	w, n, _ := newMaintenanceWatcherWith(t, src, mt, nil)
+	w.poll(context.Background()) // baseline, windows unreadable
+	w.poll(context.Background()) // still unreadable
+	mt.err = nil
+	w.poll(context.Background()) // readable: the hold is decided now
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered inside the window: %+v", got)
+	}
+	w.now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	w.poll(context.Background())
+	assertOneFired(t, n.recorded(), activeAt)
+}
+
+// A read failure while an edge is held must not release it mid-window: the held edge stays held and
+// goes out once, when a read shows its window closed.
+func TestAlertWatcherKeepsAHeldEdgeHeldWhenWindowsCannotBeRead(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t)},
+		alertReply{body: promBody(t, pairAlert())},
+	)
+	mt := &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}}
+	w, n, m := newMaintenanceWatcherWith(t, src, mt, nil)
+	w.poll(context.Background()) // baseline
+	w.poll(context.Background()) // fires inside the window: held
+
+	mt.err = errors.New("db down")
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("a failed window read released the held edge mid-window: %+v", got)
+	}
+	if got := testutil.ToFloat64(m.WebhookMaintenanceReadErrors.WithLabelValues()); got != 1 {
+		t.Errorf("WebhookMaintenanceReadErrors = %v, want 1", got)
+	}
+
+	mt.err = nil
+	w.poll(context.Background()) // readable again, the window still open
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered while the window is still open: %+v", got)
+	}
+	w.now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	w.poll(context.Background())
+	w.poll(context.Background())
+	assertOneFired(t, n.recorded(), testActiveAt)
+	if got := suppressedCount(m, store.WebhookEventAlertFired); got != 1 {
+		t.Errorf("WebhookSuppressed(alert.fired) = %v, want 1: the release is not a second hold", got)
+	}
+}
+
+// A new edge during a read failure still fails open, and the failure is counted.
+func TestAlertWatcherCountsWindowReadErrors(t *testing.T) {
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+	w, n, m := newMaintenanceWatcherWith(t, src, &fakeMaintenance{err: errors.New("db down")}, nil)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 1 {
+		t.Fatalf("got %d notifications with the store down, want the fired edge delivered", len(got))
+	}
+	if got := testutil.ToFloat64(m.WebhookMaintenanceReadErrors.WithLabelValues()); got != 1 {
+		t.Errorf("WebhookMaintenanceReadErrors = %v, want 1", got)
+	}
+}
+
+// A poll with nothing new and nothing held has nothing a window could decide, so it reads none.
+func TestAlertWatcherSkipsTheWindowReadWhenNothingCanBeHeld(t *testing.T) {
+	src := newFakeAlertSource(alertReply{body: promBody(t)})
+	mt := &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}}
+	w, _, _ := newMaintenanceWatcherWith(t, src, mt, nil)
+	for range 3 {
+		w.poll(context.Background())
+	}
+	if mt.calls != 0 {
+		t.Errorf("read the windows %d times with nothing firing, want 0", mt.calls)
+	}
+}
+
+// The covering window can sit on any page of the open-windows lookup.
+func TestAlertWatcherReadsEveryPageOfWindows(t *testing.T) {
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+	mt := &fakeMaintenance{pages: [][]store.MaintenanceWindow{{windowAround("n9")}, {windowAround("n1")}}}
+	w, n, m := newMaintenanceWatcherWith(t, src, mt, nil)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("an alert covered by a window on the second page was delivered: %+v", got)
+	}
+	if mt.calls != 2 {
+		t.Errorf("window pages read = %d, want 2", mt.calls)
+	}
+	if got := suppressedCount(m, store.WebhookEventAlertFired); got != 1 {
+		t.Errorf("WebhookSuppressed(alert.fired) = %v, want 1", got)
+	}
+}
+
+// An alert delivered before a window opened still gets its alert.resolved inside it: the window holds
+// only edges it saw begin.
+func TestAlertWatcherResolvesAPreWindowAlertInsideAWindow(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t)},
+		alertReply{body: promBody(t, pairAlert())},
+		alertReply{body: promBody(t)},
+	)
+	mt := &fakeMaintenance{}
+	w, n, m := newMaintenanceWatcherWith(t, src, mt, nil)
+	w.poll(context.Background())
+	w.poll(context.Background()) // fires, no window: delivered
+	mt.windows = []store.MaintenanceWindow{windowAround("")}
+	w.poll(context.Background()) // resolves inside the window
+	got := n.recorded()
+	if len(got) != 2 || got[0].event != store.WebhookEventAlertFired || got[1].event != store.WebhookEventAlertResolved {
+		t.Fatalf("delivered %+v, want alert.fired then alert.resolved", got)
+	}
+	if got := suppressedCount(m, store.WebhookEventAlertResolved); got != 0 {
+		t.Errorf("WebhookSuppressed(alert.resolved) = %v, want 0", got)
+	}
+}
+
+// deadlineSource records whether each database read carried a deadline.
+type deadlineSource struct {
+	windowsBounded, rulesBounded []bool
+}
+
+func (d *deadlineSource) ListMaintenanceWindows(ctx context.Context, _ store.MaintenanceFilter) (store.MaintenancePage, error) {
+	_, ok := ctx.Deadline()
+	d.windowsBounded = append(d.windowsBounded, ok)
+	return store.MaintenancePage{}, nil
+}
+
+func (d *deadlineSource) ListAlertRules(ctx context.Context, _ bool) ([]store.AlertRule, error) {
+	_, ok := ctx.Deadline()
+	d.rulesBounded = append(d.rulesBounded, ok)
+	return nil, nil
+}
+
+// A hung database must not stall the watcher: every read in a poll runs under the poll's deadline.
+func TestAlertWatcherBoundsItsDatabaseReadsByThePollTimeout(t *testing.T) {
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+	db := &deadlineSource{}
+	w, _, _ := newMaintenanceWatcherWith(t, src, db, db)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if len(db.windowsBounded) == 0 || len(db.rulesBounded) == 0 {
+		t.Fatalf("reads: windows=%v rules=%v, want both read", db.windowsBounded, db.rulesBounded)
+	}
+	for i, ok := range append(db.windowsBounded, db.rulesBounded...) {
+		if !ok {
+			t.Errorf("read %d ran without a deadline", i)
+		}
+	}
+}
+
+// countingRuleSource counts alert_rules reads.
+type countingRuleSource struct {
+	fakeRuleSource
+	calls int
+}
+
+func (c *countingRuleSource) ListAlertRules(ctx context.Context, enabledOnly bool) ([]store.AlertRule, error) {
+	c.calls++
+	return c.fakeRuleSource.ListAlertRules(ctx, enabledOnly)
+}
+
+// Enrichment, the restart hold and the pending resolves all want the rule table; one poll reads it
+// once. The poll measured is the first good window read after a restart, where all three run.
+func TestAlertWatcherReadsTheRulesOncePerPoll(t *testing.T) {
+	a := pairAlertActiveAt(testNow.Add(-30 * time.Minute))
+	b := managedAlert(testOtherRuleID, "Other", map[string]string{"source_node": "n1", "destination_node": "n2"})
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t, a, b)}, // baseline, windows unreadable
+		alertReply{body: promBody(t, a)},    // b resolves while undecided
+		alertReply{body: promBody(t, a)},    // windows readable again
+	)
+	mt := &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}, err: errors.New("db starting")}
+	rules := &countingRuleSource{fakeRuleSource: fakeRuleSource{rules: []store.AlertRule{
+		{ID: testRuleID, Name: "pair-loss-high", ForNs: int64(5 * time.Minute)},
+	}}}
+	w, _, _ := newMaintenanceWatcherWith(t, src, mt, rules)
+	w.poll(context.Background())
+	w.poll(context.Background())
+	mt.err = nil
+	before := rules.calls
+	w.poll(context.Background())
+	if got := rules.calls - before; got != 1 {
+		t.Errorf("alert_rules read %d times in one poll, want 1", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,8 +29,8 @@ const shortCallTimeout = 30 * time.Second
 // give the controller room to respond after its own (server-capped) timeout elapses.
 var diagnosticsDeadlineSlack = 10 * time.Second
 
-// serverTimeoutCap mirrors the controller's own cap on the ?timeout= value
-// (see internal/cli/check.go flag help / controller docs).
+// serverTimeoutCap mirrors the controller's cap on the ?timeout= value, maxDiagnosticsTimeout
+// (internal/controller/diagnostics.go).
 const serverTimeoutCap = 120 * time.Second
 
 // maxDiagnosticsClientTimeout is the hard ceiling for the client-side diagnostics deadline.
@@ -79,6 +80,18 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("controller returned HTTP %d: %s", e.status, msg)
 }
 
+// isStandbyAnswer reports whether err is a controller replica saying it does not lead: another
+// replica may. The prefixes are the controller's notLeaderMsg and the 503 a demotion mid-dispatch
+// answers with.
+func isStandbyAnswer(err error) bool {
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.status != http.StatusServiceUnavailable {
+		return false
+	}
+	msg := strings.TrimSpace(ae.body)
+	return strings.HasPrefix(msg, "not the leader") || strings.HasPrefix(msg, "leadership lost")
+}
+
 // Topology fetches the current topology snapshot.
 func (c *Client) Topology(ctx context.Context) (*model.TopologySnapshot, []byte, error) {
 	raw, err := c.get(ctx, "/api/v1/topology")
@@ -113,9 +126,9 @@ type DiagnosticsRequest struct {
 	Plane       string `json:"plane,omitempty"`
 }
 
-// Diagnostics runs a one-shot check. timeout; the client itself enforces a hard deadline of
-// timeout+10s (capped at 130s) so a wedged controller or dropped port-forward cannot hang the CLI
-// forever.
+// Diagnostics runs a one-shot check, passing timeout to the controller as ?timeout= (it caps it at
+// 120s). The client enforces its own deadline of timeout+10s, at most 130s, so a wedged controller
+// or a dropped port-forward cannot hang the CLI.
 func (c *Client) Diagnostics(ctx context.Context, req DiagnosticsRequest, timeout time.Duration) (*model.CheckResult, []byte, error) {
 	body, err := json.Marshal(req)
 	if err != nil {

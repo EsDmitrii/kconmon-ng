@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -392,8 +393,36 @@ func TestResolveRDNSTimeoutLeavesFieldEmptyAndCountsError(t *testing.T) {
 	if v := testutil.ToFloat64(m.EnrichmentLookups.WithLabelValues("rdns", "error")); v != 1 {
 		t.Errorf("EnrichmentLookups(rdns, error) = %v, want 1", v)
 	}
+	/* Still worth caching, but not in the table: a row that must expire early could only be written
+	   there with a false resolved_at, which API clients are shown. It is remembered in memory with its
+	   real resolve time, and the next view is answered from it. */
+	if _, puts := cache.counts(); puts != 0 {
+		t.Errorf("PutEnrichment calls = %d, want 0 -- a failed lookup is remembered in memory", puts)
+	}
+	if again := r.Resolve(t.Context(), []string{"192.0.2.1"}); again["192.0.2.1"].ASN != 64496 || rdns.calls.Load() != 1 {
+		t.Errorf("next view = %+v after %d rdns lookups, want the remembered row and no new lookup",
+			again["192.0.2.1"], rdns.calls.Load())
+	}
+}
+
+// TestResolveRDNSNXDOMAINIsAMissAndCached: the production resolver reports "no PTR record" as a
+// *net.DNSError with IsNotFound, which is an answer about the address, so it is counted as a miss
+// and the empty row is cached like any other answer.
+func TestResolveRDNSNXDOMAINIsAMissAndCached(t *testing.T) {
+	m := testMetrics(t)
+	cache := newFakeCache()
+	rdns := &countingRDNS{err: &net.DNSError{Err: "no such host", Name: "9.113.0.203.in-addr.arpa.", IsNotFound: true}}
+	r := newTestResolver(t, enabledConfig(), cache, rdns.lookup, m)
+
+	r.Resolve(t.Context(), []string{"203.0.113.9"})
+	if v := testutil.ToFloat64(m.EnrichmentLookups.WithLabelValues("rdns", "miss")); v != 1 {
+		t.Errorf("EnrichmentLookups(rdns, miss) = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(m.EnrichmentLookups.WithLabelValues("rdns", "error")); v != 0 {
+		t.Errorf("EnrichmentLookups(rdns, error) = %v, want 0 -- NXDOMAIN is not a failure", v)
+	}
 	if _, puts := cache.counts(); puts != 1 {
-		t.Errorf("PutEnrichment calls = %d, want 1 -- a partially resolved row is still worth caching", puts)
+		t.Errorf("PutEnrichment calls = %d, want 1 -- a definite no-PTR answer is worth caching", puts)
 	}
 }
 

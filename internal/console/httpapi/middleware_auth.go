@@ -55,16 +55,16 @@ func subjectHolderFrom(ctx context.Context) *subjectHolder {
 	return h
 }
 
-// routeRule is the route->permission table's value: exactly one closed authz.Permission the caller
-// must hold.
+// routeRule is the route->permission table's value: the permission a route needs, any one of
+// several (anyOf), or none because the route is public.
 type routeRule struct {
 	permission authz.Permission
 	anyOf      []authz.Permission
 	public     bool
 }
 
-// accepted returns, in table order, the permissions any ONE of which satisfies r; it is the one
-// place the two spellings are reconciled, so satisfiedBy, the metric label.
+// accepted returns, in table order, the permissions any one of which satisfies r; satisfiedBy and
+// deniedLabel both read it, so the two spellings are reconciled in one place.
 func (r routeRule) accepted() []authz.Permission {
 	if len(r.anyOf) > 0 {
 		return r.anyOf
@@ -229,6 +229,7 @@ var routeTable = map[string]routeRule{
 	"GET /api/v1/users":                {permission: authz.PermUsersManage},
 	"POST /api/v1/users":               {permission: authz.PermUsersManage},
 	"PATCH /api/v1/users/{id}":         {permission: authz.PermUsersManage},
+	"DELETE /api/v1/users/{id}":        {permission: authz.PermUsersManage},
 	"POST /api/v1/users/{id}/password": {permission: authz.PermUsersManage},
 
 	// The ONE anyOf row, and the only route in this table whose authorization does not end here.
@@ -277,14 +278,25 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		default:
 			subject = authz.Subject{}
 			s.metrics.AuthRequests.WithLabelValues(mode, authResultLabel(err)).Inc()
+			if errors.Is(err, authn.ErrUnavailable) {
+				slog.Warn("httpapi: credential store unavailable, answering 503", "mode", mode, "error", err) //nolint:gosec // G706: structured slog fields
+				r = r.WithContext(context.WithValue(r.Context(), authUnavailableKey{}, true))
+			}
 		}
+
+		var proxyAddr string
+		subject.ClientAddr, proxyAddr = requestAddrs(r, s.trustedProxies)
 
 		// Hand the resolved subject back UP to the recoverer as well.
 		if h := subjectHolderFrom(r.Context()); h != nil {
 			h.subject = subject
 		}
 
-		next.ServeHTTP(w, r.WithContext(contextWithSubject(r.Context(), subject)))
+		ctx := contextWithSubject(r.Context(), subject)
+		if proxyAddr != "" && (subject.Kind == "" || subject.Kind == authz.SubjectAnonymous) {
+			ctx = contextWithForwardingProxy(ctx, proxyAddr)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -388,14 +400,13 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 			return
 		}
 
-		if !rule.public {
+		if rule.public {
+			limitPublicBody(w, r)
+		} else {
 			if subject.Kind == "" {
-				/* A refused credential is a security event and left no trace: metrics counted it,
-				   the audit log did not, so a token-guessing or brute-force attempt was invisible
-				   to the one surface an operator investigates with. The subject is empty by
-				   definition here — what is worth recording is the route and the outcome. */
+				// A refused credential is a security event: the row records the route and the outcome.
 				s.recordAudit(r, subject, auditOutcomeDenied, nil)
-				write401(w)
+				writeUnauthenticated(w, r)
 				return
 			}
 			if !rule.satisfiedBy(s.policy, subject) {
@@ -411,9 +422,8 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 		if !s.csrfOK(r, subject) {
 			s.recordAudit(r, subject, auditOutcomeDenied, nil)
 			writeProblem(w, http.StatusForbidden, "permission denied",
-				"missing or invalid CSRF token: mutations must echo the csrf cookie's value in the "+csrfHeaderName+" header; "+
-					"the cookie is minted on login/oidc-callback, or -- for header mode, which has neither -- lazily on the first "+
-					"authenticated GET (see maybeMintCSRFCookie)")
+				"missing or invalid CSRF token: echo the csrf cookie's value in the "+csrfHeaderName+" header; "+
+					"the cookie is set at sign-in, or in header mode on the first authenticated GET")
 			return
 		}
 
@@ -427,9 +437,17 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 	})
 }
 
-// maybeMintCSRFCookie closes header mode's CSRF gap (I-2); a no-op once the cookie exists
-// (including for local/oidc sessions, which already got one from login/callback and never hit the
-// missing-cookie branch here).
+// limitPublicBody caps the body of a route anyone may call at publicRouteBodyBytes, before the audit
+// middleware or the handler reads it.
+func limitPublicBody(w http.ResponseWriter, r *http.Request) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, publicRouteBodyBytes)
+}
+
+// maybeMintCSRFCookie gives header mode, which has no sign-in, its csrf cookie on the first
+// authenticated GET; a no-op once the cookie exists, as it does after a local or OIDC sign-in.
 func (s *Server) maybeMintCSRFCookie(w http.ResponseWriter, r *http.Request, subject authz.Subject) { //nolint:gocritic // Subject is a value type by design
 	if r.Method != http.MethodGet || subject.Kind != authz.SubjectUser {
 		return
@@ -447,6 +465,22 @@ func (s *Server) maybeMintCSRFCookie(w http.ResponseWriter, r *http.Request, sub
 func write401(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	writeProblem(w, http.StatusUnauthorized, "authentication required", "")
+}
+
+// authUnavailableKey marks a request whose credential could not be checked because its store did not
+// answer (authn.ErrUnavailable).
+type authUnavailableKey struct{}
+
+// writeUnauthenticated answers a request that resolved to no subject: 401, or 503 when the
+// credential was presented but its store could not be read, because a 401 signs the user out.
+func writeUnauthenticated(w http.ResponseWriter, r *http.Request) {
+	if unavailable, _ := r.Context().Value(authUnavailableKey{}).(bool); unavailable {
+		w.Header().Set("Retry-After", "1")
+		writeProblem(w, http.StatusServiceUnavailable, "authentication unavailable",
+			"the session or user store did not answer; retry shortly, the session is still valid")
+		return
+	}
+	write401(w)
 }
 
 // csrfHeaderName and csrfCookieName are the double-submit pair SECURITY.md §12 requires for
@@ -468,7 +502,7 @@ func isMutatingMethod(method string) bool {
 }
 
 // csrfOK reports whether r passes the double-submit CSRF check for cookie-authenticated mutations;
-// I-2 review carry-forward: the exemption is keyed on subject.Kind.
+// the exemption is keyed on subject.Kind, which the credential decides, not on a header.
 func (s *Server) csrfOK(r *http.Request, subject authz.Subject) bool { //nolint:gocritic // Subject is a value type by design
 	if !isMutatingMethod(r.Method) {
 		return true
@@ -477,15 +511,9 @@ func (s *Server) csrfOK(r *http.Request, subject authz.Subject) bool { //nolint:
 	case authz.SubjectToken, "":
 		return true
 	case authz.SubjectAnonymous:
-		/* Anonymous mode has no token to double-submit, but it is NOT unprotected.
-		   The exemption used to be unconditional, and anonymous.role may be operator or admin, so
-		   any page an operator's browser happened to visit could POST into a console that was
-		   deliberately kept off the internet: a CORS simple request (text/plain body, no custom
-		   header) triggers no preflight, so the browser sent it and the console executed it. The
-		   attacker never sees the response, but the write lands — targets, check definitions, alert
-		   rules, RBAC roles, API tokens. Origin/Sec-Fetch-Site is the check that fits: a browser
-		   always sends them cross-site, and a non-browser client (curl, a script) sends neither and
-		   is unaffected. */
+		/* Anonymous mode has no token to double-submit, and anonymous.role may be operator or admin,
+		   so a cross-site simple request is refused by Origin/Sec-Fetch-Site: a browser always sends
+		   them cross-site, and a non-browser client sends neither. */
 		if s.cfg.Auth.Mode == "anonymous" {
 			return sameOriginRequest(r)
 		}

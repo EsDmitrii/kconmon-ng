@@ -145,3 +145,25 @@ func TestProtoToTargetsPrefersReportedPortsAndFallsBackToOwn(t *testing.T) {
 		t.Errorf("an empty peer list produced %d targets", len(got))
 	}
 }
+
+// A standby's refusal is retried at once, a dead transport keeps its backoff; the refusal usually
+// arrives wrapped by the client method.
+func TestIsStandbyRefusal(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{grpcstatus.Error(codes.Unavailable, "not the leader"), true},
+		{fmt.Errorf("registering agent: %w", grpcstatus.Error(codes.Unavailable, "not the leader")), true},
+		{fmt.Errorf("receiving task: %w", grpcstatus.Error(codes.Unavailable, "leadership lost")), true},
+		{grpcstatus.Error(codes.Unavailable, "connection refused"), false},
+		{grpcstatus.Error(codes.NotFound, "not the leader"), false},
+		{errors.New("not the leader"), false},
+		{nil, false},
+	}
+	for _, tc := range tests {
+		if got := isStandbyRefusal(tc.err); got != tc.want {
+			t.Errorf("isStandbyRefusal(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}

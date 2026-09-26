@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -99,7 +100,7 @@ func formatTopology(w io.Writer, snap *model.TopologySnapshot) error {
 		return err
 	}
 	isNode := make(map[string]bool, len(snap.Nodes))
-	for _, n := range snap.Nodes {
+	for _, n := range sortedNodes(snap.Nodes) {
 		isNode[n.Name] = true
 		agent := "-"
 		agentIP := "-"
@@ -113,8 +114,9 @@ func formatTopology(w io.Writer, snap *model.TopologySnapshot) error {
 		}
 	}
 	// READY is "-" rather than yes/no: nothing reports readiness for a host outside the cluster.
-	for i := range snap.Agents {
-		a := &snap.Agents[i]
+	agents := sortedAgents(snap.Agents)
+	for i := range agents {
+		a := &agents[i]
 		if isNode[a.NodeName] {
 			continue
 		}
@@ -126,6 +128,24 @@ func formatTopology(w io.Writer, snap *model.TopologySnapshot) error {
 	return tw.Flush()
 }
 
+// The controller builds the snapshot from maps, so its order differs per call; tables sort copies.
+func sortedNodes(nodes []model.NodeInfo) []model.NodeInfo {
+	out := slices.Clone(nodes)
+	slices.SortStableFunc(out, func(a, b model.NodeInfo) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+func sortedAgents(agents []model.AgentInfo) []model.AgentInfo {
+	out := slices.Clone(agents)
+	slices.SortStableFunc(out, func(a, b model.AgentInfo) int {
+		if c := strings.Compare(a.NodeName, b.NodeName); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out
+}
+
 // formatAgents renders the registered agents table.
 func formatAgents(w io.Writer, snap *model.TopologySnapshot) error {
 	if snap == nil {
@@ -135,8 +155,9 @@ func formatAgents(w io.Writer, snap *model.TopologySnapshot) error {
 	if _, err := fmt.Fprintln(tw, "ID\tNODE\tPOD IP\tZONE\tEXTERNAL\tLAST SEEN"); err != nil {
 		return err
 	}
-	for i := range snap.Agents {
-		a := &snap.Agents[i]
+	agents := sortedAgents(snap.Agents)
+	for i := range agents {
+		a := &agents[i]
 		// "-" rather than "no" for the common case, so the eye lands on the exceptions.
 		external := "-"
 		if a.IsExternal() {
@@ -266,12 +287,7 @@ func detailLines(res *model.CheckResult) []string {
 	}
 
 	// Single-attempt probes: derive sent/recv/loss from the outcome.
-	attempt := func() string {
-		if res.Success {
-			return "sent=1 recv=1 loss=0%"
-		}
-		return "sent=1 recv=0 loss=100%"
-	}
+	attempt := func() string { return entryAttempt(res.Success) }
 
 	switch res.Type {
 	case model.CheckICMP:
@@ -308,10 +324,24 @@ func detailLines(res *model.CheckResult) []string {
 				attempt(), humanizeDuration(d.TotalTime), humanizeDuration(d.ConnectTime))}
 		}
 	case model.CheckDNS:
-		var d model.DNSDetails
-		if json.Unmarshal(raw, &d) == nil {
+		// One detail per host and resolver since the checker probes them all; a single object is an
+		// older agent's answer.
+		var ds []model.DNSDetails
+		if json.Unmarshal(raw, &ds) != nil {
+			var d model.DNSDetails
+			if json.Unmarshal(raw, &d) != nil {
+				return nil
+			}
+			ds = []model.DNSDetails{d}
+		}
+		lines := make([]string, 0, len(ds))
+		for _, d := range ds {
+			outcome := attempt()
+			if len(ds) > 1 {
+				outcome = entryAttempt(res.Success || len(d.ResolvedIPs) > 0)
+			}
 			line := fmt.Sprintf("%s rtt=%s host=%s resolver=%s",
-				attempt(), humanizeDuration(d.Duration), orDash(d.Host), orDash(d.Resolver))
+				outcome, humanizeDuration(d.Duration), orDash(d.Host), orDash(d.Resolver))
 			if len(d.ResolvedIPs) > 0 {
 				ips := make([]string, 0, len(d.ResolvedIPs))
 				for _, ip := range d.ResolvedIPs {
@@ -319,15 +349,33 @@ func detailLines(res *model.CheckResult) []string {
 				}
 				line += " ips=" + strings.Join(ips, ",")
 			}
-			return []string{line}
+			lines = append(lines, line)
 		}
+		return lines
 	case model.CheckHTTP:
-		var d model.HTTPDetails
-		if json.Unmarshal(raw, &d) == nil {
-			return []string{fmt.Sprintf("%s rtt=%s ttfb=%s connect=%s status=%d",
-				attempt(), humanizeDuration(d.TotalTime),
-				humanizeDuration(d.TTFBTime), humanizeDuration(d.ConnectTime), d.StatusCode)}
+		var ds []model.HTTPDetails
+		if json.Unmarshal(raw, &ds) != nil {
+			var d model.HTTPDetails
+			if json.Unmarshal(raw, &d) != nil {
+				return nil
+			}
+			ds = []model.HTTPDetails{d}
 		}
+		lines := make([]string, 0, len(ds))
+		for _, d := range ds {
+			outcome := attempt()
+			if len(ds) > 1 {
+				outcome = entryAttempt(d.StatusCode != 0 && !d.StatusMismatch && !d.BodyMismatch)
+			}
+			line := fmt.Sprintf("%s rtt=%s ttfb=%s connect=%s status=%d",
+				outcome, humanizeDuration(d.TotalTime),
+				humanizeDuration(d.TTFBTime), humanizeDuration(d.ConnectTime), d.StatusCode)
+			if d.URL != "" {
+				line += " url=" + d.URL
+			}
+			lines = append(lines, line)
+		}
+		return lines
 	case model.CheckMTR:
 		if d, ok := decodeMTRDetails(res.Details); ok && d != nil {
 			return []string{fmt.Sprintf("target=%s hops=%d", orDash(d.Target), len(d.Hops))}
@@ -339,6 +387,13 @@ func detailLines(res *model.CheckResult) []string {
 		return nil
 	}
 	return nil
+}
+
+func entryAttempt(ok bool) string {
+	if ok {
+		return "sent=1 recv=1 loss=0%"
+	}
+	return "sent=1 recv=0 loss=100%"
 }
 
 // decodeMTRDetails defensively decodes a Details block into MTRDetails.

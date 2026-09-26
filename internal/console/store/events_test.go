@@ -659,3 +659,45 @@ func TestFoldTopologyBrokenBaselineIsUnfoldable(t *testing.T) {
 		t.Errorf("UnfoldableEvents = %d, want 1", snap.UnfoldableEvents)
 	}
 }
+
+// Two agents share a node when the old pod left without deregistering; its later eviction removes
+// that agent, not the node the replacement is still registered on.
+func TestFoldTopologyNodeSurvivesTheDepartureOfOneOfItsAgents(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEvent(t, 0, topologyReasonRegistered, "node-a", "node-a-pod-old"),
+		topoEvent(t, time.Minute, topologyReasonRegistered, "node-a", "node-a-pod-new"),
+		topoEvent(t, 2*time.Minute, topologyReasonEvicted, "node-a", "node-a-pod-old"),
+	})
+	if got, want := nodeNames(&snap), []string{"node-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v", got, want)
+	}
+	if got, want := agentIDs(&snap), []string{"node-a-pod-new"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("agents = %v, want %v", got, want)
+	}
+}
+
+// The replay overlap re-applies an eviction stamped just before the baseline; the baseline already
+// lists the node with its live agent, so the node stays.
+func TestFoldTopologyOverlapEvictionKeepsANodeTheBaselineStillPopulates(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		baselineRecord(t, 0,
+			[]map[string]any{{"name": "node-a", "zone": "zone-a", "ready": true}},
+			[]map[string]any{{"id": "node-a-pod-new", "nodeName": "node-a", "zone": "zone-a"}},
+		),
+		topoEvent(t, -3*time.Second, topologyReasonEvicted, "node-a", "node-a-pod-old"),
+	})
+	if got, want := nodeNames(&snap), []string{"node-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v", got, want)
+	}
+}
+
+// An agent-less departure (node name only) still removes the node, as before.
+func TestFoldTopologyNodeOnlyDepartureRemovesTheNode(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEvent(t, 0, topologyReasonRegistered, "node-a", ""),
+		topoEvent(t, time.Minute, topologyReasonDeregistered, "node-a", ""),
+	})
+	if got := nodeNames(&snap); len(got) != 0 {
+		t.Errorf("nodes = %v, want none", got)
+	}
+}

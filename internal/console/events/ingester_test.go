@@ -590,6 +590,47 @@ func TestIngesterReconnectsAfterStreamError(t *testing.T) {
 	}
 }
 
+// A stream that reached the connected state resets the reconnect backoff: an outage earlier in the
+// process's life must not make every later disconnect wait the full ceiling, since events emitted
+// in that gap are lost.
+func TestIngesterResetsTheBackoffAfterAHealthyStream(t *testing.T) {
+	api, ctrl := startFakeController(t, "events")
+	api.setDown(true)
+	fake, addr := startFakeEventStream(t)
+
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, cache.NewInProcessBus(), m)
+	ing.SetConnectGrace(preconditionGrace)
+	const initial, ceiling = 25 * time.Millisecond, 1600 * time.Millisecond
+	ing.SetBackoff(initial, ceiling)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	// Six failed prechecks double the backoff 25ms -> 1.6s, the ceiling.
+	waitFor(t, "six failed capability prechecks", func() bool {
+		return testutil.ToFloat64(m.IngesterReconnects.WithLabelValues("capability")) >= 6
+	})
+	api.setDown(false)
+	waitFor(t, "the stream after the outage", ing.Healthy)
+
+	broke := time.Now()
+	fake.breakStream(t)
+	waitFor(t, "WatchEvents to be served a second time", func() bool { return fake.calls.Load() >= 2 })
+	if took := time.Since(broke); took >= ceiling/2 {
+		t.Errorf("reconnect after a healthy stream took %v, want about %v: the backoff was not reset", took, initial)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 // A controller that only turns events on later must be picked up by the very
 // next retry, because the precheck runs before every dial rather than once.
 func TestIngesterConnectsOnceTheCapabilityAppears(t *testing.T) {

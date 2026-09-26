@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -139,5 +140,13 @@ func DecodePairCursor(cursor string) (sourceNode, destination string, ok bool, e
 		return "", "", false, fmt.Errorf("store: decode cursor: bad source length")
 	}
 	body := raw[sep+1:]
-	return body[:n], body[n:], true, nil
+	sourceNode, destination = body[:n], body[n:]
+	// Both fields become text parameters, and PostgreSQL refuses these bytes in text; no stored pair
+	// holds them, so the cursor is malformed rather than a query that fails.
+	for _, field := range []string{sourceNode, destination} {
+		if !utf8.ValidString(field) || strings.IndexByte(field, 0) >= 0 {
+			return "", "", false, fmt.Errorf("store: decode cursor: pair is not valid UTF-8 text")
+		}
+	}
+	return sourceNode, destination, true, nil
 }

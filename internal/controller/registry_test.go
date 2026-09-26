@@ -547,7 +547,8 @@ func TestEvictStaleAttributesEveryEvictedAgent(t *testing.T) {
 // forgets the label on the way out would draw the host as an ordinary node right up to its exit.
 func TestTopologySubjectsCarryTheAgentsLabels(t *testing.T) {
 	external := map[string]string{model.LabelExternal: "true"}
-	labelled := model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a", Labels: external}
+	// No explicit zone: it comes from the node, so the zone-update case can move it.
+	labelled := model.AgentInfo{ID: "agent-1", NodeName: "node-1", Labels: external}
 
 	cases := []struct {
 		name   string
@@ -557,7 +558,6 @@ func TestTopologySubjectsCarryTheAgentsLabels(t *testing.T) {
 		{"register", "agent_registered", func(r *Registry) { r.Register(labelled) }},
 		{"zone update", "zone_updated", func(r *Registry) { r.UpdateZone("node-1", "zone-b") }},
 		{"deregister", "agent_deregistered", func(r *Registry) { r.Deregister("agent-1") }},
-		{"reset", "agent_deregistered", func(r *Registry) { r.Reset() }},
 		{"evict", "agent_evicted", func(r *Registry) {
 			time.Sleep(time.Millisecond)
 			if n := r.EvictStale(); n != 1 {
@@ -568,6 +568,7 @@ func TestTopologySubjectsCarryTheAgentsLabels(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := NewRegistry(time.Nanosecond)
+			r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
 			if tc.name != "register" {
 				r.Register(labelled)
 			}
@@ -704,5 +705,46 @@ func TestRegistryPublishesSnapshotsInMutationOrder(t *testing.T) {
 	// And the last word is the whole fleet.
 	if sizes[len(sizes)-1] != agents {
 		t.Errorf("last published snapshot has %d agents, want %d", sizes[len(sizes)-1], agents)
+	}
+}
+
+// Register never overrides an agent's configured zone, and a later node-label change must not
+// either: only zones that came from the node (or were never set) follow the label.
+func TestRegistryUpdateZoneKeepsAnExplicitZone(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
+	r.Register(model.AgentInfo{ID: "explicit", NodeName: "node-1", Zone: "zone-configured"})
+	r.Register(model.AgentInfo{ID: "enriched", NodeName: "node-1"})
+
+	r.UpdateZone("node-1", "zone-b")
+
+	byID := map[string]string{}
+	for _, a := range r.GetAll() {
+		byID[a.ID] = a.Zone
+	}
+	if byID["explicit"] != "zone-configured" {
+		t.Errorf("explicit zone = %q after a node-label change, want zone-configured", byID["explicit"])
+	}
+	if byID["enriched"] != "zone-b" {
+		t.Errorf("node-derived zone = %q, want zone-b", byID["enriched"])
+	}
+}
+
+// Two agents share a node only when the old one left without deregistering; the replacement is
+// the one registered last, and a lookup must not pick the dead one at random.
+func TestRegistryGetByNodeNamePrefersTheNewestRegistration(t *testing.T) {
+	for i := range 50 {
+		r := NewRegistry(30 * time.Second)
+		r.Register(model.AgentInfo{ID: "node-2-old", NodeName: "node-2", PodIP: "10.0.0.1"})
+		time.Sleep(time.Millisecond)
+		r.Register(model.AgentInfo{ID: "node-2-new", NodeName: "node-2", PodIP: "10.0.0.2"})
+
+		got, ok := r.GetByNodeName("node-2")
+		if !ok {
+			t.Fatal("GetByNodeName found nothing")
+		}
+		if got.ID != "node-2-new" {
+			t.Fatalf("round %d: GetByNodeName = %s, want node-2-new", i, got.ID)
+		}
 	}
 }

@@ -238,8 +238,8 @@ func TestDefinitionsWithoutStoreReturns503(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 			t.Errorf("%s %s Content-Type = %q, want application/problem+json", c.method, c.path, ct)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -302,6 +302,9 @@ func TestDefinitionsInvalidBodyReturns400And422(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("unparseable body = %d, want 400: %s", w.Code, w.Body)
 	}
+	if !strings.Contains(w.Body.String(), "pmtu") {
+		t.Errorf("400 detail must list pmtu among the check types: %s", w.Body)
+	}
 
 	w = doRequest(t, s, http.MethodPost, "/api/v1/checks",
 		strings.NewReader(`{"name":"x","sourceSelection":"everywhere","destinationKind":"node","checkType":"tcp","plane":"pod"}`),
@@ -311,6 +314,55 @@ func TestDefinitionsInvalidBodyReturns400And422(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "store:") {
 		t.Errorf("422 detail = %s, want store's package prefix trimmed off the wire", w.Body)
+	}
+}
+
+// The scheduler copies a definition's plane into every run it fires, so the definition is held to
+// the rule a run is: pod, the only plane, and a refused one is never echoed back.
+func TestDefinitionsRefuseAPlaneARunWouldRefuse(t *testing.T) {
+	st := newFakeChecksStore()
+	s := newOperatorChecksServer(t, st, nil)
+	seed := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(validDefinitionBody), mutateWithCSRF)
+	var def definitionResponse
+	if err := json.Unmarshal(seed.Body.Bytes(), &def); err != nil || def.ID == "" {
+		t.Fatalf("seed = %d %s", seed.Code, seed.Body)
+	}
+
+	for name, plane := range map[string]string{
+		"host": "host", "8 MiB": strings.Repeat("p", 8<<20), "capitals": "Pod",
+	} {
+		body := strings.Replace(validDefinitionBody, `"plane":"pod"`, `"plane":"`+plane+`"`, 1)
+		for _, req := range []struct{ method, path string }{
+			{http.MethodPost, "/api/v1/checks"}, {http.MethodPut, "/api/v1/checks/" + def.ID},
+		} {
+			w := doRequest(t, s, req.method, req.path, strings.NewReader(body), mutateWithCSRF)
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "plane must be") {
+				t.Errorf("%s %s with a %s plane = %d %.300s, want 422 naming the plane", req.method, req.path, name, w.Code, w.Body)
+			}
+			if w.Body.Len() > 1024 {
+				t.Errorf("%s %s with a %s plane echoes it back: %d bytes", req.method, req.path, name, w.Body.Len())
+			}
+		}
+	}
+	if len(st.defs) != 1 || st.defs[def.ID].Plane != "pod" {
+		t.Errorf("stored definitions = %+v, want only the seed, unchanged", st.defs)
+	}
+}
+
+// The reconciler copies params into every agent's spec of the continuous assignment, whose PUT the
+// controller caps at 8 MiB; the checkers read three small fields at most.
+func TestDefinitionsBoundTheirParams(t *testing.T) {
+	s := newOperatorChecksServer(t, newFakeChecksStore(), nil)
+	withParams := func(name string, n int) string {
+		pad := strings.Repeat("x", n-len(`{"pad":""}`))
+		return strings.Replace(definitionBody(name, "one-per-zone", false), `"plane":"pod"`, `"plane":"pod","params":{"pad":"`+pad+`"}`, 1)
+	}
+	if w := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(withParams("at-limit", 4096)), mutateWithCSRF); w.Code != http.StatusCreated {
+		t.Errorf("4096 bytes of params = %d %s, want 201", w.Code, w.Body)
+	}
+	w := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(withParams("over-limit", 4097)), mutateWithCSRF)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "params is 4097 bytes, limit is 4096") {
+		t.Errorf("4097 bytes of params = %d %s, want 422 naming the limit", w.Code, w.Body)
 	}
 }
 
@@ -687,9 +739,10 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		// annotations: the SCOPE alone; "text" is free-form operator prose and must never reach an audit
 		// row.
 		"POST /api/v1/annotations": {"scope"},
-		// incidents: what was opened, about what, and where it stands; "notes" (free-form prose) and
-		// "pinned" (an open array whose refs carry more free-form prose) must never reach an audit row.
-		"POST /api/v1/incidents":       {"title", "scope", "status"},
+		// incidents: what was opened and about what (a create body cannot carry "status"); "notes"
+		// (free-form prose) and "pinned" (an open array whose refs carry more free-form prose) must
+		// never reach an audit row.
+		"POST /api/v1/incidents":       {"title", "scope"},
 		"PATCH /api/v1/incidents/{id}": {"status"},
 		// maintenance: the SCOPE alone. "reason" is free text, on the exact
 		// annotations "text" line.

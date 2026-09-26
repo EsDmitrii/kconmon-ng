@@ -456,3 +456,26 @@ func FuzzAllowlist(f *testing.F) {
 		_ = a.AllowHostPort(t.Context(), r, string(raw))
 	})
 }
+
+// An address merely outside allowedCidrs and one inside deniedCidrs are different operator mistakes,
+// so the refusal says which list turned it away.
+func TestAllowlistRefusalNamesTheList(t *testing.T) {
+	a := mustAllowlist(t, []string{"10.0.0.0/8", "fd00::/8"}, []string{"10.9.0.0/16", "fd00:9::/32"})
+	for _, tc := range []struct {
+		host string
+		want error
+	}{
+		{"10.9.0.1", ErrDeniedIPv4},
+		{"8.8.8.8", ErrNotAllowedIPv4},
+		{"fd00:9::1", ErrDeniedIPv6},
+		{"2001:db8::1", ErrNotAllowedIPv6},
+	} {
+		err := a.AllowHostPort(t.Context(), nil, tc.host)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.host, err, tc.want)
+		}
+	}
+	if ErrNotAllowedIPv4.Error() == ErrDeniedIPv4.Error() || ErrNotAllowedIPv6.Error() == ErrDeniedIPv6.Error() {
+		t.Error("the two refusals must read differently")
+	}
+}

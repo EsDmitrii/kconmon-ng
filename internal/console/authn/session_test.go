@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -375,5 +376,74 @@ func TestSessionIdleTimeoutOffLeavesTTLTheOnlyBound(t *testing.T) {
 
 	if _, ok, gerr := store.Get(context.Background(), id); gerr != nil || !ok {
 		t.Fatalf("with the idle check off the session must still resolve: ok=%v err=%v", ok, gerr)
+	}
+}
+
+// lapsingLockKV lets a session's write lock lapse and go to another replica at the moment its holder
+// starts to release it, whichever way the release reads the lock.
+type lapsingLockKV struct {
+	*cache.InProcessKV
+}
+
+const otherReplicaToken = "other-replica"
+
+func (kv lapsingLockKV) takeOver(ctx context.Context, key string) {
+	if strings.HasPrefix(key, "sesslock:") {
+		_ = kv.Set(ctx, key, []byte(otherReplicaToken), time.Minute)
+	}
+}
+
+func (kv lapsingLockKV) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	val, ok, err := kv.InProcessKV.Get(ctx, key)
+	kv.takeOver(ctx, key)
+	return val, ok, err
+}
+
+func (kv lapsingLockKV) DeleteIfEqual(ctx context.Context, key string, val []byte) (bool, error) {
+	kv.takeOver(ctx, key)
+	return kv.InProcessKV.DeleteIfEqual(ctx, key, val)
+}
+
+// A holder whose lease lapsed must not delete the lock another replica took since; a Get, compare
+// and Delete leaves exactly that window open.
+func TestSessionLockReleaseLeavesALockAnotherReplicaTook(t *testing.T) {
+	inner := cache.NewInProcessKV()
+	t.Cleanup(inner.Close)
+	kv := lapsingLockKV{InProcessKV: inner}
+	store := authn.NewSessionStore(kv, time.Hour, time.Hour)
+
+	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err = store.Refresh(context.Background(), id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	held, ok, err := inner.Get(context.Background(), "sesslock:"+id)
+	if err != nil || !ok || string(held) != otherReplicaToken {
+		t.Fatalf("the other replica's lock = %q (ok=%v, err=%v), want it still held", held, ok, err)
+	}
+}
+
+// The session id is the bearer cookie value; a log line must not carry it.
+func TestSessionStoreCorruptedValueWarningOmitsTheSessionID(t *testing.T) {
+	logs := captureLogs(t)
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	store := authn.NewSessionStore(kv, time.Minute, 0)
+
+	const id = "bearer-session-id-in-a-corrupted-record"
+	if err := kv.Set(context.Background(), "sess:"+id, []byte("not json"), time.Minute); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, ok, err := store.Get(context.Background(), id); err != nil || ok {
+		t.Fatalf("Get on a corrupted value = ok %v, err %v; want a miss", ok, err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "corrupted session value") {
+		t.Fatalf("no warning for the corrupted value:\n%s", out)
+	}
+	if strings.Contains(out, id) {
+		t.Errorf("the warning carries the session id:\n%s", out)
 	}
 }

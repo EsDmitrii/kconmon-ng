@@ -14,33 +14,38 @@ import (
 // active WatchTasks stream, so there is nobody to run the task.
 var ErrAgentNotSubscribed = errors.New("agent has no active task subscription")
 
+// ErrLeadershipLost is returned by Dispatch when this replica is demoted while the task is in
+// flight: the agent's result now goes to the new leader, which does not know the task.
+var ErrLeadershipLost = errors.New("leadership lost while the task was in flight")
+
 // TaskManager dispatches on-demand diagnostic tasks to agents over their WatchTasks streams and
 // correlates the asynchronous ReportTaskResult callback back to the waiting Dispatch caller;
 // callers must never hold the mutex while sending on a channel or blocking.
 type TaskManager struct {
 	mu sync.Mutex
-	/* A SET of streams per agent id, not one stream per agent id.
-
-	   The agent id on a WatchTasks request is whatever the client sent, and this channel is what a
-	   diagnostic dispatch is delivered on. With one entry per id the map was last-writer-wins: a
-	   second caller subscribing under an existing agent's id took delivery of that agent's tasks,
-	   and when it disconnected its cleanup — which owned the mapped entry — removed the id
-	   altogether, so every later dispatch to a healthy, connected agent answered 404 "source agent
-	   has no active diagnostics stream". Nothing was logged on either side and the agent still
-	   counted as registered.
-
-	   A set cannot be displaced: a subscriber only ever removes its OWN channel, and Dispatch
-	   delivers to all of them. This does not authenticate the channel — the gRPC surface has no
-	   authentication at all, which is a deployment-level decision the NetworkPolicy expresses — but
-	   it does mean no caller can take a subscription away from the agent that owns it. */
+	// A set of streams per agent id: the id is client-supplied, so a second subscriber under it must
+	// not displace the agent's own stream. A subscriber removes only its own channel, and Dispatch
+	// delivers to all of them.
 	subscribers map[string]map[chan *pb.TaskRequest]struct{}
-	pending     map[string]chan *pb.TaskResult
+	pending     map[string]pendingTask
+}
+
+// pendingTask remembers WHICH agent a task went to: the task id is published in events, so a
+// result is only accepted from that agent.
+type pendingTask struct {
+	agentID string
+	done    chan taskOutcome // cap 1; the first outcome wins
+}
+
+type taskOutcome struct {
+	res *pb.TaskResult
+	err error
 }
 
 func NewTaskManager() *TaskManager {
 	return &TaskManager{
 		subscribers: make(map[string]map[chan *pb.TaskRequest]struct{}),
-		pending:     make(map[string]chan *pb.TaskResult),
+		pending:     make(map[string]pendingTask),
 	}
 }
 
@@ -74,8 +79,8 @@ func (tm *TaskManager) Subscribe(agentID string) (tasks <-chan *pb.TaskRequest, 
 	return ch, cleanup
 }
 
-// Dispatch sends req to agentID and blocks until the agent reports a result, the context is
-// cancelled.
+// Dispatch sends req to agentID and blocks until the agent reports a result, ctx ends, or FailAll
+// ends it (ErrLeadershipLost on demotion).
 func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.TaskRequest) (*pb.TaskResult, error) {
 	taskID := req.GetTaskId()
 	if taskID == "" {
@@ -83,7 +88,7 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 		req.TaskId = taskID
 	}
 
-	resultCh := make(chan *pb.TaskResult, 1)
+	done := make(chan taskOutcome, 1)
 
 	tm.mu.Lock()
 	set := tm.subscribers[agentID]
@@ -95,7 +100,7 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 	for ch := range set {
 		subs = append(subs, ch)
 	}
-	tm.pending[taskID] = resultCh
+	tm.pending[taskID] = pendingTask{agentID: agentID, done: done}
 	tm.mu.Unlock()
 
 	defer func() {
@@ -104,12 +109,8 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 		tm.mu.Unlock()
 	}()
 
-	// Enqueue the task on the agent's buffered channel. Respect context so a
-	// slow/full subscriber cannot block the caller past its deadline.
-	/* Every stream open for this agent id gets the task, and the first agent to answer wins the
-	   pending slot. Normally there is exactly one; a reconnect overlaps two for a moment, and the
-	   dying one simply never answers. Sending to ALL of them rather than to "the" subscriber is
-	   what makes a second subscriber unable to intercept the dispatch. */
+	// Every stream open for this agent id gets the task, and the first answer wins the pending slot.
+	// Normally there is one; a reconnect overlaps two for a moment, and the dying one never answers.
 	sent := false
 	for _, sub := range subs {
 		select {
@@ -126,21 +127,21 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 	}
 
 	select {
-	case res := <-resultCh:
-		return res, nil
+	case out := <-done:
+		return out.res, out.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
 // Report delivers a task result to the waiting Dispatch caller. Results for
-// unknown or already-completed tasks are dropped with a debug log and never
+// unknown or already-completed tasks are dropped with a warning and never
 // block.
 func (tm *TaskManager) Report(res *pb.TaskResult) {
 	taskID := res.GetTaskId()
 
 	tm.mu.Lock()
-	ch, ok := tm.pending[taskID]
+	p, ok := tm.pending[taskID]
 	tm.mu.Unlock()
 
 	if !ok {
@@ -149,13 +150,30 @@ func (tm *TaskManager) Report(res *pb.TaskResult) {
 		slog.Warn("dropping task result for unknown task", "taskId", taskID)
 		return
 	}
+	if res.GetAgentId() != p.agentID {
+		slog.Warn("dropping task result from an agent the task was not dispatched to",
+			"taskId", taskID, "reportedBy", res.GetAgentId(), "dispatchedTo", p.agentID)
+		return
+	}
 
-	// resultCh is buffered (cap 1) and Dispatch removes the pending entry
+	// done is buffered (cap 1) and Dispatch removes the pending entry
 	// before returning, so this send never blocks.
 	select {
-	case ch <- res:
+	case p.done <- taskOutcome{res: res}:
 	default:
 		slog.Warn("task result dropped (no waiter or duplicate)", "taskId", taskID)
+	}
+}
+
+// FailAll ends every in-flight Dispatch with err; used on demotion, where no result can arrive.
+func (tm *TaskManager) FailAll(err error) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for _, p := range tm.pending {
+		select {
+		case p.done <- taskOutcome{err: err}:
+		default:
+		}
 	}
 }
 

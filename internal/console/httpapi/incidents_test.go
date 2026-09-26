@@ -220,8 +220,8 @@ func TestIncidentsWithoutStoreReturn503(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 			t.Errorf("%s %s Content-Type = %q, want application/problem+json", c.method, c.path, ct)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -304,13 +304,14 @@ func TestIncidentsOperatorAndAdminWriteTheFullCycle(t *testing.T) {
 
 // created_by is the SERVER's view of who opened the incident, never a body
 // field -- annotationAuthor's rule, applied to the same kind of attribution.
-func TestIncidentsCreateRecordsTheSubjectAndIgnoresClientState(t *testing.T) {
+func TestIncidentsCreateRecordsTheSubjectAndOpensTheIncident(t *testing.T) {
 	st := newFakeIncidentStore()
 	s := newM5TestServer(t, "operator", Deps{Incidents: st})
-	/* The state fields a client cannot set are now REFUSED by name rather than
+	/* The state fields a client cannot set are REFUSED by name rather than
 	   silently ignored: the request schema is additionalProperties:false, and a
 	   client that sends "status" on create has misunderstood the route. The
-	   refusal itself is the case below; here the body is the legal one. */
+	   refusal itself is TestIncidentsCreateRefusesServerOwnedFieldsByName; here
+	   the body is the legal one. */
 	body := `{"title":"t","fromAt":"2026-08-07T10:00:00Z"}`
 	w := doRequest(t, s, http.MethodPost, "/api/v1/incidents", strings.NewReader(body), mutateWithCSRF)
 	if w.Code != http.StatusCreated {
@@ -921,5 +922,76 @@ func TestIncidentResolveNotifiesEvenWhenALaterFieldFails(t *testing.T) {
 	   id and an empty status: a receiver told that nothing had been resolved. */
 	if got[1].id != created.ID {
 		t.Errorf("resolved notification carried id %q, want %q", got[1].id, created.ID)
+	}
+}
+
+// Notes are multi-line free text typed into a textarea: POST and PATCH must apply one rule to them,
+// keeping newline, carriage return and tab and refusing NUL and the other control characters.
+func TestIncidentsNotesFollowOneRuleOnCreateAndPatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		notes string
+		ok    bool
+	}{
+		{"two lines", "first line\nsecond line", true},
+		{"CRLF", "first line\r\nsecond line", true},
+		{"tab", "host\tloss", true},
+		{"NUL", "a\x00b", false},
+		{"other C0", "a\x01b", false},
+		{"DEL", "a\x7fb", false},
+	}
+	for _, c := range cases {
+		notes, err := json.Marshal(c.notes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := newFakeIncidentStore()
+		s := newM5TestServer(t, "operator", Deps{Incidents: st})
+
+		w := doRequest(t, s, http.MethodPost, "/api/v1/incidents",
+			strings.NewReader(`{"title":"t","fromAt":"2026-08-07T10:00:00Z","notes":`+string(notes)+`}`), mutateWithCSRF)
+		wantCreate := http.StatusCreated
+		if !c.ok {
+			wantCreate = http.StatusUnprocessableEntity
+		}
+		if w.Code != wantCreate {
+			t.Errorf("%s: POST = %d, want %d: %s", c.name, w.Code, wantCreate, w.Body)
+		}
+
+		id := st.seed("t", "", time.Now().UTC())
+		w = doRequest(t, s, http.MethodPatch, "/api/v1/incidents/"+id,
+			strings.NewReader(`{"notes":`+string(notes)+`}`), mutateWithCSRF)
+		wantPatch := http.StatusOK
+		if !c.ok {
+			wantPatch = http.StatusUnprocessableEntity
+		}
+		if w.Code != wantPatch {
+			t.Errorf("%s: PATCH = %d, want %d: %s", c.name, w.Code, wantPatch, w.Body)
+		}
+		if !c.ok && !strings.Contains(w.Body.String(), "incident: notes contains a control character") {
+			t.Errorf("%s: PATCH detail = %s, want it to name the notes field", c.name, w.Body)
+		}
+	}
+}
+
+// A NUL in notes is refused before the status write: PostgreSQL would refuse it only after the
+// status had committed, leaving the incident resolved behind a 502.
+func TestIncidentsPatchRefusesNULNotesBeforeTheStatusWrite(t *testing.T) {
+	st := newFakeIncidentStore()
+	id := st.seed("t", "", time.Now().UTC())
+	notifier := &fakeIncidentNotifier{}
+	s := newM5TestServer(t, "operator", Deps{Incidents: st, IncidentNotifier: notifier})
+
+	w := doRequest(t, s, http.MethodPatch, "/api/v1/incidents/"+id,
+		strings.NewReader(`{"status":"resolved","notes":"a\u0000b"}`), mutateWithCSRF)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("PATCH = %d, want 422: %s", w.Code, w.Body)
+	}
+	if stored := st.get(t, id); stored.Status != store.IncidentStatusOpen || stored.Notes != "" {
+		t.Errorf("stored status/notes = %q/%q, want the rejected patch to have changed nothing",
+			stored.Status, stored.Notes)
+	}
+	if got := notifier.notified(); len(got) != 0 {
+		t.Errorf("notifier saw %+v, want nothing for a rejected patch", got)
 	}
 }

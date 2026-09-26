@@ -35,7 +35,6 @@ type observer struct {
 
 	mu          sync.Mutex
 	sizeByPeers map[int]int
-	maxPeers    int
 	delays      []time.Duration
 }
 
@@ -91,9 +90,6 @@ func (o *observer) record(update *pb.PeerUpdate, first bool) {
 
 	o.mu.Lock()
 	o.sizeByPeers[peers] = size
-	if peers > o.maxPeers {
-		o.maxPeers = peers
-	}
 	if !first && update.GetTimestamp() != nil && len(o.delays) < 8192 {
 		o.delays = append(o.delays, now.Sub(update.GetTimestamp().AsTime()))
 	}

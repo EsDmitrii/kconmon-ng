@@ -548,6 +548,26 @@ func TestPutExternalChecks400IsErrBadRequest(t *testing.T) {
 	}
 }
 
+// A desired state over the controller's body limit is named as that, with the controller's own
+// sentence, rather than as a bare status code; it is not retryable.
+func TestPutExternalChecks413NamesTheBodyLimit(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "request body exceeds 8388608 bytes", http.StatusRequestEntityTooLarge)
+	}))
+	defer srv.Close()
+
+	c := controllerclient.New(srv.URL, 5*time.Second)
+	_, err := c.PutExternalChecks(context.Background(), externalSpecs())
+	if !errors.Is(err, controllerclient.ErrDesiredStateTooLarge) || !strings.Contains(err.Error(), "request body exceeds 8388608 bytes") {
+		t.Fatalf("err = %v, want ErrDesiredStateTooLarge with the controller's sentence", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (a 413 is not retryable)", got)
+	}
+}
+
 func TestPutExternalChecksUnexpectedStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -579,6 +599,13 @@ type clusterIPPair struct {
 
 func newClusterIPPair(t *testing.T, leaderBody string, leaderStatus int) *clusterIPPair {
 	t.Helper()
+	return newClusterIPService(t, 1, leaderBody, leaderStatus)
+}
+
+// newClusterIPService is newClusterIPPair with the first standbyConns connections landing on the
+// standby: kube-proxy's per-connection draw losing to the standby that many times in a row.
+func newClusterIPService(t *testing.T, standbyConns int64, leaderBody string, leaderStatus int) *clusterIPPair {
+	t.Helper()
 
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -594,7 +621,7 @@ func newClusterIPPair(t *testing.T, leaderBody string, leaderStatus int) *cluste
 		},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, _ := r.Context().Value(connIDKeyType{}).(int64)
-			if id == 1 {
+			if id <= standbyConns {
 				p.standby.Add(1)
 				http.Error(w, "not the leader", http.StatusServiceUnavailable)
 				return
@@ -666,5 +693,70 @@ func TestPutExternalChecksRedialsPastAPinnedStandby(t *testing.T) {
 	if p.conns.Load() < 2 {
 		t.Errorf("server saw %d connections; the PUT retried on the pinned standby connection",
 			p.conns.Load())
+	}
+}
+
+/*
+ * Two controller replicas behind one ClusterIP: every fresh connection is a coin flip, and six
+ * attempts lose it 1 time in 64, which is what failed 1.4% of pairs on a healthy fleet. A standby's
+ * "not the leader" proves the leader is there, so that answer gets a draw budget that makes losing
+ * negligible. Ten standby draws in a row is a 1/1024 event the old ladder could not survive.
+ */
+func TestStandbyAnswersDoNotExhaustTheRetryBudgetOfAHealthyFleet(t *testing.T) {
+	const standbyConns = 10
+	calls := map[string]func(c *controllerclient.Client) error{
+		"topology": func(c *controllerclient.Client) error {
+			_, err := c.Topology(context.Background())
+			return err
+		},
+		"diagnose": func(c *controllerclient.Client) error {
+			_, err := c.Diagnose(context.Background(), diagnoseReq(), 5*time.Second)
+			return err
+		},
+		"external-checks": func(c *controllerclient.Client) error {
+			_, err := c.PutExternalChecks(context.Background(), externalSpecs())
+			return err
+		},
+	}
+	bodies := map[string]string{
+		"topology":        topoJSON(),
+		"diagnose":        `{"success":true}`,
+		"external-checks": `{"agents":1,"changed":1,"unknown":[]}`,
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := newClusterIPService(t, standbyConns, bodies[name], http.StatusOK)
+			c := controllerclient.New(p.url, 5*time.Second)
+			if err := call(c); err != nil {
+				t.Fatalf("%s gave up with the leader one connection away: %v", name, err)
+			}
+			if got := p.standby.Load(); got != standbyConns {
+				t.Errorf("standby answered %d times, want %d (each retry must be a fresh connection)", got, standbyConns)
+			}
+			if got := p.leader.Load(); got != 1 {
+				t.Errorf("leader answered %d times, want 1", got)
+			}
+		})
+	}
+}
+
+// A 503 that is not a standby's answer (no leader at all, diagnostics not wired yet) keeps the short
+// ladder: it is not evidence that another replica would answer.
+func TestNonStandby503KeepsTheShortLadder(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "diagnostics not available", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := controllerclient.New(srv.URL, 5*time.Second)
+	_, err := c.Diagnose(context.Background(), diagnoseReq(), 5*time.Second)
+	if !errors.Is(err, controllerclient.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+	if calls.Load() != 6 {
+		t.Errorf("expected 6 attempts, got %d", calls.Load())
 	}
 }

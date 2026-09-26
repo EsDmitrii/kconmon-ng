@@ -380,6 +380,32 @@ func TestAuthLoginOverUsernameLimitReturns429BeforeArgon2(t *testing.T) {
 	}
 }
 
+// An unauthenticated caller picks the username, and the per-username counter is keyed on it: an
+// over-long one must be refused before it becomes a KV key that outlives the request by a minute.
+func TestAuthLoginRefusesAnOverlongUsernameBeforeCounting(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts, users := newLoginRateLimitServer(t, config.RateLimitConfig{LoginPerMinute: 5}, kv)
+
+	long := strings.Repeat("a", 1<<20)
+	w := postLoginFrom(t, ts.srv, "203.0.113.7:1111", `{"username":"`+long+`","password":"x"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("1 MiB username = %d, want 400: %.200s", w.Code, w.Body)
+	}
+	if n := kv.Len(); n != 0 {
+		t.Fatalf("KV holds %d keys after a refused over-long username, want 0", n)
+	}
+	if got := users.count(); got != 0 {
+		t.Errorf("user lookups = %d, want 0", got)
+	}
+
+	// The longest name the console can hold still goes through the normal path.
+	w = postLoginFrom(t, ts.srv, "203.0.113.7:1111", `{"username":"`+strings.Repeat("b", 64)+`","password":"x"}`)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("64-character username = %d, want 401: %s", w.Code, w.Body)
+	}
+}
+
 // TestAuthLoginUsernameAndIPCountedIndependently is the explicit requirement.
 func TestAuthLoginUsernameAndIPCountedIndependently(t *testing.T) {
 	t.Run("hot username does not lock out another user from the same IP", func(t *testing.T) {
@@ -542,5 +568,165 @@ func TestClientIPTrustsAForwardingHeaderOnlyFromATrustedProxy(t *testing.T) {
 				t.Errorf("clientIP = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// GET /api/v1/auth/oidc/start is public and every call parks a state record in the KV for minutes,
+// so one address gets the same wide budget a login spray does.
+func TestOIDCStartIsRateLimitedPerClientIP(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts := newRateLimitServer(t, "oidc", config.RateLimitConfig{LoginPerMinute: 1}, kv, Deps{
+		OIDC: fakeOIDCFlow{authorizeURL: "https://idp.test/authorize?client_id=x&state=abc123"},
+	})
+	start := func(remoteAddr string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/auth/oidc/start", http.NoBody)
+		req.RemoteAddr = remoteAddr
+		w := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+
+	for i := range loginIPBurstFactor {
+		if w := start("198.51.100.5:1111"); w.Code != http.StatusFound {
+			t.Fatalf("start %d = %d, want 302: %s", i, w.Code, w.Body)
+		}
+	}
+	w := start("198.51.100.5:1111")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("start %d from one address = %d, want 429", loginIPBurstFactor+1, w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("429 has no Retry-After header")
+	}
+	if w := start("198.51.100.9:1111"); w.Code != http.StatusFound {
+		t.Fatalf("another address = %d, want 302 -- the budget is per client address", w.Code)
+	}
+}
+
+// In auth.mode=anonymous every visitor is the same subject; one visitor's queries must not spend
+// the PromQL budget of everybody else who has the console open.
+func TestPromQLBudgetIsPerAddressForAnonymousVisitors(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts := newRateLimitServer(t, "anonymous", config.RateLimitConfig{PromQLPerMinute: 2}, kv, Deps{
+		Prometheus: newFakePrometheus(t, promVector(1)),
+	})
+	query := func(remoteAddr string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/promql/query",
+			strings.NewReader(`{"query":"up"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remoteAddr
+		w := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(w, req)
+		return w.Code
+	}
+
+	for i := range 2 {
+		if code := query("10.0.0.1:1111"); code != http.StatusOK {
+			t.Fatalf("visitor A query %d = %d, want 200", i, code)
+		}
+	}
+	if code := query("10.0.0.1:1111"); code != http.StatusTooManyRequests {
+		t.Fatalf("visitor A over the budget = %d, want 429", code)
+	}
+	if code := query("10.0.0.2:1111"); code != http.StatusOK {
+		t.Fatalf("visitor B's first query after A spent the budget = %d, want 200", code)
+	}
+}
+
+// Every login-issued session carries the password stamp; without it a reset or a change would sign
+// nobody out.
+func TestAuthLoginSessionCarriesThePasswordStamp(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts, users := newLoginRateLimitServer(t, config.RateLimitConfig{LoginPerMinute: 5}, kv)
+
+	w := postLoginFrom(t, ts.srv, "203.0.113.7:1111", `{"username":"alice","password":"s3cret!"}`)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("login = %d %s, want 204", w.Code, w.Body)
+	}
+	var sid string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == ts.srv.cfg.Auth.Session.CookieName {
+			sid = c.Value
+		}
+	}
+	sess, ok, err := ts.srv.sessions.Get(t.Context(), sid)
+	if err != nil || !ok {
+		t.Fatalf("session %q not found: ok=%v err=%v", sid, ok, err)
+	}
+	if want := authn.PasswordStamp(users.users["alice"].PasswordHash); sess.PasswordStamp != want {
+		t.Fatalf("session stamp = %q, want %q", sess.PasswordStamp, want)
+	}
+}
+
+// A proxy that adds its own X-Forwarded-For LINE (HAProxy's option forwardfor) leaves the client's
+// line first, so every line is read as one list, from the right. A hop that is not an address is
+// never a client: the walk stops there and the nearest trusted peer stands in.
+func TestClientIPReadsEveryForwardedForLine(t *testing.T) {
+	trusted := parseCIDRs([]string{"10.42.0.0/16"})
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"client line first, proxy line last", []string{"6.6.6.6", "198.51.100.20"}, "198.51.100.20"},
+		{"trusted hops on a later line are skipped", []string{"6.6.6.6", "198.51.100.20", "10.42.0.3"}, "198.51.100.20"},
+		{"a non-address hop is never returned", []string{"not-an-ip"}, "10.42.0.9"},
+		{"a non-address hop stops the walk", []string{"6.6.6.6, not-an-ip", "10.42.0.3"}, "10.42.0.9"},
+		{"a hop with a port counts as its address", []string{"198.51.100.20:4711"}, "198.51.100.20"},
+		{"an IPv6 hop comes back in canonical form", []string{"2001:DB8::1"}, "2001:db8::1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/auth/oidc/start", http.NoBody)
+			r.RemoteAddr = "10.42.0.9:5555"
+			for _, line := range c.lines {
+				r.Header.Add("X-Forwarded-For", line)
+			}
+			if got := clientIP(r, trusted); got != c.want {
+				t.Errorf("clientIP = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Behind an Ingress every browser arrives from the ingress pod. With that pod's network trusted
+// (auth.header.trustedProxyCIDRs, honoured in every auth mode) the sign-in budget belongs to the real
+// client, so one host spending it, whatever it writes into its own X-Forwarded-For line, does not
+// lock anybody else out of OIDC sign-in.
+func TestOIDCStartBudgetIsPerClientBehindATrustedProxy(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	cfg := authTestConfig("oidc")
+	cfg.RateLimit = config.RateLimitConfig{LoginPerMinute: 1}
+	cfg.Auth.Header.TrustedProxyCIDRs = []string{"10.244.0.0/16"}
+	reg := prometheus.NewRegistry()
+	srv := NewServer(Deps{
+		Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg, KV: kv,
+		UI:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) }),
+		OIDC: fakeOIDCFlow{authorizeURL: "https://idp.test/authorize?client_id=x&state=abc123"},
+	})
+	start := func(xff ...string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/auth/oidc/start", http.NoBody)
+		req.RemoteAddr = "10.244.1.7:40000"
+		for _, line := range xff {
+			req.Header.Add("X-Forwarded-For", line)
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w.Code
+	}
+
+	// The attacker rotates its own line; the ingress appends the address it really came from.
+	for i := range loginIPBurstFactor * 3 {
+		start(fmt.Sprintf("192.0.2.%d", i), "203.0.113.66")
+	}
+	if code := start("192.0.2.250", "203.0.113.66"); code != http.StatusTooManyRequests {
+		t.Fatalf("the flooding client's own start = %d, want 429: rotating its own X-Forwarded-For line reset its budget", code)
+	}
+	if code := start("198.51.100.20"); code != http.StatusFound {
+		t.Fatalf("another user's start behind the same ingress = %d, want 302", code)
 	}
 }

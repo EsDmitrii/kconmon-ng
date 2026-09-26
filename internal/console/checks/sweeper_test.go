@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,7 +146,7 @@ func TestPromIntendedPairsParsesTheIntendedVector(t *testing.T) {
 
 	src := checks.NewPromIntendedPairs(promql.New(srv.URL, promql.Guards{
 		QueryTimeout: 5 * time.Second, MaxRange: time.Hour, MaxResponseBytes: 1 << 20,
-	}))
+	}), "kconmon_ng")
 	pairs, err := src.IntendedPairs(context.Background())
 	if err != nil {
 		t.Fatalf("IntendedPairs: %v", err)
@@ -161,5 +162,32 @@ func TestPromIntendedPairsParsesTheIntendedVector(t *testing.T) {
 		if _, ok := pairs[k]; !ok {
 			t.Errorf("missing pair %v", k)
 		}
+	}
+}
+
+// The plan gauge is exported under config.metricsPrefix like every other series; querying the default
+// name under a custom prefix returns an empty vector, and the census then re-probes every planned pair.
+func TestPromIntendedPairsHonoursTheMetricsPrefix(t *testing.T) {
+	queries := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		select {
+		case queries <- r.Form.Get("query"):
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	src := checks.NewPromIntendedPairs(promql.New(srv.URL, promql.Guards{
+		QueryTimeout: 5 * time.Second, MaxRange: time.Hour, MaxResponseBytes: 1 << 20,
+	}), "acme")
+	if _, err := src.IntendedPairs(context.Background()); err != nil {
+		t.Fatalf("IntendedPairs: %v", err)
+	}
+	q := <-queries
+	if !strings.Contains(q, "acme_probe_intended") || strings.Contains(q, "kconmon_ng_") {
+		t.Errorf("query = %q, want it to read acme_probe_intended", q)
 	}
 }

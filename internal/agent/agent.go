@@ -1,13 +1,14 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
-	"net"
 	"net/http"
-	"regexp"
+	"net/netip"
+	"slices"
+	"sync"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
@@ -24,7 +25,8 @@ import (
 // get an immediate error result.
 const maxConcurrentTasks = 4
 
-// capabilityExternalChecks is the AgentMeta.capabilities flag this agent advertises when.
+// capabilityExternalChecks is the AgentMeta.capabilities flag this agent advertises when
+// checkers.external.enabled.
 const capabilityExternalChecks = "external-checks"
 
 type Agent struct {
@@ -49,6 +51,31 @@ type Agent struct {
 	// WatchExternalChecks. It is nil unless checkers.external.enabled, which is
 	// also the switch that decides whether the agent subscribes at all.
 	externalChecker *checker.ExternalChecker
+
+	// peerMu guards the peer list, a.info.Zone and departed: the peer watch and the heartbeat loop
+	// both re-register, and their steps must not interleave.
+	peerMu   sync.Mutex
+	departed map[string]departedPeer // peer node name -> when it left the plan, and its zone then
+	now      func() time.Time        // test seam; nil means time.Now
+
+	// rejoinMu guards the rejoin grace (see rejoinPeerGrace) and the controller's last peer list; it
+	// is taken before peerMu.
+	rejoinMu        sync.Mutex
+	rejoining       bool
+	rejoinGen       uint64
+	controllerPeers []checker.Target
+
+	// probeMu guards what ApplyConfig replaces: cfg, checkers, mtrChecker, external and
+	// externalChecker. It is a leaf: nothing else is locked while it is held.
+	probeMu sync.RWMutex
+	// reloadMu serialises ApplyConfig with the external assignment handler, and guards
+	// lastAssignment and externalWatch. Lock order: reloadMu, peerMu, deliverMu, the scheduler's mu.
+	reloadMu       sync.Mutex
+	lastAssignment *pb.ExternalCheckAssignment
+	// externalWatch starts or stops the WatchExternalChecks subscription; nil until Run sets it.
+	externalWatch func(on bool)
+	// readvertise asks Run to register again, carrying capabilities a reload changed.
+	readvertise chan struct{}
 }
 
 func New(cfg *config.Config) (*Agent, error) {
@@ -68,27 +95,9 @@ func New(cfg *config.Config) (*Agent, error) {
 	advertiseListenerPorts(&info, cfg)
 
 	// The external-destination gate is built here, not lazily at first probe.
-	external := ExternalPolicy{}
-	if cfg.Checkers.External.Enabled {
-		allowlist, err := checker.NewAllowlist(cfg.Checkers.External.AllowedCIDRs, cfg.Checkers.External.DeniedCIDRs)
-		if err != nil {
-			return nil, fmt.Errorf("checkers.external.%w", err)
-		}
-		external = ExternalPolicy{
-			Enabled:   true,
-			Allowlist: allowlist,
-			// The system resolver: external destinations are named in cluster
-			// DNS terms like everything else the agent probes.
-			Resolver:   net.DefaultResolver,
-			Timeout:    cfg.Checkers.External.Timeout,
-			MaxTargets: cfg.Checkers.External.MaxTargets,
-		}
-		slog.Info("external destination checks enabled",
-			"allowedCidrs", len(cfg.Checkers.External.AllowedCIDRs),
-			"deniedCidrs", len(cfg.Checkers.External.DeniedCIDRs),
-			"maxTargets", cfg.Checkers.External.MaxTargets,
-			"authTimeout", cfg.Checkers.External.Timeout,
-		)
+	probes, err := buildProbes(cfg, nil, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	source := checker.Target{
@@ -99,92 +108,8 @@ func New(cfg *config.Config) (*Agent, error) {
 		Port:     cfg.HTTPPort,
 	}
 
-	resultHandler := NewResultHandler(m, source)
-
-	sched := NewScheduler(source, resultHandler)
-
-	// checkers is the shared registry of enabled checker instances, reused by
-	// both the scheduler and the on-demand task executor.
-	checkers := make(map[model.CheckType]checker.Checker)
-
-	if cfg.Checkers.TCP.Enabled {
-		c := checker.NewTCPChecker(cfg.Checkers.TCP.Timeout)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.TCP.Interval})
-		checkers[model.CheckTCP] = c
-		slog.Info("checker enabled", "type", "tcp", "interval", cfg.Checkers.TCP.Interval)
-	}
-	if cfg.Checkers.UDP.Enabled {
-		c := checker.NewUDPChecker(cfg.Checkers.UDP.Timeout, cfg.Checkers.UDP.Packets, cfg.GRPCPort)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.UDP.Interval})
-		checkers[model.CheckUDP] = c
-		slog.Info("checker enabled", "type", "udp", "interval", cfg.Checkers.UDP.Interval)
-	}
-	if cfg.Checkers.ICMP.Enabled {
-		c := checker.NewICMPChecker(cfg.Checkers.ICMP.Timeout)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.ICMP.Interval})
-		checkers[model.CheckICMP] = c
-		slog.Info("checker enabled", "type", "icmp", "interval", cfg.Checkers.ICMP.Interval)
-	}
-	if cfg.Checkers.PMTU.Enabled {
-		c := checker.NewPMTUChecker(cfg.Checkers.PMTU.Timeout, cfg.Checkers.PMTU.Interval,
-			cfg.Checkers.PMTU.Size, cfg.GRPCPort)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.PMTU.Interval})
-		checkers[model.CheckPMTU] = c
-		slog.Info("checker enabled", "type", "pmtu", "interval", cfg.Checkers.PMTU.Interval,
-			"size", cfg.Checkers.PMTU.Size)
-	}
-	if cfg.Checkers.DNS.Enabled && len(cfg.Checkers.DNS.Hosts) > 0 {
-		c := checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers, cfg.Checkers.DNS.Timeout)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.DNS.Interval, NodeLocal: true})
-		checkers[model.CheckDNS] = c
-		slog.Info("checker enabled", "type", "dns", "interval", cfg.Checkers.DNS.Interval)
-	}
-	if cfg.Checkers.HTTP.Enabled && len(cfg.Checkers.HTTP.Targets) > 0 {
-		httpTargets := make([]checker.HTTPCheckTarget, 0, len(cfg.Checkers.HTTP.Targets))
-		for _, t := range cfg.Checkers.HTTP.Targets {
-			ht := checker.HTTPCheckTarget{
-				URL:                t.URL,
-				Method:             t.Method,
-				ExpectStatus:       t.ExpectStatus,
-				InsecureSkipVerify: t.InsecureSkipVerify,
-			}
-			if t.BodyPattern != "" {
-				re, err := regexp.Compile(t.BodyPattern)
-				if err != nil {
-					return nil, fmt.Errorf("invalid bodyPattern %q for target %s: %w", t.BodyPattern, t.URL, err)
-				}
-				ht.BodyPattern = re
-			}
-			httpTargets = append(httpTargets, ht)
-		}
-		c := checker.NewHTTPChecker(cfg.Checkers.HTTP.Timeout, httpTargets)
-		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.HTTP.Interval, NodeLocal: true})
-		checkers[model.CheckHTTP] = c
-		slog.Info("checker enabled", "type", "http", "interval", cfg.Checkers.HTTP.Interval, "targets", len(httpTargets))
-	}
-
-	// The continuous external checker is registered like any other NodeLocal checker.
-	var externalChecker *checker.ExternalChecker
-	if external.Enabled {
-		externalChecker = checker.NewExternalChecker(external.Allowlist, external.Resolver, external.Timeout)
-		sched.AddChecker(externalChecker, SchedulerConfig{Interval: checker.ExternalTick, NodeLocal: true})
-		slog.Info("checker enabled", "type", "external", "tick", checker.ExternalTick)
-	}
-
-	mtrChecker := checker.NewMTRChecker(cfg.Checkers.MTR.MaxHops, 1*time.Second, cfg.Checkers.MTR.Cooldown)
-	sched.SetMTRChecker(mtrChecker)
-	slog.Info("mtr checker enabled", "maxHops", cfg.Checkers.MTR.MaxHops, "cooldown", cfg.Checkers.MTR.Cooldown)
-
-	// Self-observation (M9-2): the scheduler records its own cadence, the age
-	// gauge reads the peer-list stamp at scrape time, and the series that alert
-	// expressions consume exist from the first scrape rather than first event.
-	sched.SetSelfMetrics(m)
-	m.EnablePeerListAge(sched.PeerListUpdatedAt)
-	preinitSelfMetrics(m, checkers, externalChecker != nil)
-
 	a := &Agent{
 		cfg:         cfg,
-		scheduler:   sched,
 		httpServer:  NewHTTPServer(promReg),
 		probeServer: NewProbeServer(cfg.GRPCPort),
 		metrics:     m,
@@ -193,12 +118,28 @@ func New(cfg *config.Config) (*Agent, error) {
 		// The zone the operator CONFIGURED (agent.zone, env-overridden by the loader) as opposed to
 		// the effective one in info.Zone; registrationInfo explains why only this one is asserted.
 		configuredZone: cfg.Agent.Zone,
-		checkers:       checkers,
-		mtrChecker:     mtrChecker,
-		external:       external,
+		checkers:       probes.checkers,
+		mtrChecker:     probes.mtr,
+		external:       probes.external,
 
-		externalChecker: externalChecker,
+		externalChecker: probes.externalChecker,
+		readvertise:     make(chan struct{}, 1),
 	}
+
+	// The filter reads the external checker in force, which a reload may rebuild or remove.
+	sched := NewScheduler(source, assignedExternalOnly(a.currentExternalChecker, NewResultHandler(m, source)))
+	for _, e := range probes.schedule {
+		sched.AddChecker(e.Checker, e.Config)
+	}
+	sched.SetMTRChecker(probes.mtr)
+
+	// Self-observation (M9-2): the scheduler records its own cadence, the age
+	// gauge reads the peer-list stamp at scrape time, and the series that alert
+	// expressions consume exist from the first scrape rather than first event.
+	sched.SetSelfMetrics(m)
+	m.EnablePeerListAge(sched.PeerListUpdatedAt)
+	preinitSelfMetrics(m, probes.checkers, probes.externalChecker != nil)
+	a.scheduler = sched
 
 	return a, nil
 }
@@ -218,7 +159,8 @@ func preinitSelfMetrics(m *metrics.PrometheusMetrics, enabled map[model.CheckTyp
 		m.AgentProbeCycleOverruns.WithLabelValues(name).Add(0)
 	}
 	m.AgentControllerReconnects.WithLabelValues().Add(0)
-	m.AgentMTRReactiveInflight.WithLabelValues().Set(0)
+	// Created, never zeroed: a reload runs this while detached reactive traces still hold a slot.
+	m.AgentMTRReactiveInflight.WithLabelValues()
 	m.AgentMTRReactiveCoalesced.WithLabelValues("cooldown").Add(0)
 	m.AgentMTRReactiveCoalesced.WithLabelValues("saturated").Add(0)
 }
@@ -279,42 +221,46 @@ func (a *Agent) Run(ctx context.Context) error {
 		"version", config.Version,
 	)
 
+	// Listeners, identity and the controller connection are restart-bound: read once, here.
+	cfg := a.appliedConfig()
+
 	if err := a.probeServer.ListenUDP(ctx); err != nil {
 		return fmt.Errorf("starting UDP probe server: %w", err)
 	}
 	defer func() { _ = a.probeServer.Close() }()
 
-	grpcClient, err := NewGRPCClient(a.cfg.ControllerAddress, clientSecurityFromConfig(a.cfg))
+	grpcClient, err := NewGRPCClient(cfg.ControllerAddress, clientSecurityFromConfig(cfg))
 	if err != nil {
 		return fmt.Errorf("creating gRPC client: %w", err)
 	}
 	a.grpcClient = grpcClient
 	defer func() { _ = grpcClient.Close() }()
+	grpcClient.OnFleetEchoes(a.probeServer.SetFleetEchoAddrs)
 
 	// The health/metrics plane comes up BEFORE the first registration: the chart's
 	// startupProbe polls /healthz with a finite budget, and an agent that stays dark
 	// through a controller outage takes the whole DaemonSet into CrashLoopBackOff.
 	errCh := make(chan error, 2)
 	httpSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", a.cfg.HTTPPort),
+		Addr:         fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:      a.httpServer.Handler(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		slog.Info("HTTP server listening", "port", a.cfg.HTTPPort)
+		slog.Info("HTTP server listening", "port", cfg.HTTPPort)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
 	// The metrics listener, on its own port: see internal/metrics/listener.go.
 	metricsSrv := metrics.NewListener(
-		fmt.Sprintf(":%d", a.cfg.MetricsPort),
+		fmt.Sprintf(":%d", cfg.MetricsPort),
 		metrics.NewListenerHandler(a.promReg, a.httpServer.Ready),
 	)
 
 	go func() {
-		slog.Info("metrics server listening", "port", a.cfg.MetricsPort)
+		slog.Info("metrics server listening", "port", cfg.MetricsPort)
 		errCh <- metricsSrv.ListenAndServe()
 	}()
 
@@ -324,12 +270,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		return httpSrv.Shutdown(shutdownCtx)
 	}
 
-	var peers []checker.Target
-	var resolvedZone string
+	// The zone is adopted before the scheduler starts, so every series carries the right source_zone
+	// from the first check.
 	backoff := 1 * time.Second
 	maxBackoff := 15 * time.Second
 	for {
-		peers, resolvedZone, err = grpcClient.Register(ctx, a.registrationInfo(), a.ownPorts())
+		err = a.register(ctx, grpcClient)
 		if err == nil {
 			break
 		}
@@ -351,36 +297,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		// Redial only when this connection refused us, so the next attempt is load-balanced again: a
 		// standby rejects registration, and retrying on the same connection would keep landing on it.
-		if shouldRedial(err) {
-			if rerr := grpcClient.Reconnect(); rerr != nil {
-				slog.Warn("redialling the controller failed", "error", rerr)
-			}
-		}
-		backoff = min(backoff*2, maxBackoff)
+		grpcClient.redialIfRefused(err)
+		backoff = nextRegisterWait(err, backoff*2, maxBackoff)
 	}
-
-	// Adopt the controller-resolved zone when no explicit zone was configured.
-	// This happens before the scheduler starts, so all emitted metrics carry
-	// the correct source_zone from the first check.
-	// Zone is the ONLY thing ever adopted from RegisterResponse.Agent: ports are never taken from the
-	// controller, because the config is the truth about where this process actually listens.
-	if z := resolveZone(a.configuredZone, resolvedZone); z != a.info.Zone {
-		slog.Info("adopted zone from controller", "zone", z)
-		a.info.Zone = z
-		a.scheduler.SetSourceZone(z)
-	}
-
-	a.scheduler.UpdatePeers(peers)
-	a.syncPeerMetrics()
 	a.scheduler.Pause()
 
 	peerWatchReady := make(chan struct{}, 1)
 	reregisterCh := make(chan struct{}, 1)
 
 	grpcClient.OnPeersUpdate(func(targets []checker.Target) {
-		a.forgetDepartedPeers(targets)
-		a.scheduler.UpdatePeers(targets)
-		a.syncPeerMetrics()
+		a.applyControllerPeers(targets)
 		a.scheduler.Resume()
 		select {
 		case peerWatchReady <- struct{}{}:
@@ -397,21 +323,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// On-demand diagnostic task executor; executions run in goroutines tied to the root ctx (via
 	// OnTask below).
-	taskExecutor := NewTaskExecutor(
-		a.checkers,
-		a.mtrChecker,
-		checker.Target{
-			AgentID:  a.info.ID,
-			NodeName: a.info.NodeName,
-			PodIP:    a.info.PodIP,
-			Zone:     a.info.Zone,
-			Port:     a.cfg.HTTPPort,
-		},
-		a.ownPorts(),
-		grpcClient,
-		maxConcurrentTasks,
-		a.external,
-	)
+	taskExecutor := a.newTaskExecutor(grpcClient)
 	grpcClient.OnTask(func(taskCtx context.Context, task *pb.TaskRequest) {
 		taskExecutor.Handle(taskCtx, task)
 	})
@@ -421,50 +333,49 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Deliberately NO scheduler.Pause() here: probing keeps running on the last known
 	// peer list, because pausing blinded the whole fleet for the duration of every
 	// controller restart, upgrade, or failover — exactly when measurements matter most.
-	reregister := func() {
+	var reregMu sync.Mutex
+	// reregister registers again until it succeeds or ctx ends, and reports which. wait is the pause
+	// before the first attempt; every failure doubles it, jittered, within reregisterMin/MaxWait.
+	reregister := func(wait time.Duration) bool {
+		// The peer watch, the heartbeat loop and a reload all land here; one retry loop at a time.
+		reregMu.Lock()
+		defer reregMu.Unlock()
+		for {
+			if wait > 0 {
+				select {
+				case <-ctx.Done():
+					return false
+				case <-time.After(wait + randomDelay(wait/4)):
+				}
+			}
+			regErr := a.register(ctx, grpcClient)
+			if regErr == nil {
+				return true
+			}
+			wait = nextRegisterWait(regErr, max(wait*2, reregisterMinWait), reregisterMaxWait)
+			// A rejection here is a config error, but unlike the first registration we keep
+			// retrying: probes continue on the last known peer list, and a mid-life
+			// InvalidArgument may just be a controller upgrade tightening validation.
+			if isConfigRejection(regErr) {
+				slog.Error("controller rejected the re-registration payload, check agent configuration and controller/agent version skew", "error", regErr, "backoff", wait)
+			} else {
+				slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait)
+			}
+			// Same reason as the first registration: only a fresh connection can reach the leader
+			// after a failover moved it to another pod.
+			grpcClient.redialIfRefused(regErr)
+		}
+	}
+	reconnect := func() {
 		// One increment per ENTRY into re-registration — a lost stream or a
 		// heartbeat rejection — not per retry inside it: the counter answers
 		// "how often does this agent lose its controller", and a long outage is
 		// one loss however many backoff attempts it takes.
 		a.metrics.AgentControllerReconnects.WithLabelValues().Inc()
-		wait := 2 * time.Second
-		maxWait := 30 * time.Second
-		for {
-			jitter := time.Duration(rand.Int63n(int64(wait / 4))) //nolint:gosec // G404: non-cryptographic randomness is intentional for backoff jitter
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait + jitter):
-			}
-			newPeers, newZone, regErr := grpcClient.Register(ctx, a.registrationInfo(), a.ownPorts())
-			if regErr == nil {
-				if z := resolveZone(a.configuredZone, newZone); z != a.info.Zone {
-					slog.Info("adopted zone from controller on re-registration", "zone", z)
-					a.info.Zone = z
-					a.scheduler.SetSourceZone(z)
-				}
-				a.forgetDepartedPeers(newPeers)
-				a.scheduler.UpdatePeers(newPeers)
-				a.syncPeerMetrics()
-				slog.Info("re-registered with controller after reconnect")
-				return
-			}
-			// A rejection here is a config error, but unlike the first registration we keep
-			// retrying: probes continue on the last known peer list, and a mid-life
-			// InvalidArgument may just be a controller upgrade tightening validation.
-			if isConfigRejection(regErr) {
-				slog.Error("controller rejected the re-registration payload, check agent configuration and controller/agent version skew", "error", regErr, "backoff", wait+jitter)
-			} else {
-				slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait+jitter)
-			}
-			// Same reason as the first registration: only a fresh connection can reach the leader
-			// after a failover moved it to another pod.
-			if shouldRedial(regErr) {
-				if rerr := grpcClient.Reconnect(); rerr != nil {
-					slog.Warn("redialling the controller failed", "error", rerr)
-				}
-			}
-			wait = min(wait*2, maxWait)
+		gen := a.beginRejoin()
+		if reregister(reregisterMinWait) {
+			a.endRejoinAfter(gen, rejoinPeerGrace)
+			slog.Info("re-registered with controller after reconnect")
 		}
 	}
 
@@ -475,59 +386,69 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			}
 			slog.Warn("peer watch disconnected, re-registering", "error", err)
-			reregister()
+			reconnect()
 		}
 	}()
 
-	// WatchTasks runs its own reconnect loop mirroring WatchPeers; peer re-registration is owned by
-	// the WatchPeers loop above.
+	// WatchTasks only re-subscribes; peer re-registration is owned by the WatchPeers loop above.
+	go resubscribeLoop(ctx, "task", grpcClient.WatchTasks)
+
+	// WatchExternalChecks re-subscribes like WatchTasks; it runs ONLY while checkers.external.enabled,
+	// which a reload can switch either way.
+	grpcClient.OnExternalAssignment(a.applyExternalAssignment)
+	var stopExternalWatch context.CancelFunc
+	watchExternal := func(on bool) {
+		if on == (stopExternalWatch != nil) {
+			return
+		}
+		if !on {
+			stopExternalWatch()
+			stopExternalWatch = nil
+			return
+		}
+		watchCtx, stop := context.WithCancel(ctx)
+		stopExternalWatch = stop
+		go resubscribeLoop(watchCtx, "external check", grpcClient.WatchExternalChecks)
+	}
+	a.reloadMu.Lock()
+	a.externalWatch = watchExternal
+	watchExternal(a.currentExternalChecker() != nil)
+	a.reloadMu.Unlock()
+
+	// A reload that changed the enabled planes registers again at once, so the controller, the Console
+	// and the CLI gate on the capabilities this agent actually has now.
 	go func() {
-		backoff := 1 * time.Second
-		maxBackoff := 15 * time.Second
 		for {
-			err := grpcClient.WatchTasks(ctx)
-			if ctx.Err() != nil {
-				return
-			}
-			slog.Warn("task watch disconnected, re-subscribing", "error", err, "backoff", backoff)
 			select {
+			case <-a.readvertise:
+				if reregister(0) {
+					slog.Info("re-advertised capabilities to the controller", "capabilities", a.registrationInfo().Capabilities)
+				}
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
 			}
-			backoff = min(backoff*2, maxBackoff)
 		}
 	}()
-
-	// WatchExternalChecks runs its own reconnect loop mirroring WatchTasks; it is started ONLY when
-	// checkers.external.enabled.
-	if a.externalChecker != nil {
-		grpcClient.OnExternalAssignment(a.applyExternalAssignment)
-		go func() {
-			backoff := 1 * time.Second
-			maxBackoff := 15 * time.Second
-			for {
-				err := grpcClient.WatchExternalChecks(ctx)
-				if ctx.Err() != nil {
-					return
-				}
-				slog.Warn("external check watch disconnected, re-subscribing", "error", err, "backoff", backoff)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				backoff = min(backoff*2, maxBackoff)
-			}
-		}()
-	}
 
 	go func() {
 		for {
 			select {
 			case <-reregisterCh:
 				slog.Info("heartbeat triggered re-registration")
-				reregister()
+				reconnect()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.sweepDepartedPeers()
 			case <-ctx.Done():
 				return
 			}
@@ -567,7 +488,17 @@ func (a *Agent) Run(ctx context.Context) error {
 // applyExternalAssignment turns a controller assignment into validated agent specs and swaps them
 // into the external checker; the swap replaces the whole target list under the CHECKER's own mutex
 // and NEVER restarts the scheduler.
-func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) {
+//
+// Caller holds reloadMu. retireFrom is the checker whose applied targets the departures are counted
+// against: nil means the one in force, a reload passes the checker it just replaced.
+func (a *Agent) applyExternalAssignmentLocked(assignment *pb.ExternalCheckAssignment, retireFrom *checker.ExternalChecker) {
+	p := a.probes()
+	if p.externalChecker == nil {
+		return
+	}
+	if retireFrom == nil {
+		retireFrom = p.externalChecker
+	}
 	specs := assignment.GetSpecs()
 	parsed := make([]checker.ExternalSpec, 0, len(specs))
 	dropped := 0
@@ -610,7 +541,7 @@ func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) 
 	   long it was, so the documented per-agent ceiling bounded nothing at all. Truncation is loud —
 	   an operator who set a ceiling needs to know it bit, and which end was dropped. */
 	overflow := 0
-	if limit := a.external.MaxTargets; limit > 0 && len(parsed) > limit {
+	if limit := p.external.MaxTargets; limit > 0 && len(parsed) > limit {
 		overflow = len(parsed) - limit
 		parsed = parsed[:limit]
 	}
@@ -620,12 +551,13 @@ func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) 
 	   from a peer update, so a target the controller had stopped assigning went on reporting its last
 	   packet-loss reading for as long as the peer list held still — an alert firing on a check that
 	   no longer runs. Truncated targets count as departed for the same reason: they are not probed. */
-	a.retireDepartedExternalTargets(parsed)
-
-	a.externalChecker.SetSpecs(parsed)
+	a.scheduler.whileNoDelivery(func() {
+		retireDepartedExternalTargets(a.metrics, retireFrom, parsed)
+		p.externalChecker.SetSpecs(parsed)
+	})
 	if overflow > 0 {
 		slog.Warn("external check assignment exceeds checkers.external.maxTargets; the tail is not probed",
-			"applied", len(parsed), "dropped", overflow, "maxTargets", a.external.MaxTargets)
+			"applied", len(parsed), "dropped", overflow, "maxTargets", p.external.MaxTargets)
 	}
 	slog.Info("external check assignment applied", "targets", len(parsed), "dropped", dropped)
 }
@@ -639,11 +571,11 @@ absent from the whole incoming list: the same target may be assigned under two c
 probe and a URL probe share the `target` label and differ in `target_kind`), and one of them ending
 must not blank the other.
 */
-func (a *Agent) retireDepartedExternalTargets(next []checker.ExternalSpec) {
-	if a.externalChecker == nil {
+func retireDepartedExternalTargets(m *metrics.PrometheusMetrics, c *checker.ExternalChecker, next []checker.ExternalSpec) {
+	if c == nil {
 		return
 	}
-	applied := a.externalChecker.Counts()
+	applied := c.Counts()
 	if len(applied) == 0 {
 		return
 	}
@@ -669,7 +601,7 @@ func (a *Agent) retireDepartedExternalTargets(next []checker.ExternalSpec) {
 		if _, ok := keepName[name]; !ok {
 			if _, dup := seenName[name]; !dup {
 				seenName[name] = struct{}{}
-				a.metrics.ForgetExternalTarget(name)
+				m.RetireExternalTarget(name)
 			}
 			continue
 		}
@@ -681,7 +613,7 @@ func (a *Agent) retireDepartedExternalTargets(next []checker.ExternalSpec) {
 			continue
 		}
 		seenCheck[key] = struct{}{}
-		a.metrics.ForgetExternalCheck(name, externalTargetKind(applied[i].Type), checkType)
+		m.ForgetExternalCheck(name, externalTargetKind(applied[i].Type), checkType)
 	}
 }
 
@@ -703,6 +635,23 @@ func (a *Agent) gracefulDeregister(d deregisterer) {
 }
 
 /*
+register registers this agent and takes on what the controller answered: the zone it resolved, unless
+one is configured, and the peer list. The zone is the only thing taken from RegisterResponse.Agent:
+ports never are, because the config is the truth about where this process listens.
+*/
+func (a *Agent) register(ctx context.Context, c *GRPCClient) error {
+	peers, zone, err := c.Register(ctx, a.registrationInfo(), a.ownPorts())
+	if err != nil {
+		return err
+	}
+	if z := resolveZone(a.configuredZone, zone); a.adoptZone(z) {
+		slog.Info("adopted zone from controller", "zone", z)
+	}
+	a.applyControllerPeers(peers)
+	return nil
+}
+
+/*
 registrationInfo is what this agent ASSERTS about itself, which is not the same as what it currently
 believes.
 
@@ -721,7 +670,9 @@ absent one is resolved from the node, and the node's label stays authoritative f
 overrides it.
 */
 func (a *Agent) registrationInfo() model.AgentInfo {
+	a.peerMu.Lock()
 	info := a.info
+	a.peerMu.Unlock()
 	info.Zone = a.configuredZone
 	return info
 }
@@ -735,10 +686,9 @@ func resolveZone(configuredZone, resolvedZone string) string {
 	return resolvedZone
 }
 
-// syncPeerMetrics re-initializes the per-pair result series after a peer list change.
 /*
 forgetDepartedPeers retires the gauges of peers that are in the CURRENT list and not in the next
-one, and touches nothing else.
+one, and the series a peer's zone change leaves under its old zone; it touches nothing else.
 
 The peer list is replaced wholesale on every update, so the departures are the difference between
 the two. Anything still present keeps its readings: a gauge is only repopulated by the next probe of
@@ -746,26 +696,261 @@ that pair, and blanking a live peer's loss ratio for a check interval is a gap i
 evaluate, appearing once per pod event — a rolling DaemonSet restart is one per node.
 */
 func (a *Agent) forgetDepartedPeers(next []checker.Target) {
-	current := a.scheduler.Peers()
-	if len(current) == 0 {
-		return
-	}
-	keep := make(map[string]struct{}, len(next))
+	keep := make(map[string]string, len(next))
 	for i := range next {
-		keep[next[i].NodeName] = struct{}{}
+		name := next[i].NodeName
+		keep[name] = next[i].Zone
+		if d, ok := a.departed[name]; ok && d.zone != next[i].Zone {
+			a.metrics.RetirePeerZone(name, d.zone)
+		}
+		delete(a.departed, name)
 	}
+	pmtu, _ := a.probes().checkers[model.CheckPMTU].(interface{ ForgetPeer(string) })
+	current := a.scheduler.Peers()
 	for i := range current {
-		if _, ok := keep[current[i].NodeName]; !ok {
-			a.metrics.ForgetPeer(current[i].NodeName)
+		name := current[i].NodeName
+		zone, ok := keep[name]
+		switch {
+		case !ok:
+			a.metrics.ForgetPeer(name)
+			if pmtu != nil {
+				pmtu.ForgetPeer(name)
+			}
+			if a.departed == nil {
+				a.departed = make(map[string]departedPeer)
+			}
+			if _, already := a.departed[name]; !already {
+				a.departed[name] = departedPeer{at: a.clock(), zone: current[i].Zone}
+			}
+		case zone != current[i].Zone:
+			a.metrics.RetirePeerZone(name, current[i].Zone)
 		}
 	}
 }
 
+// applyPeers installs a new peer list: departed peers' gauges go, the list is swapped, the per-pair
+// series of the new list are pre-created, and the echo server learns the peers' echo addresses.
+func (a *Agent) applyPeers(next []checker.Target) {
+	a.peerMu.Lock()
+	defer a.peerMu.Unlock()
+	a.scheduler.ReplacePeers(next, func() { a.forgetDepartedPeers(next) })
+	a.sweepDepartedPeersLocked()
+	a.syncPeerMetrics()
+	if a.probeServer != nil {
+		echoes := make([]netip.AddrPort, 0, len(next))
+		own := a.ownPorts()
+		for i := range next {
+			if ap, ok := echoEndpoint(next[i].PodIP, cmp.Or(next[i].UDPPort, own.UDP)); ok {
+				echoes = append(echoes, ap)
+			}
+		}
+		a.probeServer.SetPeerEchoAddrs(echoes)
+	}
+}
+
+// adoptZone makes z this agent's effective zone and reports whether it changed; the series written
+// under the old zone go, since nothing writes them again.
+func (a *Agent) adoptZone(z string) bool {
+	a.peerMu.Lock()
+	defer a.peerMu.Unlock()
+	if z == a.info.Zone {
+		return false
+	}
+	old := a.info.Zone
+	a.scheduler.whileNoDelivery(func() {
+		if a.metrics != nil {
+			a.metrics.RetireSourceZone(a.info.NodeName, old)
+		}
+		a.info.Zone = z
+		a.scheduler.SetSourceZone(z)
+	})
+	return true
+}
+
+// departedPeerGrace delays deleting a departed peer's counters (its gauges go at once). A controller
+// failover re-registers the fleet one agent at a time, and live peers must not get a counter reset.
+const departedPeerGrace = 10 * time.Minute
+
+// departedPeer is when a peer left the plan and the zone it left under: a peer back under another
+// zone inside the grace period leaves that zone's counters to retire.
+type departedPeer struct {
+	at   time.Time
+	zone string
+}
+
+func (a *Agent) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+// sweepDepartedPeers retires the counters of peers out of the plan for longer than departedPeerGrace.
+func (a *Agent) sweepDepartedPeers() {
+	a.peerMu.Lock()
+	defer a.peerMu.Unlock()
+	a.sweepDepartedPeersLocked()
+}
+
+func (a *Agent) sweepDepartedPeersLocked() {
+	now := a.clock()
+	for name, d := range a.departed {
+		if now.Sub(d.at) >= departedPeerGrace {
+			a.metrics.RetirePeer(name)
+			delete(a.departed, name)
+		}
+	}
+}
+
+// reregisterMinWait and reregisterMaxWait bound the wait between registration attempts once the
+// agent runs; after a lost controller the first attempt also waits reregisterMinWait.
+const (
+	reregisterMinWait = 2 * time.Second
+	reregisterMaxWait = 30 * time.Second
+	// standbyRetryWait replaces the backoff while a standby refuses: during a failover the redial
+	// has an even chance of landing on it again, and a growing backoff left pairs unprobed ~100 s.
+	standbyRetryWait = time.Second
+)
+
+// nextRegisterWait is the wait before the next registration attempt after err: standbyRetryWait for
+// a standby's refusal, otherwise grown, capped at ceiling.
+func nextRegisterWait(err error, grown, ceiling time.Duration) time.Duration {
+	if isStandbyRefusal(err) {
+		return standbyRetryWait
+	}
+	return min(grown, ceiling)
+}
+
+/*
+rejoinPeerGrace is how long after re-registering the agent keeps probing the peers it already had.
+The new leader starts with an empty registry and hands out lists of whoever has re-registered so
+far; applied wholesale, they stop every pair towards the rest of the fleet until those agents are
+back. Inside the grace, lists only add peers; at its end the newest list applies as it is.
+*/
+const rejoinPeerGrace = 30 * time.Second
+
+// beginRejoin enters the rejoin grace, and returns its generation for endRejoinAfter.
+func (a *Agent) beginRejoin() uint64 {
+	a.rejoinMu.Lock()
+	defer a.rejoinMu.Unlock()
+	a.rejoinGen++
+	a.rejoining = true
+	return a.rejoinGen
+}
+
+// endRejoinAfter ends rejoin generation gen after d, unless a later loss started another.
+func (a *Agent) endRejoinAfter(gen uint64, d time.Duration) {
+	time.AfterFunc(d, func() {
+		a.rejoinMu.Lock()
+		defer a.rejoinMu.Unlock()
+		if gen != a.rejoinGen || !a.rejoining {
+			return
+		}
+		a.rejoining = false
+		if a.controllerPeers != nil {
+			a.applyPeers(a.controllerPeers)
+		}
+	})
+}
+
+// applyControllerPeers installs a peer list from the controller, merged into the current one while
+// rejoining.
+func (a *Agent) applyControllerPeers(next []checker.Target) {
+	a.rejoinMu.Lock()
+	defer a.rejoinMu.Unlock()
+	a.controllerPeers = next
+	if a.rejoining {
+		next = mergePeers(next, a.scheduler.Peers())
+	}
+	a.applyPeers(next)
+}
+
+// mergePeers is next plus the peers of current it does not name; next's entry wins for a node in
+// both, since it carries what the peer reported this time.
+func mergePeers(next, current []checker.Target) []checker.Target {
+	named := make(map[string]struct{}, len(next))
+	for i := range next {
+		named[next[i].NodeName] = struct{}{}
+	}
+	out := slices.Clone(next)
+	for i := range current {
+		if _, ok := named[current[i].NodeName]; !ok {
+			out = append(out, current[i])
+		}
+	}
+	return out
+}
+
+// resubscribeMinBackoff and resubscribeMaxBackoff bound the wait before a stream subscribes again.
+const (
+	resubscribeMinBackoff = time.Second
+	resubscribeMaxBackoff = 15 * time.Second
+)
+
+// resubscribeLoop keeps a controller stream subscribed until ctx ends; stream names it in the log.
+func resubscribeLoop(ctx context.Context, stream string, watch func(context.Context) error) {
+	backoff := resubscribeMinBackoff
+	for {
+		subscribed := time.Now()
+		err := watch(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		backoff = resubscribeWait(backoff, time.Since(subscribed))
+		if isStandbyRefusal(err) {
+			backoff = standbyRetryWait
+		}
+		slog.Warn(stream+" watch disconnected, re-subscribing", "error", err, "backoff", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, resubscribeMaxBackoff)
+	}
+}
+
+// resubscribeWait returns the wait before re-subscribing a stream that lived for lived. A stream that
+// outlasted the backoff ceiling was a healthy session, so the backoff starts over.
+func resubscribeWait(backoff, lived time.Duration) time.Duration {
+	if lived >= resubscribeMaxBackoff {
+		return resubscribeMinBackoff
+	}
+	return backoff
+}
+
+// assignedExternalOnly drops details of checks no longer assigned. A sweep in flight during an
+// assignment swap would otherwise write back the series the swap just retired. current is the
+// checker in force; nil (external checks switched off) keeps nothing.
+func assignedExternalOnly(current func() *checker.ExternalChecker, next ResultHandler) ResultHandler {
+	return func(r model.CheckResult) {
+		if details, ok := r.Details.([]ExternalDetails); ok && r.Type == model.CheckExternal {
+			assigned := make(map[[2]string]struct{})
+			if c := current(); c != nil {
+				for _, cnt := range c.Counts() {
+					assigned[[2]string{cnt.Name, string(cnt.Type)}] = struct{}{}
+				}
+			}
+			kept := make([]ExternalDetails, 0, len(details))
+			for i := range details {
+				if _, ok := assigned[[2]string{details[i].Name, string(details[i].CheckType)}]; ok {
+					kept = append(kept, details[i])
+				}
+			}
+			r.Details = kept
+		}
+		next(r)
+	}
+}
+
+// syncPeerMetrics pre-creates the per-pair and zone series of the current peer list and publishes it
+// as the probe plan. Caller holds peerMu.
 func (a *Agent) syncPeerMetrics() {
 	source := checker.Target{NodeName: a.info.NodeName, Zone: a.info.Zone}
 	peers := a.scheduler.Peers()
-	preinitPeerResults(a.metrics, source, peers, a.checkers)
-	preinitZoneResults(a.metrics, source, peers, a.checkers)
+	checkers := a.probes().checkers
+	preinitPeerResults(a.metrics, source, peers, checkers)
+	preinitZoneResults(a.metrics, source, peers, checkers)
 	markProbeIntended(a.metrics, source, peers)
 }
 
@@ -923,7 +1108,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 				break
 			}
 			m.PMTUBytes.WithLabelValues(labels...).Set(float64(d.PathMTU))
-			m.AgentPMTUProbeBytes.WithLabelValues(result.Source).Set(float64(d.ProbeMTU))
+			m.SetPMTUProbe(labels, float64(d.ProbeMTU))
 			m.PMTUResults.WithLabelValues(resultLabels...).Inc()
 			m.ZonePMTUResults.WithLabelValues(zoneResultLabels...).Inc()
 
@@ -944,7 +1129,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 		case model.CheckHTTP:
 			if details, ok := result.Details.([]HTTPDetails); ok {
 				for _, d := range details {
-					urlLabels := []string{d.URL, source.NodeName, result.SourceZone}
+					urlLabels := []string{checker.RedactURL(d.URL), source.NodeName, result.SourceZone}
 					/* A phase is observed only if it RAN. httptrace fires no TLS callback for a
 					   plain-http target and no DNS callback for an IP literal, so those durations
 					   stay zero — and one 0 s sample per check, forever, is a handshake that never
@@ -976,7 +1161,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 					if d.StatusCode == 0 || d.BodyMismatch || d.StatusMismatch {
 						r = "fail"
 					}
-					m.HTTPResults.WithLabelValues(d.URL, d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, result.SourceZone, r).Inc()
+					m.HTTPResults.WithLabelValues(urlLabels[0], d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, result.SourceZone, r).Inc()
 				}
 			}
 

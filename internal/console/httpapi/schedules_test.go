@@ -176,8 +176,8 @@ func TestSchedulesWithoutStoreReturns503(t *testing.T) {
 		if w.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s without a ScheduleService = %d, want 503: %s", c.method, c.path, w.Code, w.Body)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }

@@ -1,8 +1,7 @@
 ---
 # Gateway overlay for the external-agent leg of .github/workflows/e2e.yaml; layered on top of
-# values.yaml and console-values.yaml (this file last, so it wins). It turns the controller's
-# external gateway on with the smallest shape kind can serve, and points the console at the
-# fixture Prometheus so the matrix has something to read.
+# values.yaml, console-values.yaml and prometheus-values.yaml (this file last, so it wins). It turns
+# the controller's external gateway on with the smallest shape kind can serve.
 controller:
   externalGateway:
     enabled: true
@@ -31,9 +30,3 @@ scrapeConfig:
     labels: {}
     refreshInterval: 10s
     interval: 5s
-
-# The fixture Prometheus from e2e/testdata/prometheus.yaml. Absent from console-values.yaml on
-# purpose: the main run pins the console's no-Prometheus branches, this leg pins the matrix.
-console:
-  prometheus:
-    url: http://kconmon-e2e-prometheus:9090

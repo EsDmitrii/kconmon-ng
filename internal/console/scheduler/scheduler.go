@@ -275,8 +275,12 @@ func (s *Scheduler) fireOne(ctx context.Context, sched *store.Schedule, now time
 
 	   It retries instead, on the same cadence a skip uses: the occurrence is still owed, and the
 	   reason it failed is usually transient. last_fired_at stays where it is, because nothing fired.
-	   An INTERVAL schedule already had its next occurrence and is unaffected either way. */
-	if startErr != nil && sched.Kind == kindOnce {
+	   An INTERVAL schedule already had its next occurrence and is unaffected either way.
+
+	   A refusal no retry can clear (cannotRun) is the exception: it is recorded below the way an
+	   interval's failed start is, reason included, and the occurrence retires instead of coming due
+	   again every minute forever. */
+	if startErr != nil && sched.Kind == kindOnce && !cannotRun(startErr) {
 		retryAt := now.Add(onceSkipRetry)
 		if markErr := s.store.MarkScheduleSkipped(ctx, sched.ID, &retryAt); markErr != nil {
 			return errors.Join(startErr, fmt.Errorf("scheduler: mark schedule %s for retry: %w", sched.ID, markErr))
@@ -292,6 +296,19 @@ func (s *Scheduler) fireOne(ctx context.Context, sched *store.Schedule, now time
 		return errors.Join(startErr, fmt.Errorf("scheduler: mark schedule %s fired: %w", sched.ID, markErr))
 	}
 	return startErr
+}
+
+// unrunnableError is specFor's refusal of a definition that describes a run the agents refuse.
+type unrunnableError struct{ msg string }
+
+func (e *unrunnableError) Error() string { return e.msg }
+
+// cannotRun reports whether a start failure is a property of the definition as stored, which only
+// an edit clears: a check type the agents refuse toward its destination, or a plane the runner
+// refuses.
+func cannotRun(err error) bool {
+	_, unrunnable := errors.AsType[*unrunnableError](err)
+	return unrunnable || errors.Is(err, checks.ErrInvalidPlane)
 }
 
 // scheduleErrorText renders a startFor error for check_schedules.last_error; the "scheduler:
@@ -419,6 +436,11 @@ func nextFireAt(sched *store.Schedule, now time.Time) *time.Time {
 
 // specFor projects a stored definition onto the checks.Spec that checks.Runner.Start accepts.
 func (s *Scheduler) specFor(ctx context.Context, def *store.Definition, topo *topologyCache) (checks.Spec, error) {
+	// A row the API would now refuse: written before it did, or its definition edited since.
+	if err := checks.RefuseExternalRun(def.CheckType, def.DestinationKind); err != nil {
+		return checks.Spec{}, &unrunnableError{err.Error() + ", so no run was started"}
+	}
+
 	sources, err := s.sourcesFor(ctx, def.SourceSelection, topo)
 	if err != nil {
 		return checks.Spec{}, err

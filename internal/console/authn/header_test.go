@@ -172,3 +172,31 @@ func TestHeaderAuthenticateModeIsHeader(t *testing.T) {
 		t.Errorf("Mode() = %q, want %q", got, "header")
 	}
 }
+
+// Listing the ingress pod range so the per-address budgets see real clients must not also let every
+// pod in that range assert an identity: header mode reads auth.header.trustedProxyCIDRs alone, never
+// clientAddress.trustedProxyCIDRs.
+func TestHeaderIdentityIgnoresTheClientAddressProxyList(t *testing.T) {
+	t.Parallel()
+	cfg := config.Config{
+		ClientAddress: config.ClientAddressConfig{TrustedProxyCIDRs: []string{"10.244.0.0/16"}},
+		Auth: config.AuthConfig{Mode: "header", Header: config.HeaderConfig{
+			UserHeader: "X-Remote-User", GroupsHeader: "X-Remote-Groups", GroupsDelimiter: ",",
+			TrustedProxyCIDRs: []string{"10.244.7.10/32"},
+		}},
+	}
+	a := authn.NewHeader(cfg.Auth.Header)
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.244.37.12:40000" // a workload pod, inside the client-address list only
+	r.Header.Set("X-Remote-User", "root")
+	r.Header.Set("X-Remote-Groups", "platform-oncall")
+	if subject, err := a.Authenticate(r); !errors.Is(err, authn.ErrNoCredentials) {
+		t.Fatalf("a pod the client-address list trusts authenticated as %+v (err %v), want ErrNoCredentials", subject, err)
+	}
+
+	r.RemoteAddr = "10.244.7.10:40000" // the authenticating proxy itself
+	if subject, err := a.Authenticate(r); err != nil || subject.ID != "root" {
+		t.Fatalf("the header proxy's request = %+v, %v; want root", subject, err)
+	}
+}

@@ -229,8 +229,8 @@ func TestMTRRoutesWithoutStoreReturn503(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 			t.Errorf("%s %s Content-Type = %q, want application/problem+json", c.method, c.path, ct)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }

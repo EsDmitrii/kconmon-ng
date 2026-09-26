@@ -63,6 +63,8 @@ type client struct {
 
 	// authorize is this connection's per-topic gate.
 	authorize TopicAuthorizer
+	// limitKeys are the ConnLimit keys this client holds a slot in; guarded by Hub.mu.
+	limitKeys []string
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -91,6 +93,9 @@ type ephemeralTopic struct {
 	cancel   context.CancelFunc
 	closed   bool      // true once CloseTopic marked this topic terminal
 	closedAt time.Time // when CloseTopic was called; zero while open, used by the reaper and by eviction's "oldest closed first" order
+	// announced is true once the TypeClosed frame went out. The liveness sweep closes a topic
+	// without it, so the owner's CloseTopicWithFinal still has its final frames to send.
+	announced bool
 }
 
 // Hub fans messages out to the WebSocket clients of one console replica.
@@ -101,18 +106,16 @@ type Hub struct {
 	/* epoch identifies THIS process's numbering. Sequence numbers are per-hub and start at 1, so a
 	   cursor only means something against the hub that issued it — see Envelope.Epoch. */
 	epoch string
-	/* openEphemeral is asked to open a run:{id} topic this replica does not know about. A run's
-	   topic used to be opened only on the replica that served the POST, while the browser's socket
-	   lands on whichever replica the Service picks: with the chart's default of two console
-	   replicas, about half of all run permalinks subscribed to a topic that did not exist there and
-	   were answered "unknown topic". The frames are on the bus either way; what was missing was
-	   somebody on this replica listening. nil leaves the old behaviour. */
+	/* openEphemeral is asked to open a run:{id} topic this replica does not know about: the browser's
+	   socket lands on whichever replica the Service picks, not necessarily the one that started the
+	   run, and the run's frames are on the bus either way. nil answers such a subscribe "unknown
+	   topic". */
 	openEphemeral func(ctx context.Context, topic string) bool
 
 	/* liveEphemeral answers "is this ephemeral topic's run still going?" for the reaper. Only the
 	   replica that OWNS a run closes its topic, and it does so hub-locally, so a topic opened by
 	   openEphemeral on any other replica has no other way to reach a closed state. See
-	   SetEphemeralLiveness. nil means the reaper behaves exactly as it did. */
+	   SetEphemeralLiveness. nil disables the liveness sweep. */
 	liveEphemeral func(topic string) bool
 
 	// sweeping keeps one liveness sweep in flight at a time; it is not guarded by h.mu because the
@@ -122,21 +125,27 @@ type Hub struct {
 	mu        sync.Mutex
 	closed    bool // set once Run has shut the hub down; one-way — a Hub is per-process and cannot be restarted after Run returns
 	clients   map[*client]struct{}
+	limitUse  map[string]int // open connections per ConnLimit key
 	seq       map[string]uint64
 	rings     map[string][]Envelope
-	ephemeral map[string]*ephemeralTopic // run:{id} topics opened via OpenTopic (Task 20)
+	ephemeral map[string]*ephemeralTopic // run:{id} topics opened via OpenTopic
 }
 
 // NewHub returns a hub that will read the live topic from bus once Run is
 // called. Broadcast and ServeWS work without Run — snapshot topics do not
 // depend on the bus at all.
 func NewHub(bus cache.Bus, m *metrics.Metrics) *Hub {
+	// The refusal series exist from the start, so a rate() over them reads 0 rather than nothing.
+	for _, name := range []string{LimitTotal, LimitAddress, LimitSubject} {
+		m.WSRefused.WithLabelValues(name)
+	}
 	return &Hub{
 		bus:       bus,
 		metrics:   m,
 		epoch:     uuid.NewString(),
 		dedupe:    newIDSet(dedupeCacheSize),
 		clients:   make(map[*client]struct{}),
+		limitUse:  make(map[string]int),
 		seq:       make(map[string]uint64),
 		rings:     make(map[string][]Envelope),
 		ephemeral: make(map[string]*ephemeralTopic),
@@ -228,9 +237,11 @@ func (h *Hub) ClientCount() int {
 	return len(h.clients)
 }
 
-// register adds a client whose subscribes are gated by authorize (nil = every subscribable topic,
-// the pre-M7 behaviour); on a hub that Run has already shut down, the client is refused.
-func (h *Hub) register(authorize TopicAuthorizer) *client {
+// registerLimited adds a client whose subscribes are gated by authorize (nil = every subscribable
+// topic) after taking a slot in every limit; when one is full nothing is registered and that limit
+// comes back instead of a client. On a hub that Run has already shut down, the client comes back
+// closed.
+func (h *Hub) registerLimited(authorize TopicAuthorizer, limits []ConnLimit) (*client, *ConnLimit) {
 	c := &client{
 		send:      make(chan Envelope, sendBuffer),
 		topics:    make(map[string]bool),
@@ -241,12 +252,35 @@ func (h *Hub) register(authorize TopicAuthorizer) *client {
 	if h.closed {
 		h.mu.Unlock()
 		c.close()
-		return c
+		return c, nil
+	}
+	for i := range limits {
+		if limits[i].Max > 0 && h.limitUse[limits[i].Key] >= limits[i].Max {
+			h.mu.Unlock()
+			return nil, &limits[i]
+		}
+	}
+	for _, l := range limits {
+		if l.Max > 0 {
+			h.limitUse[l.Key]++
+			c.limitKeys = append(c.limitKeys, l.Key)
+		}
 	}
 	h.clients[c] = struct{}{}
 	h.metrics.WSClients.WithLabelValues().Set(float64(len(h.clients)))
 	h.mu.Unlock()
-	return c
+	return c, nil
+}
+
+// releaseLimitsLocked gives back c's limit slots; the caller holds h.mu.
+func (h *Hub) releaseLimitsLocked(c *client) {
+	for _, key := range c.limitKeys {
+		h.limitUse[key]--
+		if h.limitUse[key] <= 0 {
+			delete(h.limitUse, key)
+		}
+	}
+	c.limitKeys = nil
 }
 
 // unregister removes a client and signals its pumps. Idempotent. The gauge is
@@ -256,6 +290,7 @@ func (h *Hub) unregister(c *client) {
 	h.mu.Lock()
 	if _, present := h.clients[c]; present {
 		delete(h.clients, c)
+		h.releaseLimitsLocked(c)
 		h.metrics.WSClients.WithLabelValues().Set(float64(len(h.clients)))
 	}
 	h.mu.Unlock()
@@ -273,6 +308,7 @@ func (h *Hub) closeAllClients() {
 		doomed = append(doomed, c)
 	}
 	h.clients = make(map[*client]struct{})
+	h.limitUse = make(map[string]int)
 	h.metrics.WSClients.WithLabelValues().Set(0)
 
 	for topic := range h.ephemeral {
@@ -293,13 +329,19 @@ func (h *Hub) closeAllClients() {
 func (h *Hub) handleClientMessage(c *client, msg ClientMessage) {
 	switch msg.Action {
 	case ActionSubscribe:
+		// A run topic checks its permission before existence, so a subject without runs:read can neither
+		// tell a live run id from an unknown one nor make the hub open a topic slot for it.
+		if IsRunTopic(msg.Topic) {
+			if detail, ok := c.allowedToSubscribe(msg.Topic); !ok {
+				h.sendError(c, msg.Topic, detail)
+				return
+			}
+		}
 		if !h.topicAllowed(msg.Topic) && !h.openOnDemand(msg.Topic) {
-			h.sendError(c, msg.Topic, "unknown topic; subscribable topics are "+
-				"live, topology, matrix:tcp:pod, matrix:udp:pod, matrix:icmp:pod")
+			h.sendError(c, msg.Topic, unknownTopicError)
 			return
 		}
-		// Existence first, then permission; the order costs nothing here: every subject that got this far
-		// already holds a permission that lets it enumerate run ids over REST (see the /ws upgrade gate).
+		// Static topics are checked for existence first: their names are public, so the order leaks nothing.
 		if detail, ok := c.allowedToSubscribe(msg.Topic); !ok {
 			h.sendError(c, msg.Topic, detail)
 			return
@@ -346,11 +388,8 @@ func (h *Hub) subscribe(c *client, topic string, lastSeq uint64, epoch string) [
  * openOnDemand tries to open a run:{id} topic this replica has not seen, reporting whether it may
  * now be subscribed.
  *
- * A run's topic was opened only where its POST landed, and the browser's socket is an independent
- * connection that lands wherever the Service sends it: with two console replicas, about half of all
- * run permalinks asked for a topic that did not exist on their replica and were told "unknown
- * topic", so the page showed no progress at all until it finished. The frames were on the bus the
- * whole time — this replica simply was not listening.
+ * The browser's socket lands wherever the Service sends it, not necessarily where the run's POST
+ * landed, and the run's frames are on the bus either way, so any replica can serve the topic.
  *
  * The opener is the RUNNER's: it decides whether the id names a real run before the hub opens
  * anything, so an unknown id is still an error rather than an open topic that never speaks.
@@ -417,12 +456,9 @@ func (h *Hub) unsubscribe(c *client, topic string) {
 regate re-applies this connection's authorizer to the topics it is ALREADY subscribed to, dropping
 the ones it may no longer have, and reports which went.
 
-The per-topic gate used to run once per subscribe and never again, so narrowing a role left an open
-socket streaming the very snapshots the REST routes had begun refusing -- revocation only took effect
-when the browser tab closed. Closing the whole connection instead was the first fix and it was too
-blunt: it costs every OTHER topic on that socket a reconnect and a resubscribe for a change that
-touched one of them. Dropping exactly the topics that are no longer permitted is the behaviour the
-REST side already has, one route at a time.
+Narrowing a role must stop an open socket streaming what the REST routes now refuse. Dropping
+exactly those topics, rather than closing the connection, spares every other topic on the socket a
+reconnect and a resubscribe, and matches the REST side, which refuses one route at a time.
 
 The authorizer is the connection's own closure and reads the current subject, so this needs no
 argument: the caller decides WHEN to re-ask, not what the answer is.
@@ -499,7 +535,7 @@ func (h *Hub) OpenTopic(ctx context.Context, topic string) bool {
 // CloseTopic marks topic terminal and broadcasts one TypeClosed control frame on it; that frame IS
 // the topic's terminal signal.
 func (h *Hub) CloseTopic(topic string) {
-	if !h.markClosed(topic) {
+	if !h.markAnnounced(topic) {
 		return
 	}
 	h.Broadcast(topic, TypeClosed, json.RawMessage(`{}`))
@@ -510,15 +546,31 @@ func (h *Hub) CloseTopic(topic string) {
 // topic (the checks.Runner's finished-run summary, currently the only caller) must use instead of
 // publishing that payload through the async path.
 func (h *Hub) CloseTopicWithFinal(topic, msgType string, final json.RawMessage) {
-	if !h.markClosed(topic) {
+	if !h.markAnnounced(topic) {
 		return
 	}
 	h.Broadcast(topic, msgType, final)
 	h.Broadcast(topic, TypeClosed, json.RawMessage(`{}`))
 }
 
-// markClosed marks topic terminal (closed=true, closedAt=now) under h.mu and reports whether it
-// just did so.
+// markAnnounced marks topic terminal and announced under h.mu and reports whether this call owes
+// the TypeClosed frame: false when the topic is unknown or its terminal frame already went out.
+// A topic the sweep closed silently is still owed one.
+func (h *Hub) markAnnounced(topic string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	et, ok := h.ephemeral[topic]
+	if !ok || et.announced {
+		return false
+	}
+	et.announced = true
+	et.closed = true
+	et.closedAt = time.Now()
+	return true
+}
+
+// markClosed marks topic terminal (closed=true, closedAt=now) under h.mu without announcing it,
+// and reports whether it just did so.
 func (h *Hub) markClosed(topic string) bool {
 	h.mu.Lock()
 	et, ok := h.ephemeral[topic]
@@ -734,6 +786,7 @@ func (h *Hub) dropSlowClient(c *client) {
 	_, present := h.clients[c]
 	if present {
 		delete(h.clients, c)
+		h.releaseLimitsLocked(c)
 		h.metrics.WSClients.WithLabelValues().Set(float64(len(h.clients)))
 		h.metrics.WSDroppedClients.WithLabelValues().Inc()
 	}

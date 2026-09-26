@@ -33,6 +33,10 @@ type TaskExecutor struct {
 	reporter taskReporter
 	sem      chan struct{}
 	external ExternalPolicy
+	zone     func() string // the effective zone, which re-registration can change; nil means source.Zone
+	// current returns the probe set in force, which a config reload replaces; nil means the fields
+	// above, fixed at construction.
+	current func() (map[model.CheckType]checker.Checker, *checker.MTRChecker, ExternalPolicy)
 }
 
 // ExternalPolicy is the agent's gate on destinations that are not registered peers; its zero value
@@ -98,6 +102,20 @@ func NewTaskExecutor(
 	}
 }
 
+func (e *TaskExecutor) probes() (map[model.CheckType]checker.Checker, *checker.MTRChecker, ExternalPolicy) {
+	if e.current != nil {
+		return e.current()
+	}
+	return e.checkers, e.mtr, e.external
+}
+
+func (e *TaskExecutor) sourceZone() string {
+	if e.zone != nil {
+		return e.zone()
+	}
+	return e.source.Zone
+}
+
 // Handle processes an incoming task; it acquires a concurrency slot and runs the execution in a
 // goroutine tied to ctx so it aborts on shutdown and never outlives the root context.
 func (e *TaskExecutor) Handle(ctx context.Context, req *pb.TaskRequest) {
@@ -121,6 +139,7 @@ func (e *TaskExecutor) Handle(ctx context.Context, req *pb.TaskRequest) {
 // blocks on a semaphore and does no reporting, so tests and Handle can both use.
 func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.TaskResult {
 	checkType := model.CheckType(req.GetCheckType())
+	checkers, mtr, external := e.probes()
 
 	target := e.targetFromRequest(req)
 
@@ -128,7 +147,7 @@ func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.
 	// invoked, so a refused destination never reaches a socket and never reveals
 	// which checkers this agent has enabled.
 	if ext := req.GetExternalTarget(); ext != nil {
-		approved, err := e.approveExternalTarget(ctx, checkType, req, ext)
+		approved, err := e.approveExternalTarget(ctx, checkType, req, ext, &external)
 		if err != nil {
 			return e.errorResult(req, err)
 		}
@@ -138,21 +157,21 @@ func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.
 	var result model.CheckResult
 	switch checkType {
 	case model.CheckMTR:
-		if e.mtr == nil {
+		if mtr == nil {
 			return e.errorResult(req, fmt.Errorf("mtr checker not configured"))
 		}
 		// On-demand MTR deliberately bypasses the scheduler's TryAcquire cooldown: an operator explicitly
 		// asked for this trace now.
-		result = e.mtr.Check(ctx, target)
+		result = mtr.Check(ctx, target)
 	case model.CheckDNS, model.CheckHTTP:
 		// NodeLocal checks ignore the target; run the agent's configured check.
-		c, ok := e.checkers[checkType]
+		c, ok := checkers[checkType]
 		if !ok {
 			return e.errorResult(req, fmt.Errorf("check type %q not enabled on this agent", checkType))
 		}
 		result = c.Check(ctx, checker.Target{})
 	case model.CheckTCP, model.CheckUDP, model.CheckICMP, model.CheckPMTU:
-		c, ok := e.checkers[checkType]
+		c, ok := checkers[checkType]
 		if !ok {
 			return e.errorResult(req, fmt.Errorf("check type %q not enabled on this agent", checkType))
 		}
@@ -168,7 +187,8 @@ func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.
 	// Stamp source/destination labels the same way the scheduler does, so the
 	// on-demand result is consistent with periodic results.
 	result.Source = e.source.NodeName
-	result.SourceZone = e.source.Zone
+	result.SourceZone = e.sourceZone()
+	redactHTTPResult(&result)
 	if checkType != model.CheckDNS && checkType != model.CheckHTTP {
 		result.Destination = target.NodeName
 		result.DestZone = target.Zone
@@ -211,6 +231,7 @@ func (e *TaskExecutor) approveExternalTarget(
 	checkType model.CheckType,
 	req *pb.TaskRequest,
 	ext *pb.ExternalTarget,
+	external *ExternalPolicy,
 ) (checker.Target, error) {
 	// Exactly one of target/external_target is ever populated (see the proto
 	// comment). Both set is malformed: refuse rather than guess which
@@ -219,7 +240,7 @@ func (e *TaskExecutor) approveExternalTarget(
 		return checker.Target{}, fmt.Errorf("malformed task: target and external_target are mutually exclusive")
 	}
 
-	if !e.external.Enabled {
+	if !external.Enabled {
 		return checker.Target{}, fmt.Errorf(
 			"external destinations are not enabled on this agent (set checkers.external.enabled)")
 	}
@@ -239,9 +260,9 @@ func (e *TaskExecutor) approveExternalTarget(
 	// Bound resolution+authorisation so a hung resolver cannot pin a task slot.
 	// The returned target is probed with the caller's ctx, not this one.
 	authCtx := ctx
-	if e.external.Timeout > 0 {
+	if external.Timeout > 0 {
 		var cancel context.CancelFunc
-		authCtx, cancel = context.WithTimeout(ctx, e.external.Timeout)
+		authCtx, cancel = context.WithTimeout(ctx, external.Timeout)
 		defer cancel()
 	}
 
@@ -271,7 +292,7 @@ func (e *TaskExecutor) approveExternalTarget(
 			ext.GetName())
 	}
 
-	addrs, err := e.external.Allowlist.ResolveAllowed(authCtx, e.external.Resolver, host)
+	addrs, err := external.Allowlist.ResolveAllowed(authCtx, external.Resolver, host)
 	if err != nil {
 		slog.Warn("external destination refused",
 			"taskId", req.GetTaskId(),
@@ -322,11 +343,14 @@ func (e *TaskExecutor) errorResult(req *pb.TaskRequest, err error) *pb.TaskResul
 	// bytes verbatim as the diagnostics response body, so an empty payload reaches the Console as
 	// "unexpected end of JSON input" and destroys the actual reason for the failure.
 	target := e.targetFromRequest(req)
+	if ext := req.GetExternalTarget(); ext != nil && req.GetTarget() == nil {
+		target = checker.Target{NodeName: ext.GetName()}
+	}
 	result := model.CheckResult{
 		Type:        model.CheckType(req.GetCheckType()),
 		Success:     false,
 		Source:      e.source.NodeName,
-		SourceZone:  e.source.Zone,
+		SourceZone:  e.sourceZone(),
 		Destination: target.NodeName,
 		DestZone:    target.Zone,
 		Error:       err.Error(),

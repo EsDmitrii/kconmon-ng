@@ -276,6 +276,11 @@ func TestMTRUnreachedDestinationIsNotSuccess(t *testing.T) {
 	// and answers nothing anywhere.
 	c := NewMTRChecker(3, 150*time.Millisecond, time.Minute)
 
+	// A VPN or lab route can answer TEST-NET-1; then this host cannot stage an unreached destination.
+	if ping := NewICMPChecker(300*time.Millisecond).Check(context.Background(), Target{PodIP: "192.0.2.1"}); ping.Success {
+		t.Skip("192.0.2.1 (TEST-NET-1) answers an echo request on this host; the unreached case cannot be staged here")
+	}
+
 	result := c.Check(context.Background(), Target{PodIP: "192.0.2.1", NodeName: "nowhere"})
 	if result.Error != "" && result.Details == nil {
 		t.Skipf("no usable ICMP socket in this environment: %s", result.Error)

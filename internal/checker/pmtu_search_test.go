@@ -2,6 +2,8 @@ package checker
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +107,30 @@ func (f *flakyAbove) Send(size int, timeout time.Duration) error {
 	return f.fakePMTUPath.Send(size, timeout)
 }
 
+// lateICMP loses the full size silently, then the router's frag-needed for it lands as the error of
+// the first bisection send, whatever that send's size: the number is the router's and must be kept.
+type lateICMP struct {
+	fakePMTUPath
+	delivered bool
+}
+
+func (f *lateICMP) Send(size int, timeout time.Duration) error {
+	if size < 1500 && size > pmtuBaseSize && !f.delivered {
+		f.delivered = true
+		f.sizes = append(f.sizes, size)
+		return &pmtuTooBigError{mtu: 1400}
+	}
+	return f.fakePMTUPath.Send(size, timeout)
+}
+
+func TestPMTUSearchKeepsALateRouterNumber(t *testing.T) {
+	p := &lateICMP{fakePMTUPath: fakePMTUPath{passUpTo: 1400}}
+	s := newTestSearch(context.Background(), p, 1500, time.Now().Add(time.Hour))
+	if d := s.run(); d.Verdict != model.PMTUVerdictReduced || d.PathMTU != 1400 {
+		t.Fatalf("run() = %+v, want reduced at the router's 1400", d)
+	}
+}
+
 // The size the bisection settled on must cross again before the pair is called a black hole.
 func TestPMTUSearchBlackholeNeedsTheFoundSizeToCrossAgain(t *testing.T) {
 	p := &flakyAbove{fakePMTUPath: fakePMTUPath{passUpTo: 1400}, loseOnRepeat: 1400, seen: map[int]int{}}
@@ -135,12 +161,94 @@ func TestPMTUSearchWorstCaseIsBounded(t *testing.T) {
 	}
 }
 
+// A search that ran out of budget before any size above the base crossed has no size to report:
+// "64 bytes cross" is no path MTU, and a lossy path would read as a black hole.
 func TestPMTUSearchStopsAtTheDeadline(t *testing.T) {
 	p := &fakePMTUPath{passUpTo: 1400}
 	s := newTestSearch(context.Background(), p, 1500, time.Now().Add(-time.Second))
 	d := s.run()
-	if !d.Truncated || d.Verdict != model.PMTUVerdictBlackhole || d.PathMTU != pmtuBaseSize {
-		t.Fatalf("run() = %+v, want a truncated black hole with the base size as the lower bound", d)
+	if !d.Truncated || d.Verdict != model.PMTUVerdictUnreachable || d.PathMTU != 0 {
+		t.Fatalf("run() = %+v, want a truncated search with no MTU verdict", d)
+	}
+	if !strings.Contains(s.reason, "time budget") {
+		t.Errorf("reason = %q, want the time budget named", s.reason)
+	}
+}
+
+// clockedPath charges the search's clock one timeout for every datagram that did not come back, as a
+// real socket does, and nothing for an echo.
+type clockedPath struct {
+	pmtuPath
+	clock *time.Time
+}
+
+func (p *clockedPath) Send(size int, timeout time.Duration) error {
+	err := p.pmtuPath.Send(size, timeout)
+	if errors.Is(err, errPMTULost) {
+		*p.clock = p.clock.Add(timeout)
+	}
+	return err
+}
+
+func newClockedSearch(path pmtuPath, probeMTU int, budget time.Duration) *pmtuSearch {
+	clock := time.Unix(0, 0)
+	return &pmtuSearch{
+		ctx: context.Background(), path: &clockedPath{pmtuPath: path, clock: &clock}, probeMTU: probeMTU,
+		timeout: 100 * time.Millisecond, deadline: clock.Add(budget), now: func() time.Time { return clock },
+	}
+}
+
+// A healthy path that drops the full size twice and one bisection step must not become a black hole
+// because the budget ran out: whatever the budget, the verdict is confirmed or there is none.
+func TestPMTUSearchTruncatedLossyPathIsNeverABlackhole(t *testing.T) {
+	for budget := 300 * time.Millisecond; budget <= time.Second; budget += 50 * time.Millisecond {
+		p := &fakePMTUPath{passUpTo: 1500, drops: map[int]int{1500: 2, 1141: 1}}
+		s := newClockedSearch(p, 1500, budget)
+		if d := s.run(); d.Verdict == model.PMTUVerdictBlackhole {
+			t.Errorf("budget %v: run() = %+v after sizes %v, want no black hole on a healthy path", budget, d, p.sizes)
+		}
+	}
+}
+
+// A real black hole the budget cuts short is still confirmed: the full size vanishes once more and
+// the size the search settled on crosses once more.
+func TestPMTUSearchTruncatedBlackholeIsConfirmed(t *testing.T) {
+	p := &fakePMTUPath{passUpTo: 1400}
+	s := newClockedSearch(p, 1500, 650*time.Millisecond)
+	d := s.run()
+	if d.Verdict != model.PMTUVerdictBlackhole || !d.Truncated || d.PathMTU < 1320 || d.PathMTU > 1400 {
+		t.Fatalf("run() = %+v, want a truncated black hole with a lower bound in [1320, 1400]", d)
+	}
+	if n := len(p.sizes); n < 2 || p.sizes[n-2] != 1500 || p.sizes[n-1] != d.PathMTU {
+		t.Fatalf("sizes = %v, want the full size and %d sent last to confirm", p.sizes, d.PathMTU)
+	}
+}
+
+// Every unreachable verdict says why: the error reaches the CLI and the run detail.
+func TestPMTUSearchUnreachableCarriesItsReason(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		path pmtuPath
+		want string
+	}{
+		{"base lost", context.Background(), &fakePMTUPath{down: true}, "did not answer a 64-byte datagram"},
+		{"everything above the base lost", context.Background(), &fakePMTUPath{passUpTo: pmtuBaseSize}, "lossy path"},
+		{"found size lost when sent again",
+			context.Background(), &flakyAbove{fakePMTUPath: fakePMTUPath{passUpTo: 1400}, loseOnRepeat: 1400, seen: map[int]int{}},
+			"1400 bytes crossed once"},
+		{"cancelled", cancelled, &fakePMTUPath{passUpTo: 1500}, "context canceled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSearch(tc.ctx, tc.path, 1500, time.Now().Add(time.Hour))
+			d := s.run()
+			if d.Verdict != model.PMTUVerdictUnreachable || !strings.Contains(s.reason, tc.want) {
+				t.Fatalf("run() = %+v, reason %q, want unreachable with a reason containing %q", d, s.reason, tc.want)
+			}
+		})
 	}
 }
 
@@ -151,5 +259,24 @@ func TestPMTUSearchCancelledContextIsNoVerdict(t *testing.T) {
 	s := newTestSearch(ctx, p, 1500, time.Now().Add(time.Hour))
 	if d := s.run(); d.Verdict != model.PMTUVerdictUnreachable || len(p.sizes) != 0 {
 		t.Fatalf("run() = %+v after %d sends, want unreachable with nothing sent", d, len(p.sizes))
+	}
+}
+
+// At PMTUMinInterval a black hole of any size a real path has is sized and confirmed inside the budget,
+// with nothing cut short: config warns below it.
+func TestPMTUMinIntervalFitsARealBlackhole(t *testing.T) {
+	const timeout = 100 * time.Millisecond // newClockedSearch's
+	if got := PMTUMinInterval(500 * time.Millisecond); got != 14*time.Second {
+		t.Errorf("PMTUMinInterval(500ms) = %v, want 14s", got)
+	}
+	for _, tc := range []struct{ probe, hole int }{
+		{1500, 1280}, {1500, 1400}, {1500, 1499}, {1500, pmtuMinSize}, {9000, 1500}, {9000, 8999}, {65535, 9000},
+	} {
+		p := &fakePMTUPath{passUpTo: tc.hole}
+		s := newClockedSearch(p, tc.probe, PMTUMinInterval(timeout)/2)
+		if d := s.run(); d.Verdict != model.PMTUVerdictBlackhole || d.Truncated || d.PathMTU != tc.hole {
+			t.Errorf("probe %d, hole %d: run() = %+v, want a confirmed black hole at %d inside the budget",
+				tc.probe, tc.hole, d, tc.hole)
+		}
 	}
 }

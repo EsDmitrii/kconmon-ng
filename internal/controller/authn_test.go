@@ -22,6 +22,7 @@ import (
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
+	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -162,7 +163,7 @@ func startGateway(t *testing.T, gw config.ExternalGatewayConfig) (addr string, r
 	if err != nil {
 		t.Fatalf("NewExternalGatewayServer: %v", err)
 	}
-	svc.RegisterService(srv)
+	svc.RegisterGatewayService(srv)
 
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -176,6 +177,11 @@ func startGateway(t *testing.T, gw config.ExternalGatewayConfig) (addr string, r
 
 // dialGateway dials with the test CA in the root pool; certFile/keyFile empty means no client cert.
 func dialGateway(t *testing.T, p *testPKI, addr, certFile, keyFile string) pb.AgentRegistryClient {
+	t.Helper()
+	return pb.NewAgentRegistryClient(dialGatewayConn(t, p, addr, certFile, keyFile))
+}
+
+func dialGatewayConn(t *testing.T, p *testPKI, addr, certFile, keyFile string) *grpc.ClientConn {
 	t.Helper()
 	caPEM, err := os.ReadFile(p.caFile)
 	if err != nil {
@@ -198,7 +204,7 @@ func dialGateway(t *testing.T, p *testPKI, addr, certFile, keyFile string) pb.Ag
 		t.Fatalf("dialling gateway: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return pb.NewAgentRegistryClient(conn)
+	return conn
 }
 
 func withToken(ctx context.Context, token string) context.Context {
@@ -265,6 +271,50 @@ func TestGatewayBootstrapToken(t *testing.T) {
 	})
 }
 
+// The listener decides who is external, not the agent: every gateway registrant runs outside the
+// cluster, so one that leaves the label off (or sets it to anything else) is still stored as external
+// and cannot pose as a DaemonSet agent; the in-cluster listener never stores the label, so nothing
+// behind it can publish itself as a scrape target through Prometheus SD.
+func TestTheListenerStampsTheExternalLabel(t *testing.T) {
+	p := newTestPKI(t)
+	addr, reg := startGateway(t, p.gatewayConfig(false))
+	client := dialGateway(t, p, addr, "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	for _, labels := range []map[string]string{nil, {model.LabelExternal: "false", "site": "edge"}} {
+		req := registerReq("host-a")
+		req.Agent.Labels = labels
+		if _, err := client.Register(withToken(ctx, gatewayTestToken), req); err != nil {
+			t.Fatalf("Register through the gateway: %v", err)
+		}
+		got, ok := reg.GetByNodeName("host-a")
+		if !ok || !got.IsExternal() {
+			t.Errorf("gateway registrant with labels %v stored as %+v, want external", labels, got)
+		}
+		if labels["site"] != "" && got.Labels["site"] != "edge" {
+			t.Errorf("the agent's other labels were lost: %v", got.Labels)
+		}
+	}
+
+	inCluster, reg2 := newTestGRPCServer()
+	req := registerReq("node-b")
+	req.Agent.Labels = map[string]string{model.LabelExternal: "true", "site": "rack-1"}
+	if _, err := inCluster.Register(context.Background(), req); err != nil {
+		t.Fatalf("Register in-cluster: %v", err)
+	}
+	got, _ := reg2.GetByNodeName("node-b")
+	if got.IsExternal() {
+		t.Errorf("an in-cluster registrant claiming %s=true was stored as external: %v", model.LabelExternal, got.Labels)
+	}
+	if got.Labels["site"] != "rack-1" {
+		t.Errorf("the agent's other labels were lost: %v", got.Labels)
+	}
+	if req.GetAgent().GetLabels()[model.LabelExternal] != "true" {
+		t.Error("Register rewrote the caller's request message")
+	}
+}
+
 // checkToken is the constant-time comparison itself, table-driven over the metadata shapes a
 // client can present.
 func TestGatewayCheckToken(t *testing.T) {
@@ -322,6 +372,15 @@ func TestGatewayIdentityPinning(t *testing.T) {
 	t.Run("mismatched CN is refused", func(t *testing.T) {
 		_, err := client.Register(ctx, registerReq("node-2"))
 		wantCode(t, err, codes.PermissionDenied, "Register as another node")
+	})
+
+	t.Run("certified node name with a foreign agent id is refused", func(t *testing.T) {
+		// Register stores the entry under the id it carries, so an unpinned id would overwrite
+		// another agent's registry entry while that agent's heartbeats keep the forgery alive.
+		req := registerReq("node-1")
+		req.Agent.Id = "node-2-x"
+		_, err := client.Register(ctx, req)
+		wantCode(t, err, codes.PermissionDenied, "Register under another agent's id")
 	})
 
 	t.Run("heartbeat for own agent id passes authn", func(t *testing.T) {
