@@ -262,10 +262,10 @@ jobs:
           # Sign by digest, not tag: tags are mutable, digests are what verifiers pin.
           cosign sign --yes "ghcr.io/${OWNER}/charts/kconmon-ng@${{ steps.helm-push.outputs.digest }}"
 
+      # No version: input. The action installs only the CLI releases it ships checksums for, so a
+      # pin newer than the action fails the release; the CLI follows the action's own default.
       - name: Set up ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
-        with:
-          version: 1.3.4
 
       - name: Publish Artifact Hub repository metadata
         env:

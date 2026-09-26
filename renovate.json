@@ -78,15 +78,6 @@
     },
     {
       "customType": "regex",
-      "description": "The oras CLI version is a bare `version:` under oras-project/setup-oras. Its releases are tagged with a leading v, the input takes none.",
-      "managerFilePatterns": ["/^\\.github/workflows/release\\.yaml$/"],
-      "matchStrings": ["setup-oras@[^\\n]+\\n\\s+with:\\n\\s+version: (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"],
-      "depNameTemplate": "oras-project/oras",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^v(?<version>.*)$"
-    },
-    {
-      "customType": "regex",
       "description": "promtool for the Helm Lint rules gate is downloaded from the Prometheus release URL in ci.yaml. The version appears twice in that URL; the match covers both, and Renovate replaces every occurrence inside it. The sha256 line below it is updated by hand.",
       "managerFilePatterns": ["/^\\.github/workflows/ci\\.yaml$/"],
       "matchStrings": ["\\$base/v(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)/prometheus-[0-9]+\\.[0-9]+\\.[0-9]+\\.linux-amd64\\.tar\\.gz"],
@@ -224,7 +215,7 @@
     },
     {
       "description": "Release-only tooling: the release job is the only thing that runs it and PR CI never does, so nothing here automerges.",
-      "matchDepNames": ["anchore/syft", "oras-project/oras"],
+      "matchDepNames": ["anchore/syft"],
       "groupName": "release tooling",
       "automerge": false
     },
