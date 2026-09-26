@@ -442,7 +442,7 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	if returnTo == "" {
 		returnTo = oidcDefaultReturnTo
 	}
-	if !authn.IsSafeReturnTo(returnTo) {
+	if !authn.IsLocalURL(returnTo) {
 		writeProblem(w, http.StatusBadRequest, "invalid oidc start request", "returnTo must be a same-origin relative path")
 		return
 	}
@@ -482,7 +482,7 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setOIDCStateCookie(w, state)
-	//nolint:gosec // G710: authURL is built by AuthorizeURL from the operator-configured IdP endpoint; the only caller input (returnTo) was validated by authn.IsSafeReturnTo above and only rides sealed inside the state
+	//nolint:gosec // G710: authURL is built by AuthorizeURL from the operator-configured IdP endpoint; the only caller input (returnTo) was validated by authn.IsLocalURL above and only rides sealed inside the state
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -547,11 +547,9 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, signedIn, auditOutcomeAllowed, emptyDetail)
 	// returnTo was validated before AuthorizeURL sealed it into the state, which came back through
-	// the browser: re-check so no state can ever become an open redirect. The leading-slash test is
-	// spelled out at the redirect so static analysis sees the guard, not only IsSafeReturnTo.
-	if returnTo != "" && returnTo[0] == '/' && (len(returnTo) == 1 || (returnTo[1] != '/' && returnTo[1] != '\\')) &&
-		authn.IsSafeReturnTo(returnTo) {
-		//nolint:gosec // G710: the condition above admits only a same-origin relative path
+	// the browser: re-check so no state can ever become an open redirect.
+	if authn.IsLocalURL(returnTo) {
+		//nolint:gosec // G710: IsLocalURL admits only a same-origin relative path
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
