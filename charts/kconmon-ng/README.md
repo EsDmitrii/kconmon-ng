@@ -3,9 +3,10 @@
 Kubernetes Node Connectivity Monitor — Next Generation. kconmon-ng makes
 inter-node connectivity a measured fact instead of a guess. An **agent
 DaemonSet** probes from every node and a **controller Deployment** hands each
-agent its peer list over gRPC. Agents run TCP, UDP, ICMP, DNS and HTTP checkers,
-fire a reactive MTR trace when a probe fails, and export latency, jitter, loss
-and per-hop results as Prometheus metrics — per ordered node pair, per protocol.
+agent its peer list over gRPC. Agents run TCP, UDP, ICMP, DNS and HTTP checkers
+and a once-a-minute path MTU probe, fire a reactive MTR trace when a TCP, UDP or
+ICMP probe fails, and export latency, jitter, loss, path MTU and per-hop results
+as Prometheus metrics — per ordered node pair, per protocol.
 
 An optional [Console](#console-optional) web UI ships in the same chart, off by
 default. The project docs (install guide, console guide, annotated Helm values,
@@ -14,7 +15,7 @@ FAQ) live at <https://esdmitrii.github.io/kconmon-ng/>; the source is on
 
 ## Prerequisites
 
-- Kubernetes 1.31+ (CI tests against 1.36)
+- Kubernetes 1.31+ (CI tests against 1.37)
 - Helm 4 (Helm ≥3.14 also works; the chart ships as an OCI artifact)
 - Optional: Prometheus Operator, if you want the `ServiceMonitor` and
   `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`),
@@ -86,6 +87,11 @@ helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
   -f values.yaml
 ```
 
+`--reuse-values` renders the new templates over the old release's values, so
+every default that changed between versions keeps its old value (for 2.5.0: the
+DNS timeout and the geoipupdate image). Use `--reset-then-reuse-values` (Helm
+3.14+) to take the new chart's defaults and keep your own overrides.
+
 ### Uninstalling
 
 ```bash
@@ -124,28 +130,31 @@ The table below lists the most relevant parameters. See
 | `agent.securityContext` | `{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}` | Agent container securityContext; add `NET_RAW` yourself only if you also make it effective |
 | `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
 | `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys. Never rendered under `agent.hostNetwork`, where the kubelet refuses `net.*` pod sysctls and the node OS must set it |
-| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor and the external-agent ScrapeConfig: `full \| counters-only \| zone-only` (~75 / ~12 / ~0 series per directed pair). Needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
+| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor and the external-agent ScrapeConfig: `full \| counters-only \| zone-only` (78 / 14 / 0 series per directed pair). Needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
 | `agent.hostNetwork` | `false` | Run the agents in the node's network namespace (node IPs, `hostPort` on all three ports) so external hosts reach them without a routable pod network. Changes WHAT every in-cluster pair measures (the underlay, not the CNI datapath); see [Prerequisites](#prerequisites). Cannot share a machine with a bare-host external agent |
 | `agent.dnsPolicy` | `""` | Pod `dnsPolicy`, passed through verbatim (`ClusterFirst`, `ClusterFirstWithHostNet`, `Default`, `None`). Empty renders `ClusterFirstWithHostNet` under `agent.hostNetwork` (the controller address is a bare Service name only cluster DNS resolves) and nothing otherwise |
-| `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images at appVersion 2.3.0 or newer |
+| `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`, 0-64), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images at appVersion 2.3.0 or newer |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
 | `config.checkers.icmp.enabled` | `true` | Enable ICMP checker (interval `5s`, timeout `1s`) |
-| `config.checkers.pmtu.enabled` | `true` | Enable the path MTU probe (interval `60s`, timeout `500ms` per datagram, `size: 0` = the interface MTU). Tuning any `pmtu` key needs agent images 2.5.0 or newer: the chart writes only tuned keys and an older agent refuses them |
-| `config.checkers.dns.enabled` | `true` | Enable DNS checker (interval `5s`, timeout `5s`) |
+| `config.checkers.pmtu.enabled` | `true` | Enable the path MTU probe (interval `60s`, timeout `500ms` per datagram, `size: 0` = the MTU of the route to the peer). Tuning any `pmtu` key needs agent images 2.5.0 or newer: the chart writes only tuned keys and an older agent refuses them |
+| `config.checkers.dns.enabled` | `true` | Enable DNS checker (interval `5s`, timeout `2s`) |
 | `config.checkers.http.enabled` | `false` | Enable HTTP checker (interval `30s`, timeout `5s`) |
 | `serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` |
 | `scrapeConfig.externalAgents.enabled` | `false` | Create a Prometheus Operator `ScrapeConfig` that reads the controller's HTTP SD endpoint and scrapes external agents ([Scraping external agents](#scraping-external-agents)). Refused without `controller.externalGateway.enabled`, or with `controller.prometheusSD.enabled=false` |
 | `scrapeConfig.externalAgents.labels` | `{}` | Selector labels the operator's Prometheus requires on the object: kube-prometheus-stack selects only `release: <its release name>`; an empty `scrapeConfigSelector` needs nothing |
-| `scrapeConfig.externalAgents.jobName` | `""` | Job label; empty means `<release>-agent-external`. Keep `kconmon` in it (the bundled dashboards filter `job=~".*kconmon.*"`) and `agent-external` (the `KconmonExternalAgentDown` rule matches on it) |
+| `scrapeConfig.externalAgents.jobName` | `""` | Job label; empty means `<release>-agent-external`. Keep `kconmon` in it (the bundled dashboards filter `job=~".*kconmon.*"`); `KconmonExternalAgentDown` follows whatever name this resolves to |
 | `scrapeConfig.externalAgents.refreshInterval` | `30s` | How often Prometheus re-reads the target list; matches `config.controllerAgentTtl` |
 | `scrapeConfig.externalAgents.interval` | `""` | Scrape interval; empty falls back to `serviceMonitor.interval` |
-| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the thirteen built-in alerts, twelve on by default ([Alerting rules](#alerting-rules)) |
-| `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the fourteen built-in alerts, thirteen on by default ([Alerting rules](#alerting-rules)) |
+| `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity`, plus `minPeers` on the node rules and `sustainedThreshold` on `pathMtuBlackHole` ([Alerting rules](#alerting-rules)) |
 | `prometheusRule.externalAgentDown.enabled` | `false` | `KconmonExternalAgentDown`: an external agent the SD endpoint lists sits at `up == 0` for `for` (`5m`, `warning`). Off by default because its job exists only with the ScrapeConfig or a hand-written `*agent-external*` job |
 | `prometheusRule.additionalRules` | `[]` | Extra rules appended to the group verbatim |
-| `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` (set `networkPolicy.prometheusNamespace` to allow scraping) |
+| `networkPolicy.enabled` | `false` | Create one `NetworkPolicy` per component: `<fullname>-agent`, `<fullname>-controller` (plus `<fullname>-controller-apiserver`, and `<fullname>-controller-gateway` with the external gateway) and the console's own, plus on Cilium the CiliumNetworkPolicy `<fullname>-kube-apiserver` (`networkPolicy.ciliumKubeAPIEgress`). Set `networkPolicy.prometheusNamespace` to allow scraping |
+| `networkPolicy.ciliumKubeAPIEgress` | `auto` | Cilium only: with `networkPolicy.enabled`, also render the CiliumNetworkPolicy `<fullname>-kube-apiserver`, egress to the `kube-apiserver` entity on TCP 443/6443 for the controller, and for the console when `console.kubernetesContext` or `console.alerting` is on. Under Cilium's default `policy-cidr-match-mode` no `ipBlock` matches the apiserver, so without it the controller stays NotReady. `auto` renders it when the cluster serves `cilium.io/v2` CiliumNetworkPolicy (plain `helm template` needs `--api-versions cilium.io/v2/CiliumNetworkPolicy`); `true` or `false` forces it |
+| `networkPolicy.dnsEgress` | `[]` | Replaces the default DNS egress rule (UDP/TCP 53 to any pod) in the agent, controller and console policies. Needed for NodeLocal DNSCache or any host-network resolver, which no `namespaceSelector` matches; keep a `namespaceSelector: {}` peer in it if kube-dns pods must stay reachable |
+| `networkPolicy.clusterCIDRs` | `[]` | The cluster's IPv4 pod and Service CIDRs, written as `except` entries of the default `0.0.0.0/0` rules of `networkPolicy.httpEgress` and the console's `webhookEgress`, `oidcEgress` and `geoipEgress`. On Calico and Antrea that `ipBlock` matches pod IPs too, so without the list those defaults open every pod on their ports. The default `oidcEgress` still admits any pod on 443 through its `namespaceSelector: {}` peer; narrowing that takes an explicit `console.networkPolicy.oidcEgress`. The apiserver defaults (`networkPolicy.kubeAPIEgress`, `console.networkPolicy.kubeAPIEgress`) get no `except` and keep every pod open on 443/6443 to the controller and to a console that calls the apiserver until you name the apiserver endpoint in them. Entries must be network addresses: `/0` and host bits set fail the render. Changes nothing on Cilium, where an `ipBlock` never matches a pod |
 | `networkPolicy.externalPeerCidrs` | `[]` | External agents' source CIDRs spliced into the agent↔agent probe rules in both directions (UDP `grpcPort`, TCP `httpPort`, the ports-less ICMP/MTR rule), never into the gateway rule. `externalAgentCidrs` covers registration only; without this list an external agent registers and every cell between it and the cluster stays red |
 | `networkPolicy.nodeCidrs` | `[]` | Node CIDRs admitted to the controller's gRPC port. REQUIRED with `agent.hostNetwork` when policies are on: host-network agents register from node IPs, which no podSelector matches, and the chart refuses to render the policy without it rather than drop every registration silently |
 | `controller.pdb.enabled` | `true` | PodDisruptionBudget for the controller — rendered ONLY at `controller.replicaCount > 1` |
@@ -166,6 +175,9 @@ API is specified in
 | `console.enabled` | `false` | Deploy the Console |
 | `console.replicas` | `1` | Console replica count. More than 1 REQUIRES `redis.existingSecret`: sessions, the rate-limit counters and the realtime fan-out live there, and the chart refuses the combination rather than silently multiplying every rate limit by the replica count |
 | `console.auth.mode` | `anonymous` | `anonymous \| local \| header \| oidc` |
+| `console.auth.header.trustedProxyCIDRs` | `[]` | Proxies whose identity headers `header` mode trusts: required there, and it names the authenticating proxy only, never the whole pod CIDR. It gives the client address too, in every mode, but only while `console.clientAddress.trustedProxyCIDRs` is empty (or the console image is older than 2.5.0) |
+| `console.clientAddress.trustedProxyCIDRs` | `[]` | Proxies whose `X-Forwarded-For` gives the client address: the per-address login, OIDC sign-in, anonymous PromQL and runs budgets, the WebSocket per-address cap and the audit `remoteAddr`. Never used for identity. Behind an Ingress, list the ingress controller's addresses (its pod CIDR at the widest), or every client shares one address and one budget. A pod inside the list can name any client address. Empty falls back to `console.auth.header.trustedProxyCIDRs`. Written only for console images 2.5.0 or newer |
+| `console.websocket.maxConnections` | `1024` | Open `/ws` sockets per console replica; `maxConnectionsPerAddress` (`256`) and `maxConnectionsPerSubject` (`32`, per user or API token; anonymous callers count only per address) cap them per client. `0` turns a cap off. A socket over a cap is closed with 1013 and the browser reconnects with backoff. Written only for console images 2.5.0 or newer |
 | `console.auth.groupRoles` | `{}` | Group the identity provider asserts → role this console grants. The union with API-made bindings; a group absent from the map grants nothing. What makes an oidc/header install usable from a cold database |
 | `console.auth.session.ttl` | `12h` | Absolute session lifetime, counted from login and never extended |
 | `console.auth.session.idleTimeout` | `1h` | Session is refused and purged after this much inactivity; slides forward on every request, never past `ttl`. `0` disables it |
@@ -173,6 +185,7 @@ API is specified in
 | `redis.existingSecret` | `""` | Secret holding a `redis://` DSN; empty means the in-process bus (`console.replicas: 1`) |
 | `console.kubernetesContext.enabled` | `false` | Capture core/v1 Events into the Investigate timeline; renders a console-only ServiceAccount and a `ClusterRole` for events |
 | `console.alerting.enabled` | `false` | Manage Prometheus alert rules from the Console; renders a **namespaced** `Role` for `monitoring.coreos.com/prometheusrules` and applies one `PrometheusRule` object (`console.alerting.bundleName`). Needs a database and the Prometheus Operator CRD |
+| `console.networkPolicy.prometheusTargetPort` | `0` | The pod port behind `console.prometheus.url` when the URL names a Service whose `targetPort` differs from its port (the Bitnami Thanos chart: 9090 to 10902). The policy sees the pod port after the Service DNAT, so the default Prometheus egress rule then opens both. `0` opens the URL's port only; ignored when `console.networkPolicy.prometheusEgress` is set. `redisEgress` and `databaseEgress` have no such key: a Service mapping 6379 or 5432 to another pod port needs the list set on the pod port |
 | `console.webhooks.existingSecret` | `""` | Secret holding the AES-256-GCM key that encrypts webhook signing secrets at rest; empty leaves webhook create/test answering 503 |
 | `<consumer>.secret.create` | `false` | Let the chart render the Secret instead of referencing one ([Chart-managed Secrets](#chart-managed-secrets)) |
 
@@ -185,6 +198,7 @@ Selected key metrics:
 - `kconmon_ng_udp_packet_loss_ratio` — UDP packet loss ratio (0.0–1.0)
 - `kconmon_ng_icmp_packet_loss_ratio` — ICMP packet loss ratio (0.0–1.0)
 - `kconmon_ng_zone_{udp,icmp}_packets_{sent,received}_total` — the zone plane's loss counters; the whole `kconmon_ng_zone_*` family is in `docs/metrics.md`
+- `kconmon_ng_pmtu_bytes` and `kconmon_ng_pmtu_probe_bytes`: per pair, the size that crossed on the last path MTU probe and the size the source probes that peer at; the first below the second is a reduced path or a black hole
 - `kconmon_ng_dns_results_total` — total DNS resolution results (labelled by `result`)
 - `kconmon_ng_controller_registered_agents` — agents currently registered with the controller, external ones included
 - `kconmon_ng_controller_expected_agents` — schedulable nodes expected to run an agent
@@ -205,12 +219,20 @@ renders a `ScrapeConfig` named `<release>-agent-external` that reads it:
 controller:
   externalGateway:
     enabled: true          # external agents only exist through the gateway
+    tls:
+      secretName: kconmon-ng-gateway-tls       # the gateway's serving pair, required
+    bootstrapToken:
+      secretName: kconmon-ng-gateway-token     # the agents' token, required
 scrapeConfig:
   externalAgents:
     enabled: true
     labels:
       release: kube-prometheus-stack   # whatever your Prometheus' scrapeConfigSelector wants
 ```
+
+The two Secrets are the ones set up in
+[Cluster side: enable the gateway](https://esdmitrii.github.io/kconmon-ng/external-agents/#cluster-side-enable-the-gateway);
+an install that already runs the gateway only adds the `scrapeConfig` block.
 
 The object carries the same `agent.metrics.detail` relabelings as the
 ServiceMonitor, so a bare host never returns detail the valve dropped for the
@@ -230,8 +252,8 @@ answering scrapes. Without the operator, the plain-Prometheus
 
 ## Alerting rules
 
-`prometheusRule.enabled=true` renders one `PrometheusRule` with ten built-in
-alerts, nine of them on by default. The rules themselves live in the chart
+`prometheusRule.enabled=true` renders one `PrometheusRule` with fourteen
+built-in alerts, thirteen of them on by default. The rules themselves live in the chart
 ([`templates/_rules.tpl`](templates/_rules.tpl)), not in `values.yaml`: rule
 text, rate windows and label groupings are chart code, and `values.yaml` carries
 only what an operator actually tunes.
@@ -240,26 +262,32 @@ only what an operator actually tunes.
 | --- | --- | --- | --- |
 | `UDPLossHigh` | `<prefix>_udp_packet_loss_ratio > 0.5` for 5m | `prometheusRule.udpLossHigh` | `threshold` `0.5`, `for` `5m`, `severity` `warning` |
 | `TCPChecksFailing` | TCP **failure ratio** > 5% for 5m | `prometheusRule.tcpChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
-| `PathMTUBlackHole` | more than 50% of path MTU probes on a pair lose the full-size datagram with no ICMP frag-needed, for 5m; the value is the path MTU that still crosses | `prometheusRule.pathMtuBlackHole` | `threshold` `0.5`, `for` `5m`, `severity` `warning` |
+| `PathMTUBlackHole` | more than 50% of path MTU probes on a pair lose the full-size datagram with no ICMP frag-needed over 10m, or more than `sustainedThreshold` of them over 30m, at least two, with one in the last 10m (a black hole on one of several ECMP paths), for 5m; the value is the smallest size that crossed in 10m | `prometheusRule.pathMtuBlackHole` | `threshold` `0.5`, `sustainedThreshold` `0.1` (`1` turns the 30m arm off), `for` `5m`, `severity` `warning` |
+| `ZonePathMTUBlackHole` | the same two arms per zone pair from `<prefix>_zone_pmtu_results_total`, only for a zone pair with no per-pair pmtu series in Prometheus (`agent.metrics.detail=zone-only`), for 5m | `prometheusRule.pathMtuBlackHole` (shared) | same knobs as `PathMTUBlackHole` |
 | `NodeUnreachable` | more than 50% of a node's probing peers fail TCP to it (at least `minPeers` `2` peers), for 5m | `prometheusRule.nodeUnreachable` | `threshold` `0.5`, `minPeers` `2`, `for` `5m`, `severity` `critical` |
 | `NodeIsolated` | one node fails TCP to more than 50% of the peers it probes (at least `minPeers` `2`), for 5m | `prometheusRule.nodeIsolated` | `threshold` `0.5`, `minPeers` `2`, `for` `5m`, `severity` `critical` |
-| `PairWentSilent` | a pair probed within the last hour reports **nothing** for ~15m | `prometheusRule.pairWentSilent` | `for` `10m`, `severity` `warning` |
+| `PairWentSilent` | a pair probed within the last hour reports **nothing** for 5m plus `for` (~15m at the default) | `prometheusRule.pairWentSilent` | `for` `10m`, `severity` `warning` |
 | `DNSChecksFailing` | DNS **failure ratio** > 5% for 5m | `prometheusRule.dnsChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
 | `ExternalChecksFailing` | External **failure ratio** > 10% for 5m | `prometheusRule.externalChecksFailing` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
 | `ZoneChecksFailing` | zone-pair **failure ratio** across TCP+UDP+ICMP > 5% for 5m | `prometheusRule.zoneChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
 | `ZoneLossHigh` | zone-pair packet loss (from sent/received counters) > 10% for 5m | `prometheusRule.zoneLossHigh` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
 | `KconmonAgentsMissing` | `expected_agents - (registered_agents - external_agents) > 0` for 10m; `external_agents` falls back to 0 on a controller image without the gauge | `prometheusRule.kconmonAgentsMissing` | `for` `10m`, `severity` `warning` |
 | `KconmonControllerDown` | `absent(<prefix>_controller_leader == 1)` for 5m | `prometheusRule.kconmonControllerDown` | `for` `5m`, `severity` `critical` |
-| `KconmonExternalAgentDown` | `up{job=~".*agent-external.*"} == 0` for 5m; **off by default**, the job exists only once external agents are scraped | `prometheusRule.externalAgentDown` | `enabled` `false`, `for` `5m`, `severity` `warning` |
+| `KconmonExternalAgentDown` | `up{job=~".*agent-external.*"} == 0` for 5m, the ScrapeConfig's `jobName` joined to the regex when it lacks `agent-external`; **off by default**, the job exists only once external agents are scraped | `prometheusRule.externalAgentDown` | `enabled` `false`, `for` `5m`, `severity` `warning` |
 
-The two `Zone*` rules read the zone-level metric family
+The `Zone*` rules read the zone-level metric family
 (`<prefix>_zone_*`), which only agents new enough to export it serve — on an
 older fleet they are silently inert (their expressions match no series) and
 start working when the agent image is upgraded. They aggregate at the source,
-so they keep firing under every `agent.metrics.detail` scrape mode, including
+so `ZoneChecksFailing` and `ZoneLossHigh` keep firing under every
+`agent.metrics.detail` scrape mode, including `zone-only`.
+`ZonePathMTUBlackHole` stays quiet wherever the per-pair pmtu series are
+scraped, so it never doubles `PathMTUBlackHole`, and takes over under
 `zone-only`.
 
-Every rule takes `enabled` (all `true` by default) alongside the tunables above.
+Every rule takes `enabled` (`true` by default except `externalAgentDown`)
+alongside the tunables above; `ZonePathMTUBlackHole` follows
+`pathMtuBlackHole.enabled`.
 Setting one to `false` removes exactly that rule and nothing else. A `threshold`
 is a ratio in `0.0-1.0` and is interpolated into the alert's own annotation text,
 so a retuned rule still describes itself correctly.
@@ -305,7 +333,8 @@ repeating one generic sentence per firing series:
 | --- | --- |
 | `UDPLossHigh` | source → destination node, both zones, loss % |
 | `TCPChecksFailing` | source → destination node, both zones, failed % |
-| `PathMTUBlackHole` | source → destination node, both zones, the path MTU that still crosses |
+| `PathMTUBlackHole` | source → destination node, both zones, the smallest size that crossed in 10m |
+| `ZonePathMTUBlackHole` | source → destination zone, share of probes that lost the full size; `investigateUrl` deep link |
 | `NodeUnreachable` | destination node + zone, share of its peers that fail to reach it |
 | `NodeIsolated` | source node + zone, share of its peers it fails to reach |
 | `PairWentSilent` | source → destination node |
@@ -325,7 +354,7 @@ their series carry `host`/`resolver` and `target`/`target_kind` instead of a
 destination — which is why those two annotations name a resolver or a target
 rather than a peer.
 
-The two zone rules also annotate `investigateUrl`, a **console-relative** deep
+The zone rules also annotate `investigateUrl`, a **console-relative** deep
 link (`/investigate?kind=zone-pair&scope=<source>-><destination>`) into the
 Investigate page scoped to the firing zone pair. Relative because the chart
 cannot know the console's external URL — ingress is optional — so a
@@ -380,9 +409,9 @@ instead of on an outage.
   under five minutes still leaves two samples in the window, so the right-hand
   side keeps the pair and the difference stays empty.
 - `for: 10m` means the silence has to outlast a DaemonSet rollout, a drain or a
-  reschedule; anything that completes inside ~15m total is never notified. The
-  annotation's "15m" is that sum — retuning `for` moves the real threshold while
-  the sentence keeps saying 15m.
+  reschedule; anything that completes inside ~15m total (the 5m window plus
+  `for`) is never notified. The summary and description state that sum from
+  the configured `for`, so a retuned rule still describes itself.
 - `offset 5m` keeps the "was reporting" window clear of the same five minutes
   the left side is judging, so a pair can never prove its own liveness with the
   very samples that are missing.
@@ -689,6 +718,9 @@ A database that publishes its own DSN Secret needs no create path at all: point
   the field. The chart writes exactly the keys it reads, and nothing else.
 - **`secret.name` overrides the generated name**; leave it empty for the
   fullname-derived default.
+- **Every field is written as a string.** A value YAML reads as a number (a
+  MaxMind `accountId` written unquoted) renders as its digits, never as
+  `1.234567e+06`.
 - The generated Secret is a normal chart resource: `helm uninstall` removes it,
   and its values live in your release. Prefer the create path for *placeholders*
   an injector resolves, not for literal credentials.
@@ -813,15 +845,22 @@ across the move.
   `/etc/kconmon-ng-console-secrets` — a sibling of the config mount, because a
   mountpoint cannot be created inside an already-mounted read-only volume. All
   four are read once at boot, so rotating one is an operator-initiated restart.
+  Rotating the OIDC client secret also fails the sign-ins in flight, for at
+  most 5 minutes, since it keys the sealed OIDC `state`.
+  A chart-made Secret that changes rolls the console through its
+  `checksum/secret` annotation, except the local bootstrap password, which
+  only ever seeds an empty users table.
 - **The console gets a Kubernetes identity only when it needs one.**
   `console.kubernetesContext.enabled` (event reader) or
   `console.alerting.enabled` (rule reconciler) render a console-only
   ServiceAccount, `POD_NAMESPACE`, the apiserver egress rule and the matching
   grant — a cluster-scoped `ClusterRole` for events, a *namespaced* `Role` for
-  `prometheusrules` whose verbs are exactly the calls the client makes
-  (`get`, `list`, `create`, `patch`, `delete`): server-side apply needs `patch`
-  plus `create`, and `delete` is what removes the bundle when the last rule is
-  disabled. There is no `update` (apply never falls back to read-modify-write)
+  `prometheusrules` whose verbs are exactly the calls the client makes:
+  `get`, `create`, `patch` and `delete` on `console.alerting.bundleName` alone
+  (server-side apply needs `patch` plus `create`, and names the object, so
+  `create` can be scoped too; `delete` removes the bundle when the last rule is
+  disabled), and `list` namespace-wide, to offer the other PrometheusRules for
+  import. There is no `update` (apply never falls back to read-modify-write)
   and no `watch` (the reconciler polls). The agent/controller grant is never
   widened.
 - **The console's own ingress rule is open by default, and that is a choice.**
@@ -829,12 +868,14 @@ across the move.
   whatever fronts the UI — an ingress controller, a `NodePort`, a
   `LoadBalancer` — whose namespace, labels or source CIDR the chart cannot know.
 
-  One caller IS inside the release: with `serviceMonitor.enabled`, Prometheus
-  scrapes the console's own `/metrics`. That gets its own ingress rule, and the
-  rule renders **only when `networkPolicy.prometheusNamespace` is set** —
-  `/metrics` has a listener of its own on `config.metricsPort`, and the rule
-  opens that port only: a rule on the API port would admit everything else in
-  the scraper's namespace to the whole API, quietly undoing the narrowing
+  One caller IS inside the release: Prometheus scraping the console's own
+  `/metrics`, through the `ServiceMonitor`, a PodMonitor or a plain scrape
+  config. That gets its own ingress rule, and the rule renders **only when
+  `networkPolicy.prometheusNamespace` is set**, with or without
+  `serviceMonitor.enabled`, as on the agent and the controller. `/metrics`
+  has a listener of its own on `config.metricsPort`, and the rule opens that
+  port only: a rule on the API port would admit everything else in the
+  scraper's namespace to the whole API, quietly undoing the narrowing
   `ingressFrom` exists to express. So if you narrow `ingressFrom`,
   set `networkPolicy.prometheusNamespace` alongside it, or the console's own
   metrics go dark (`up{job="…-console"} = 0`) while everything else keeps
@@ -859,6 +900,16 @@ across the move.
 - **Optional config blocks are emitted only when enabled.** Both config files
   are parsed with unknown fields rejected, so an unconditional key would
   crashloop an older image while a Deployment or DaemonSet rolls.
+- **One policy per component.** `<fullname>-agent` carries the
+  agent-to-agent probe rules (with `networkPolicy.externalPeerCidrs`), the
+  ports-less ICMP/MTR rule, the scrape rule and every agent egress rule.
+  `<fullname>-controller` admits agents and `networkPolicy.nodeCidrs` on
+  `config.grpcPort` only, the console on `config.httpPort` (and `grpcPort`
+  with events), the `helm test` pod on `httpPort` and the scraper on
+  `metricsPort`; its only egress is DNS, and the apiserver rule lives in
+  `<fullname>-controller-apiserver`. Until 2.5.0 one shared policy selected
+  the agents and the controller alike, so the agents' peer rules and egress
+  applied to the controller too.
 - **NetworkPolicy v1 cannot say "ICMP".** `ports[].protocol` accepts only
   `TCP`, `UDP` and `SCTP`; anything else is rejected by the API server. An ICMP
   allowance can therefore only be written as a peer rule with **no `ports`
@@ -910,6 +961,50 @@ across the move.
   real address and port in the knob. The symptom is a clean `dial tcp
   10.96.0.1:443: i/o timeout` from the controller's Lease renewal or the
   console's alert-rule sync.
+
+  Cilium is the other case. Under its default `policy-cidr-match-mode` it
+  never matches a pod, a node or the apiserver against an `ipBlock`: it
+  resolves them to identities first (the pod's labels, the `remote-node` and
+  `host` entities, the `kube-apiserver` entity), whatever address and port
+  you write. With `networkPolicy.ciliumKubeAPIEgress` at `auto` the chart
+  detects Cilium and adds CiliumNetworkPolicies for its own flows:
+  `<fullname>-kube-apiserver` lets the controller, and the console when it
+  calls the apiserver, reach the `kube-apiserver` entity, and with
+  `agent.hostNetwork` or the external gateway `<fullname>-node-ingress`
+  admits the `remote-node` and `host` entities to the controller's gRPC and
+  gateway ports, which the `nodeCidrs` and `externalAgentCidrs` `ipBlock`s
+  never match there. The NetworkPolicy rules above stay for every other CNI.
+- **`0.0.0.0/0` means something different per CNI.** The default egress
+  rules for HTTP checks (`networkPolicy.httpEgress`), webhooks, the OIDC IdP
+  and geoipupdate allow `0.0.0.0/0` on their ports. On Cilium that reaches
+  only peers outside the cluster. On Calico and Antrea the `ipBlock` matches
+  pod IPs too, so it also opens every pod listening on those ports; list the
+  cluster's IPv4 pod and Service CIDRs in `networkPolicy.clusterCIDRs` and
+  they become `except` entries. The default `oidcEgress` stays the
+  exception: next to the `ipBlock` it carries a `namespaceSelector: {}` peer
+  on 443 for an IdP behind an in-cluster ingress controller, so it keeps
+  every pod open on 443 to the console until you set
+  `console.networkPolicy.oidcEgress` yourself. `clusterCIDRs` does not narrow
+  `networkPolicy.kubeAPIEgress` or `console.networkPolicy.kubeAPIEgress`
+  either: their default `0.0.0.0/0` on 443/6443 has no `except`, because
+  after kube-proxy's DNAT the apiserver is a node IP, so the controller
+  always, and the console whenever it calls the apiserver
+  (`console.kubernetesContext` or `console.alerting` on), still reaches
+  every pod listening on 443 or 6443, whatever `clusterCIDRs` and
+  `oidcEgress` say. To close that, name the apiserver endpoint in both keys;
+  the `endpointslices` command in the bullet above lists its addresses and
+  port. `clusterCIDRs` entries must be network addresses: `/0` fails the
+  schema and an entry with host bits set fails the render. An in-cluster peer (an HTTP
+  target, a webhook receiver, an IdP pod) needs a selector peer on the
+  pod's own port, not the Service's, on every CNI: Cilium never matches the
+  pod against an `ipBlock`, and Calico and Antrea see the `targetPort` after
+  kube-proxy's DNAT. A list you set replaces the default, so keep an
+  `ipBlock` rule next to it for the peers outside the cluster. The same
+  targetPort rule applies to the console's Prometheus, Redis and PostgreSQL
+  egress: `console.networkPolicy.prometheusTargetPort` adds the pod port to
+  the default Prometheus rule, and `redisEgress` or `databaseEgress` has to
+  name the pod port when the Service maps 6379 or 5432 elsewhere. Details in
+  [NetworkPolicy on Cilium, Calico and Antrea](https://esdmitrii.github.io/kconmon-ng/configuration/#networkpolicy-and-cilium).
 - **NetworkPolicy is only the cluster-side gate.** For any destination outside
   the cluster (an external Valkey or PostgreSQL, an OIDC IdP, a control plane),
   the destination's own firewall — iptables/nftables, a cloud security group —

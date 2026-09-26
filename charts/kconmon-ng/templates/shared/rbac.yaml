@@ -29,7 +29,8 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- if .Values.controller.leaderElection }}
 ---
-{{/* The controller's leader Lease: namespaced, and only the verbs client-go's LeaseLock issues. */}}
+{{/* The controller's leader Lease: namespaced, and only the verbs client-go's LeaseLock issues.
+     get and update name the Lease (KCONMON_NG_LEASE_NAME); create stays open, a POST carries no name. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -40,7 +41,11 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ include "kconmon-ng.controller.fullname" . | quote }}]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -92,7 +97,10 @@ subjects:
 {{- end }}
 {{- if and .Values.console.enabled .Values.console.alerting.enabled .Values.rbac.create }}
 ---
-{{/* Alerting reconciler grant: a namespaced Role whose verbs match the promrules client exactly. */}}
+{{/* Alerting reconciler grant: a namespaced Role whose verbs match the promrules client exactly.
+     It reads, applies and deletes its bundle alone, so the other PrometheusRules in the namespace
+     stay out of reach; only list (the foreign-rules view) cannot be scoped by name. The bundle is
+     created by server-side apply, which the apiserver authorizes as create on the object's name. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -103,7 +111,11 @@ metadata:
 rules:
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["prometheusrules"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["list"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules"]
+    resourceNames: [{{ .Values.console.alerting.bundleName | quote }}]
+    verbs: ["get", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

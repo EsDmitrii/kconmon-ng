@@ -58,32 +58,26 @@ Called from every entrypoint template (the include is free when the values are a
 {{- if hasKey .Values "pdb" -}}
 {{- fail "pdb.* moved to controller.pdb.* — it only ever rendered the CONTROLLER's PodDisruptionBudget, and the console's has always been console.pdb.*." -}}
 {{- end -}}
+{{- /* `helm upgrade --reuse-values` renders these templates over the OLD release's values, so a block
+       every template reads unguarded is simply missing and the render dies on a nil pointer. */}}
+{{- if not (hasKey (.Values.controller | default dict) "externalGateway") -}}
+{{- fail "controller.externalGateway is missing from the values: they come from a chart older than 2.3.0, typically through `helm upgrade --reuse-values`, which renders the new templates over the old release's values instead of the new defaults. Upgrade with --reset-then-reuse-values (Helm 3.14+), or pass your own values file with -f and no --reuse-values." -}}
+{{- end -}}
 {{- /* hasKey, not truthiness: a 1.x values file whose override list was EMPTIED rather than deleted
        (`prometheusRule.rules: []`) rendered clean and silently, while every other removed key here
        fails the render. */}}
 {{- if hasKey (.Values.prometheusRule | default dict) "rules" -}}
 {{- fail "prometheusRule.rules (the pre-1.12 full-override list) is removed: it replaced every built-in rule and silently discarded the per-rule knobs. Tune the built-ins with prometheusRule.<alertName>.{enabled,threshold,for,severity}, and append your own with prometheusRule.additionalRules." -}}
 {{- end -}}
-{{- /* NOT a migration: an INVARIANT the chart used to state and never check.
-
-       Sessions, the fixed-window rate-limit counters and the realtime fan-out all live in the
-       Redis-compatible server. Without one they live in each console process, so N replicas is N
-       independent sets: console.rateLimit.promqlPerMinute: 60 actually admitted 120 arbitrary-PromQL
-       proxy requests a minute against the operator's Prometheus, a session created on one replica
-       was unknown to the other, and a run's live progress only reached the browsers the Service
-       happened to route to its owner. The values file said "console.replicas must be 1" and nothing
-       enforced it, while the default shipped 2. */}}
+{{- /* Not a migration: an invariant. Sessions, the rate-limit counters and the realtime fan-out
+       live in the Redis-compatible server; without one they live in each console process, so N
+       replicas keep N independent sets and every budget is multiplied by N. */}}
 {{- if and .Values.console.enabled (gt (int .Values.console.replicas) 1) (not (include "kconmon-ng.console.hasRedis" .)) -}}
 {{- fail "console.replicas is greater than 1 and no Redis-compatible server is configured: sessions, the rate-limit counters and the realtime fan-out are per-process without one, so the replicas would each keep their own — a session created on one is unknown to the other, and every console.rateLimit.* budget is multiplied by the replica count. Set redis.existingSecret (or redis.secret.create) to a redis:// DSN, or set console.replicas to 1." -}}
 {{- end -}}
-{{- /* NOT a migration either: the THREE PORTS must differ.
-
-       config.httpPort, config.grpcPort and config.metricsPort become containerPorts and Service
-       ports on the same Pod. Two of them equal renders a Service the apiserver rejects
-       ("duplicate port") and a container spec the kubelet refuses — after `helm upgrade` has already
-       started applying, so the release is left half-changed. The binaries validate this at startup
-       (internal/config's Validate), which is far too late: by then the object is live and the pod is
-       crash-looping. The chart knows all three values before it writes anything. */}}
+{{- /* Not a migration either: the three ports must differ. They are containerPorts and Service
+       ports on one Pod, so two equal ones are rejected at apply time, after `helm upgrade` has
+       started changing the release; the binaries only check at startup. */}}
 {{- $ports := dict "httpPort" (int .Values.config.httpPort) "grpcPort" (int .Values.config.grpcPort) "metricsPort" (int .Values.config.metricsPort) -}}
 {{- if eq $ports.httpPort $ports.grpcPort -}}
 {{- fail (printf "config.httpPort and config.grpcPort are both %d: they are two ports on the same Pod and must differ" $ports.httpPort) -}}
@@ -94,10 +88,8 @@ Called from every entrypoint template (the include is free when the values are a
 {{- if eq $ports.grpcPort $ports.metricsPort -}}
 {{- fail (printf "config.grpcPort and config.metricsPort are both %d: they are two ports on the same Pod and must differ" $ports.grpcPort) -}}
 {{- end -}}
-{{- /* The CONSOLE's own pair. console.service.port and config.metricsPort land on the same console
-       Pod and the same console Service, so equal numbers render a Service with two entries on one
-       port — accepted by helm, rejected by the apiserver at apply time, i.e. after the upgrade has
-       started. The guard above covered the agent/controller trio and missed this one. */}}
+{{- /* The console's own pair: console.service.port and config.metricsPort share the console Pod
+       and Service, so equal numbers are rejected by the apiserver at apply time. */}}
 {{- if and .Values.console.enabled (eq (int .Values.console.service.port) $ports.metricsPort) -}}
 {{- fail (printf "console.service.port and config.metricsPort are both %d: they are two ports on the same console Pod and Service, so the Service would carry the number twice and the apiserver would refuse it" $ports.metricsPort) -}}
 {{- end -}}

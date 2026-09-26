@@ -44,14 +44,11 @@ spec:
               value: kconmon
             - name: POSTGRES_DB
               value: kconmon
-            # A subdirectory, not the mount root: initdb refuses a data
-            # directory that is not empty, and a fresh emptyDir mount can
-            # still carry a lost+found on some drivers.
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
+          # The postgres 18 image layout: the volume is /var/lib/postgresql and PGDATA defaults to
+          # the 18/docker subdirectory, so a lost+found at the mount root cannot trip initdb.
           volumeMounts:
             - name: pgdata
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "kconmon", "-d", "kconmon"]

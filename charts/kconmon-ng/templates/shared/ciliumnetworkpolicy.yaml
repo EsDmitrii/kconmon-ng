@@ -1,0 +1,75 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $mode := .Values.networkPolicy.ciliumKubeAPIEgress }}
+{{- if kindIs "invalid" $mode }}{{ $mode = "auto" }}{{ end }}
+{{- if or (eq (toString $mode) "true") (and (eq (toString $mode) "auto") (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumNetworkPolicy")) }}
+{{- /*
+Cilium resolves the apiserver Service to its kube-apiserver entity before policy, and under the
+default policy-cidr-match-mode no ipBlock selects that entity, so the controller's -apiserver policy
+and console.networkPolicy.kubeAPIEgress never match there. Egress only and additive: a CNP isolates
+the pods it selects, and every pod selected here is already egress-isolated by its NetworkPolicy,
+which is why this renders only with networkPolicy.enabled.
+*/}}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ printf "%s-kube-apiserver" (include "kconmon-ng.fullname" . | trunc 48 | trimSuffix "-") }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - controller
+          {{- if and .Values.console.enabled (include "kconmon-ng.console.k8sIdentity" .) }}
+          - console
+          {{- end }}
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+{{- if or .Values.agent.hostNetwork .Values.controller.externalGateway.enabled }}
+{{- /*
+The same identity problem on ingress: a host-network agent registers from its node IP and a gateway
+behind a NodePort or an externalTrafficPolicy: Cluster LoadBalancer sees a node IP, and Cilium tags
+those remote-node (host on the controller's own node), which the networkPolicy.nodeCidrs and
+externalAgentCidrs ipBlocks never match. Controller only, and only the ports those peers use.
+*/}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ printf "%s-node-ingress" (include "kconmon-ng.fullname" . | trunc 50 | trimSuffix "-") }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  ingress:
+    - fromEntities:
+        - remote-node
+        - host
+      toPorts:
+        - ports:
+            {{- if .Values.agent.hostNetwork }}
+            - port: {{ .Values.config.grpcPort | quote }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.controller.externalGateway.enabled }}
+            - port: {{ .Values.controller.externalGateway.port | quote }}
+              protocol: TCP
+            {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

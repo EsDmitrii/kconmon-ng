@@ -17,13 +17,9 @@ spec:
   {{- end }}
   template:
     metadata:
-      {{- /* The CONFIG's fingerprint, so a values change restarts the pod that reads it.
-             The agent and the controller share kconmon-ng-config and read it ONCE at startup, and a
-             mounted ConfigMap changes under a running process without telling it. Helm updated the
-             object and left the pods on the old file: `controller.events.enabled: true` was applied
-             and the controller went on advertising no capabilities, so the Console's realtime
-             ingester retried forever against a stream that was configured but not running -- with no
-             error anywhere, because nothing was wrong except the generation of one file. */}}
+      {{- /* The config's fingerprint, so a values change restarts the pod that reads it: the agent
+             and the controller read kconmon-ng-config once at startup, and a mounted ConfigMap
+             changes under a running process without telling it. */}}
       {{- $annotations := dict "checksum/config" (include (print $.Template.BasePath "/shared/configmap.yaml") . | sha256sum) }}
       {{- if .Values.agent.zone }}
       {{- $_ := set $annotations "kconmon-ng.zone" .Values.agent.zone }}

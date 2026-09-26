@@ -22,7 +22,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/console/configmap.yaml") . | sha256sum }}
-        checksum/secret: {{ include (print $.Template.BasePath "/console/secrets.yaml") . | sha256sum }}
+        checksum/secret: {{ include "kconmon-ng.console.secrets" (dict "ctx" . "bootstrap" false) | sha256sum }}
       labels:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: console
@@ -117,6 +117,13 @@ spec:
           env:
             - name: KCONMON_NG_CONSOLE_CONFIG
               value: /etc/kconmon-ng-console/config.yaml
+            # Paces the GC against the container limit so argon2 garbage is collected before the OOM
+            # killer sees it. No divisor: GOMEMLIMIT reads a bare number as bytes.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: console
+                  resource: limits.memory
             {{- /* Fallback for an empty kubernetesContext/alerting namespace. */}}
             {{- if include "kconmon-ng.console.k8sIdentity" . }}
             - name: POD_NAMESPACE

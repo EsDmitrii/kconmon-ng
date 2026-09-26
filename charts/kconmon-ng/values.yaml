@@ -41,7 +41,7 @@ config:
   # Grace period before an agent without a heartbeat leaves the peer list; at least 10s (two
   # heartbeats). Never 0 — the controller refuses a non-positive TTL.
   controllerAgentTtl: 30s
-  # Per-protocol checkers; for an enabled one, interval and timeout must be > 0.
+  # Per-protocol checkers; for an enabled one, interval must be at least 100ms and timeout at least 1ms.
   checkers:
     # TCP dial to a peer's port (L4 reachability).
     tcp:
@@ -67,16 +67,20 @@ config:
     # older agent refuses the unknown key.
     pmtu:
       enabled: true
+      # Keep it at 28x timeout or more (14s at the default 500ms: the search gets half the interval
+      # and a black-hole search needs about fourteen datagram timeouts) and under 3m, so
+      # PathMTUBlackHole gets several probes in its 10m window; the agent warns outside that range.
       interval: 60s
       # Per datagram; the whole search is bounded by half the interval.
       timeout: 500ms
-      # IP-level bytes to probe at; 0 = the MTU of the interface that routes to the peer.
+      # IP-level bytes to probe at; 0 = the MTU of the route to the peer (a CNI route mtu such as
+      # Cilium's, else the egress device).
       size: 0
     # DNS resolution check.
     dns:
       enabled: true
       interval: 5s
-      timeout: 5s
+      timeout: 2s
       # Names to resolve; must be non-empty when the checker is enabled.
       hosts:
         - kubernetes.default.svc.cluster.local
@@ -107,7 +111,7 @@ config:
       deniedCidrs: []
       # Cap on operator-defined external targets per agent.
       maxTargets: 100
-      # Bounds resolve-and-authorise only, not the probe itself.
+      # Bounds resolve-and-authorise only, not the probe itself; 0 means 10s, anything else at least 1ms.
       timeout: 10s
 
 # Probe topology plan, part of the same shared config (rendered into the shared ConfigMap, read by
@@ -127,8 +131,8 @@ topology:
     # Ring successors per node over the sorted node-name circle; the ring is what guarantees the
     # plan stays connected.
     ringDegree: 2
-    # Cross-zone chords per (source zone, destination zone) pair, chosen by HRW hashing; they keep
-    # every directed zone pair measured so the zone metric family stays fully populated.
+    # Cross-zone peers each agent probes on top of the ring, 0-64, chosen by HRW hashing; 0 leaves
+    # zone coverage to whatever the ring happens to cross.
     zoneChords: 2
     # Fleets SMALLER than this many nodes get the full mesh regardless of mode; 0 means no such
     # floor. Sparse only pays for itself at scale, and a small fleet is better off measured whole.
@@ -195,13 +199,14 @@ agent:
   # It needs serviceMonitor.enabled and the chart refuses the combination otherwise; without the
   # operator, copy the equivalent metric_relabel_configs from docs/metrics.md into your own scrape
   # config. What each mode keeps, per DIRECTED NODE PAIR (N nodes make N*(N-1) of them):
-  #   full          ~75 series/pair — everything the agent exports.
-  #   counters-only ~12 series/pair — drops the four per-pair histograms (64 of the ~75); the
+  #   full          78 series/pair: everything the agent exports.
+  #   counters-only 14 series/pair: drops the four per-pair histograms (64 of the 78); the
   #                 loss/jitter gauges and result counters stay, so every pair alert keeps firing.
-  #   zone-only     ~0 series/pair — drops every series naming a destination node (histograms,
-  #                 gauges, counters, MTR). What remains is the zone family (~74 series per
-  #                 DIRECTED ZONE PAIR, so ~74*Z^2 for Z zones) plus the DNS/HTTP/external
-  #                 families, which are linear in node count.
+  #   zone-only     ~0 series/pair: drops every series naming a destination node (histograms,
+  #                 gauges, counters, MTR). What remains is the zone family (~76 series per
+  #                 DIRECTED ZONE PAIR, so ~76*Z^2 for Z zones) plus the DNS/HTTP/external
+  #                 families, which are linear in node count. Path MTU black holes then alert as
+  #                 ZonePathMTUBlackHole, per zone pair.
   # zone-only requires agents new enough to export the zone family, or Prometheus goes dark on the
   # mesh while the console (which does not scrape) keeps working.
   metrics:
@@ -240,11 +245,9 @@ agent:
     runAsUser: 65532
     seccompProfile:
       type: RuntimeDefault
-  # Render the net.ipv4.ping_group_range sysctl the unprivileged ICMP socket needs.
-  # It has its own switch because the only documented opt-out used to be
-  # `agent.podSecurityContext: null`, which deletes runAsNonRoot, runAsUser and
-  # seccompProfile with it -- precisely the keys a namespace enforcing restricted
-  # PSS demands, so opting out of the sysctl got the DaemonSet rejected at admission.
+  # Render the net.ipv4.ping_group_range sysctl the unprivileged ICMP socket needs. Its own switch,
+  # because opting out through `agent.podSecurityContext: null` would also drop runAsNonRoot,
+  # runAsUser and seccompProfile, which a namespace enforcing restricted PSS demands.
   pingGroupRange: true
   # Run the agents in the NODE's network namespace. Off by default; read this before flipping it.
   # It changes WHAT IS MEASURED for the whole DaemonSet, not only where the pods listen: every
@@ -316,8 +319,10 @@ controller:
       # Fixed port for type NodePort; 0 lets the apiserver pick one.
       nodePort: 0
       # Cluster | Local; empty leaves the apiserver default (Cluster). Local preserves the agents'
-      # source addresses — what networkPolicy.externalAgentCidrs matches on — at the cost of only
-      # the nodes running a controller pod answering.
+      # source addresses, which networkPolicy.externalAgentCidrs matches on and the gateway's flood
+      # eviction tells agents apart by, at the cost of only the nodes running a controller pod
+      # answering. Under Cluster every agent arrives from a node IP: prefer Local with tight
+      # externalAgentCidrs, or loadBalancerSourceRanges.
       externalTrafficPolicy: ""
       # Provider-enforced source filter for type LoadBalancer; the in-cluster half of the same
       # decision is networkPolicy.externalAgentCidrs.
@@ -380,9 +385,8 @@ console:
   # -- 7.1 core --
   enabled: false
   # Console replicas; the console is stateless.
-  # ONE by default, because the default has no redis. Two replicas without a shared bus is the state
-  # the redis block calls invalid, and `--set console.enabled=true` — the quickstart's own command —
-  # used to land straight in it. Raise this once redis.existingSecret is set; the chart refuses the
+  # One by default, because the default has no redis and replicas without a shared bus each keep
+  # their own sessions and budgets. Raise this once redis.existingSecret is set; the chart refuses the
   # combination otherwise.
   replicas: 1
   image:
@@ -448,7 +452,11 @@ console:
       userHeader: X-Remote-User
       groupsHeader: X-Remote-Groups
       groupsDelimiter: ","
-      # Required and non-empty for mode=header, else headers are an auth bypass.
+      # Required and non-empty for mode=header, else headers are an auth bypass. Header mode trusts
+      # identity headers ONLY from these: list the authenticating proxy, never the whole pod CIDR.
+      # For the client address behind an Ingress use console.clientAddress.trustedProxyCIDRs. This
+      # list stands in for it while that one is empty or the console image is older than 2.5.0,
+      # which is why it reaches the console config in every mode and values from 2.4 keep working.
       trustedProxyCIDRs: []
     # mode=oidc; requires a database, and redis.existingSecret for replicas > 1.
     oidc:
@@ -599,6 +607,14 @@ console:
     namespace: ""
     # Periodic relist backstop against a silently wedged watch.
     resyncInterval: 10m
+  # Proxies whose X-Forwarded-For gives the client address: the per-address login and OIDC budgets,
+  # the anonymous runs and PromQL budgets, the /ws address cap and the audit log. Never used for
+  # identity. Behind an Ingress, list the ingress controller's addresses (its pod CIDR at the
+  # widest), or every client shares its address and one budget; a pod inside the list can name any
+  # client address. Empty falls back to auth.header.trustedProxyCIDRs. Written to the console
+  # config only for images 2.5.0 or newer.
+  clientAddress:
+    trustedProxyCIDRs: []
   # Fixed-window request limits; 0 disables one, a negative value fails startup.
   rateLimit:
     # POST /api/v1/runs per subject per minute.
@@ -610,6 +626,17 @@ console:
     # POST /api/v1/promql/query[_range] per subject per minute; the proxy forwards arbitrary PromQL
     # to your Prometheus, and promql:query belongs to the viewer role.
     promqlPerMinute: 60
+  # Open /ws sockets per console replica; 0 disables one cap, a negative value fails startup. A socket
+  # over a cap is closed with 1013 and the browser reconnects with backoff. Written to the console
+  # config only for images 2.5.0 or newer: an older console refuses the unknown key.
+  websocket:
+    # Every socket on the replica.
+    maxConnections: 1024
+    # Sockets from one client address; behind an ingress that is the ingress unless
+    # clientAddress.trustedProxyCIDRs (or, while it is empty, auth.header.trustedProxyCIDRs) names it.
+    maxConnectionsPerAddress: 256
+    # Sockets of one user or API token; anonymous callers are held by the per-address cap.
+    maxConnectionsPerSubject: 32
 
   # -- 7.6 console workload plumbing --
   # fsGroup lets the nonroot console read the root-owned Secret files.
@@ -637,22 +664,49 @@ console:
     # 0.0.0.0/0 — a selector cannot match a Prometheus outside the cluster, so the ipBlock is what
     # makes an external one reachable at all. Set this to scope it.
     prometheusEgress: []
+    # The pod port behind console.prometheus.url when the URL names a Service whose targetPort
+    # differs from its port (the Bitnami Thanos chart: Service 9090, pod 10902). Calico, Cilium and
+    # Antrea see the pod port after the Service DNAT, so the default rule above then opens both.
+    # 0 opens only the URL's port; ignored when prometheusEgress is set.
+    prometheusTargetPort: 0
     # Egress to the Redis-compatible bus. Empty renders a default allowing
     # TCP 6379; override for a TLS endpoint, a sentinel quorum or a managed
-    # service.
+    # service. The policy sees the pod port: a Service mapping 6379 to another targetPort needs
+    # this set on the pod port.
     redisEgress: []
-    # Empty renders a default allowing TCP 5432.
+    # Empty renders a default allowing TCP 5432. As with redisEgress, a Service whose targetPort is
+    # not 5432 needs this set on the pod port.
     databaseEgress: []
-    # Empty renders a default allowing TCP 443 to 0.0.0.0/0: an IdP is normally outside the cluster,
-    # so there is no namespace the chart could scope this to. Set it to name yours.
+    # Empty renders TCP 443 to 0.0.0.0/0 (minus networkPolicy.clusterCIDRs) and to any pod: the
+    # ipBlock for an IdP outside the cluster, the selector for one behind an in-cluster ingress
+    # controller listening on 443. An IdP pod reached through its Service (Keycloak on 8080 or 8443)
+    # needs a rule on the pod's own port on every CNI, and a set list replaces the default, e.g.
+    #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: keycloak}}}]
+    #     ports: [{protocol: TCP, port: 8443}]
+    #   - to: [{ipBlock: {cidr: 0.0.0.0/0}}]
+    #     ports: [{protocol: TCP, port: 443}]
     oidcEgress: []
-    # Empty renders a default allowing TCP 443/6443 to 0.0.0.0/0.
+    # Empty renders a default allowing TCP 443/6443 to 0.0.0.0/0, without the clusterCIDRs carve-out:
+    # on Calico and Antrea that keeps every pod on 443/6443 open to the console, so name the
+    # apiserver endpoint here to close it. On Cilium that ipBlock does not match the apiserver, see
+    # networkPolicy.ciliumKubeAPIEgress.
     kubeAPIEgress: []
-    # Empty renders a default allowing TCP 443 to 0.0.0.0/0 for the geoipupdate sidecar.
+    # Empty renders TCP 443 to 0.0.0.0/0 (minus networkPolicy.clusterCIDRs) for the geoipupdate
+    # sidecar.
     geoipEgress: []
     # Webhook delivery, when a webhook encryption key is configured
     # (console.webhooks.existingSecret, or console.webhooks.secret.create).
-    # Empty renders TCP 443/80 to 0.0.0.0/0.
+    # Empty renders TCP 443/80 to 0.0.0.0/0 minus networkPolicy.clusterCIDRs. On Cilium that ipBlock
+    # matches only off-cluster receivers; on Calico and Antrea it matches pod IPs too unless
+    # clusterCIDRs carves them out. A receiver running as a pod needs a selector peer on the pod's
+    # own port on both (Cilium never matches a pod against an ipBlock, Calico sees the pod port after
+    # kube-proxy's DNAT), and a set list replaces the default, so keep an ipBlock rule for external
+    # receivers too, e.g.
+    #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: alerting}},
+    #           podSelector: {matchLabels: {app: webhook-receiver}}}]
+    #     ports: [{protocol: TCP, port: 8080}]
+    #   - to: [{ipBlock: {cidr: 0.0.0.0/0}}]
+    #     ports: [{protocol: TCP, port: 443}]
     webhookEgress: []
   service:
     type: ClusterIP
@@ -715,6 +769,7 @@ scrapeConfig:
     labels: {}
     # Empty means <agent fullname>-external, i.e. <release>-agent-external for a release named
     # kconmon-ng. Keep "kconmon" in it: dashboards/overview.json filters job=~".*kconmon.*".
+    # KconmonExternalAgentDown follows this name whatever it is.
     jobName: ""
     # How often Prometheus re-reads the target list; matches config.controllerAgentTtl.
     refreshInterval: 30s
@@ -739,11 +794,16 @@ prometheusRule:
     for: 5m
     severity: warning
   # Full-size datagrams lost without ICMP frag-needed on a pair: an MTU black hole. Reads the pmtu
-  # results that agents 2.5.0+ export; on older agents the rule is silently inert.
+  # results that agents 2.5.0+ export; on older agents the rule is silently inert. The same knobs
+  # drive ZonePathMTUBlackHole, the zone-pair variant that fires only where Prometheus holds no
+  # per-pair pmtu series (agent.metrics.detail=zone-only).
   pathMtuBlackHole:
     enabled: true
-    # Failure ratio of path MTU probes, 0.0-1.0.
+    # Failure ratio of path MTU probes over 10m, 0.0-1.0.
     threshold: 0.5
+    # Failure ratio over 30m, 0.0-1.0, that also pages while a probe failed in the last 10m: a
+    # black hole on one of several ECMP paths fails only the probes hashed onto it. 1 turns it off.
+    sustainedThreshold: 0.1
     for: 5m
     severity: warning
   # Most peers fail TCP to one node: one alert instead of a pair alert per peer.
@@ -790,8 +850,10 @@ prometheusRule:
     for: 5m
     severity: warning
   # Packet loss between a zone pair, from the sent/received counters. Lower default than the
-  # per-pair UDPLossHigh: the zone aggregate dilutes any single link by the pair count, so
-  # sustained loss at this level means the fabric, not one node.
+  # per-pair UDPLossHigh: the zone aggregate dilutes any single link by the pair count N, so one
+  # dead link reads about 1/N. Below about 10 node pairs between two zones (up to 8 for a UDP-only
+  # break) that alone crosses 0.1 and this fires next to UDPLossHigh; raise it there if you
+  # want it to mean the fabric, not one link. zoneChecksFailing has the same arithmetic.
   zoneLossHigh:
     enabled: true
     # Loss ratio, 0.0-1.0.
@@ -810,8 +872,8 @@ prometheusRule:
     severity: critical
   # An external agent the controller's SD endpoint lists but Prometheus cannot scrape: up == 0 on
   # a job whose name contains "agent-external" (the scrapeConfig.externalAgents default, and the
-  # plain-Prometheus job in docs/external-agents.md). Off by default: the job only exists with one
-  # of those.
+  # plain-Prometheus job in docs/external-agents.md) or on scrapeConfig.externalAgents.jobName.
+  # Off by default: the job only exists with one of those.
   externalAgentDown:
     enabled: false
     for: 5m
@@ -837,13 +899,26 @@ networkPolicy:
   enabled: false
   # Pod labels of the scraper itself; empty admits the whole prometheusNamespace on the metrics port.
   prometheusPodLabels: {}
-  # Namespace Prometheus scrapes from. REQUIRED for a scrape rule to render: the controller serves
-  # /metrics on the same port as its unauthenticated API, so "any namespace" would hand the whole
-  # cluster the fleet. Unset means no rule, and the scrape fails visibly (up = 0).
+  # Namespace Prometheus scrapes from. REQUIRED for the scrape rule on the agent, controller and
+  # console policies, whether the scrape comes from serviceMonitor, a PodMonitor or a plain scrape
+  # config; the rule opens config.metricsPort only, never the unauthenticated API port. Unset means
+  # no rule, and the scrape fails visibly (up = 0).
   prometheusNamespace: ""
-  # Apiserver egress, controller only (nothing else calls the apiserver). Empty renders TCP 443/6443
-  # to 0.0.0.0/0; name your endpoint here to tighten it.
+  # Apiserver egress, controller only (the agent has no apiserver client; the console has
+  # console.networkPolicy.kubeAPIEgress). Empty renders TCP 443/6443 to 0.0.0.0/0, which
+  # clusterCIDRs does not narrow: on Calico and Antrea every pod on 443/6443 stays open to the
+  # controller. Name your endpoint here to tighten it.
   kubeAPIEgress: []
+  # Cilium: also render a CiliumNetworkPolicy allowing TCP 443/6443 to the kube-apiserver entity for
+  # the controller, and for the console when it calls the apiserver. Under Cilium's default
+  # policy-cidr-match-mode no ipBlock matches that entity, so kubeAPIEgress and
+  # console.networkPolicy.kubeAPIEgress alone leave the controller NotReady and agents unregistered.
+  # Node IPs have the same problem (Cilium tags them remote-node and host), so with agent.hostNetwork
+  # or controller.externalGateway.enabled a second one admits those entities to the controller's
+  # gRPC and gateway ports, which nodeCidrs and externalAgentCidrs cannot do there.
+  # auto renders them when the cluster serves cilium.io/v2 CiliumNetworkPolicy (plain `helm template`
+  # needs --api-versions cilium.io/v2/CiliumNetworkPolicy to see it); true or false forces it.
+  ciliumKubeAPIEgress: auto
   # REQUIRED when the external checker is on, and the other half of
   # config.checkers.external.allowedCidrs: that one lets the agent try, this
   # one lets the packet leave.
@@ -853,7 +928,8 @@ networkPolicy:
   # policy default-denies controller ingress it does not name, so an empty list would let the chart
   # render a gateway no packet can reach — and it refuses to do that silently. Mind NAT: through a
   # NodePort or a LoadBalancer with externalTrafficPolicy: Cluster the source the policy sees is the
-  # NODE's own IP, so either cover the node CIDR here or use externalTrafficPolicy: Local.
+  # NODE's own IP, so either cover the node CIDR here or use externalTrafficPolicy: Local. On Cilium a
+  # node CIDR here matches nothing; networkPolicy.ciliumKubeAPIEgress admits node sources instead.
   # [{cidr: 203.0.113.0/24}] shapes are not accepted — plain CIDR strings.
   externalAgentCidrs: []
   # Node CIDRs, opened on config.grpcPort toward the controller pods. REQUIRED when agent.hostNetwork
@@ -861,14 +937,37 @@ networkPolicy:
   # leaves NetworkPolicy behaviour for hostNetwork pods undefined; the common implementation treats
   # their traffic as node traffic, which no podSelector matches, so every registration except the
   # agent on the controller's own node would be dropped while the config looks correct. The chart
-  # refuses to render that silently. Plain CIDR strings, as for externalAgentCidrs.
+  # refuses to render that silently. Plain CIDR strings, as for externalAgentCidrs. On Cilium this
+  # ipBlock matches nothing; networkPolicy.ciliumKubeAPIEgress admits the node identities instead.
   nodeCidrs: []
   # Source CIDRs of the EXTERNAL agents' probe traffic, spliced into the agent-to-agent rules in both
   # directions (UDP grpcPort, TCP httpPort, and the ports-less ICMP/MTR rule). The gateway rule covers
   # registration only, so without this an external agent registers fine and every cell between it
   # and the cluster stays red. Never spliced into the gateway rule. Plain CIDR strings.
   externalPeerCidrs: []
-  # Empty renders TCP 80/443 to 0.0.0.0/0 when the HTTP checker is on.
+  # Empty renders TCP 80/443 to 0.0.0.0/0 when the HTTP checker is on, minus clusterCIDRs. On Cilium
+  # that ipBlock matches only off-cluster targets; on Calico and Antrea it matches pod IPs too, so
+  # it opens every pod on 80/443 unless clusterCIDRs carves them out. An in-cluster target fails on
+  # both unless a selector peer names the pod's own port, not the Service's: Cilium never matches a
+  # pod against an ipBlock, and Calico sees the pod port after kube-proxy's DNAT. A set list replaces
+  # the default, so keep an ipBlock rule for external targets too, e.g.
+  #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}},
+  #           podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}}]
+  #     ports: [{protocol: TCP, port: 3000}]
+  #   - to: [{ipBlock: {cidr: 0.0.0.0/0}}]
+  #     ports: [{protocol: TCP, port: 443}]
   httpEgress: []
+  # Pod and Service CIDRs (IPv4) carved out of the default 0.0.0.0/0 rules meant for off-cluster
+  # peers: httpEgress, console webhookEgress, oidcEgress and geoipEgress, not the kubeAPIEgress
+  # defaults. Needed on Calico and Antrea, where that ipBlock also matches pod IPs; Cilium never
+  # matches pods against it. Network addresses only (no host bits, no /0). e.g.
+  # [10.244.0.0/16, 10.96.0.0/12]
+  clusterCIDRs: []
   # Egress to DNS resolvers outside the cluster (config.checkers.dns.resolvers).
   resolverEgress: []
+  # Cluster DNS egress for the agent, controller and console policies. Empty renders UDP/TCP 53 to
+  # any pod in any namespace. A namespaceSelector never matches a host-network resolver, so with
+  # NodeLocal DNSCache list its address, e.g. [{to: [{ipBlock: {cidr: 169.254.20.10/32}},
+  # {namespaceSelector: {}}], ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]}].
+  # Set, it replaces the default rule.
+  dnsEgress: []

@@ -11,12 +11,57 @@ NAMESPACE_APP="default"
 log() { printf '\n\033[1;34m>>> %s\033[0m\n' "$1"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
 
+# Every kubectl and helm call goes to the profile's own context, never the current one: rerunning
+# `up` or `smoke` after switching kubectl to another cluster must not install into that cluster.
+kubectl() { command kubectl --context "$PROFILE" "$@"; }
+helm() { command helm --kube-context "$PROFILE" "$@"; }
+
+# Local ends of the smoke port-forwards.
+CONTROLLER_PORT=18080
+AGENT_PORT=18081
+CONSOLE_PORT=18082
+GRAFANA_PORT=13000
+
+# free_port PORT stops a leftover kubectl port-forward listening on PORT. Only that: a bare
+# `lsof -ti:PORT` also lists clients connected to the port, and anything else bound there.
+free_port() { lsof -a -t -c kubectl -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true; }
+
+# port_forward ARGS... starts `kubectl port-forward ARGS...` in the background and leaves its PID in
+# PF_PID. It calls kubectl itself, not the wrapper above: a backgrounded shell function runs in a
+# subshell, so $! would be that subshell and killing it would leave the forward running.
+PF_PIDS=()
+port_forward() {
+    command kubectl --context "$PROFILE" port-forward "$@" &
+    PF_PID=$!
+    PF_PIDS+=("$PF_PID")
+}
+stop_port_forwards() {
+    local pid
+    for pid in ${PF_PIDS[@]+"${PF_PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done
+}
+trap stop_port_forwards EXIT
+
+# start_forward NAMESPACE TARGET LOCAL:REMOTE frees LOCAL, starts the forward quietly (PID in
+# PF_PID) and waits up to 10s for it to accept a connection; non-zero if it never does.
+start_forward() {
+    local local_port=${3%%:*} _
+    free_port "$local_port"
+    port_forward -n "$1" "$2" "$3" >/dev/null 2>&1
+    for _ in $(seq 20); do
+        (: <"/dev/tcp/127.0.0.1/$local_port") 2>/dev/null && return 0
+        sleep 0.5
+    done
+    return 1
+}
+stop_forward() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
 check_deps() {
     local missing=()
     # openssl: the webhook encryption key. python3: JSON parsing in the smoke
-    # step (the console's API answers are objects, not greppable lines).
-    for cmd in minikube docker helm kubectl openssl python3 curl; do
-        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    # step (the console's API answers are objects, not greppable lines). lsof:
+    # free_port, which otherwise leaves a stale forward holding the port.
+    for cmd in minikube docker helm kubectl openssl python3 curl lsof; do
+        type -P "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
         err "Missing required tools: ${missing[*]}"
@@ -159,27 +204,40 @@ smoke_test() {
     kubectl logs "$controller_pod" -n "$NAMESPACE_APP" --tail=20
 
     # Port-forward to controller (distroless has no shell utils)
-    lsof -ti:18080 | xargs kill -9 2>/dev/null || true
-    kubectl port-forward -n "$NAMESPACE_APP" "$controller_pod" 18080:8080 &
-    local ctrl_pf=$!
-    sleep 2
+    start_forward "$NAMESPACE_APP" "$controller_pod" "$CONTROLLER_PORT:8080" \
+        || fail "controller port-forward on :$CONTROLLER_PORT never accepted a connection"
+    local ctrl_pf=$PF_PID
 
     log "Testing /healthz..."
-    curl -sf http://localhost:18080/healthz && echo " OK" || echo " FAIL"
+    if curl -sf "http://localhost:$CONTROLLER_PORT/healthz" >/dev/null; then
+        pass "controller /healthz"
+    else
+        fail "controller /healthz"
+    fi
 
     log "Testing /readyz..."
-    curl -sf http://localhost:18080/readyz && echo " OK" || echo " FAIL"
+    if curl -sf "http://localhost:$CONTROLLER_PORT/readyz" >/dev/null; then
+        pass "controller /readyz"
+    else
+        fail "controller /readyz"
+    fi
 
     log "Testing /api/v1/topology..."
-    curl -sf http://localhost:18080/api/v1/topology | python3 -m json.tool 2>/dev/null | head -40 || echo " FAIL"
+    local topology
+    if topology=$(curl -sf "http://localhost:$CONTROLLER_PORT/api/v1/topology"); then
+        python3 -m json.tool <<<"$topology" 2>/dev/null | head -40 || true
+        pass "controller /api/v1/topology"
+    else
+        fail "controller /api/v1/topology"
+    fi
     echo
 
     log "Testing controller /metrics (first 30 kconmon_ng lines)..."
     # || true: head closes the pipe early -> SIGPIPE (141) would kill the script under pipefail
-    curl -sf http://localhost:18080/metrics | grep "^kconmon_ng" | head -30 || true
+    curl -sf "http://localhost:$CONTROLLER_PORT/metrics" | grep "^kconmon_ng" | head -30 || true
     echo
 
-    kill "$ctrl_pf" 2>/dev/null; wait "$ctrl_pf" 2>/dev/null || true
+    stop_forward "$ctrl_pf"
 
     # Port-forward to first agent
     local agent_pod
@@ -188,16 +246,15 @@ smoke_test() {
         -n "$NAMESPACE_APP" \
         -o jsonpath='{.items[0].metadata.name}')
 
-    lsof -ti:18081 | xargs kill -9 2>/dev/null || true
-    kubectl port-forward -n "$NAMESPACE_APP" "$agent_pod" 18081:8080 &
-    local agent_pf=$!
-    sleep 2
+    start_forward "$NAMESPACE_APP" "$agent_pod" "$AGENT_PORT:8080" \
+        || fail "agent port-forward on :$AGENT_PORT never accepted a connection"
+    local agent_pf=$PF_PID
 
     log "Agent $agent_pod metrics (first 30 kconmon_ng lines)..."
-    curl -sf http://localhost:18081/metrics | grep "^kconmon_ng" | head -30 || true
+    curl -sf "http://localhost:$AGENT_PORT/metrics" | grep "^kconmon_ng" | head -30 || true
     echo
 
-    kill "$agent_pf" 2>/dev/null; wait "$agent_pf" 2>/dev/null || true
+    stop_forward "$agent_pf"
 
     log "Agent logs (last 20 lines):"
     kubectl logs "$agent_pod" -n "$NAMESPACE_APP" --tail=20
@@ -205,9 +262,6 @@ smoke_test() {
 
 # --- Console smoke -----------------------------------------------------------
 
-# Local port for the console port-forward (18080 controller, 18081 agent,
-# 13000 Grafana are already taken above).
-CONSOLE_PORT=18082
 # The ONE PrometheusRule object the console owns. The chart default
 # (console.alerting.bundleName), left unset in hack/values-local.yaml on
 # purpose -- changing it there means changing it here.
@@ -275,10 +329,9 @@ smoke_console() {
     fi
 
     API_BODY=$(mktemp)
-    lsof -ti:"$CONSOLE_PORT" | xargs kill -9 2>/dev/null || true
-    kubectl port-forward -n "$NAMESPACE_APP" "$console_pod" "$CONSOLE_PORT:8080" >/dev/null 2>&1 &
-    local console_pf=$!
-    sleep 3
+    start_forward "$NAMESPACE_APP" "$console_pod" "$CONSOLE_PORT:8080" \
+        || fail "console port-forward on :$CONSOLE_PORT never accepted a connection"
+    local console_pf=$PF_PID
 
     local status probe
     for probe in healthz readyz; do
@@ -304,7 +357,7 @@ smoke_console() {
 
     alerting_round
 
-    kill "$console_pf" 2>/dev/null; wait "$console_pf" 2>/dev/null || true
+    stop_forward "$console_pf"
     rm -f "$API_BODY"
 }
 
@@ -397,12 +450,11 @@ check_prometheus() {
 import_dashboards() {
     log "Importing Grafana dashboards..."
 
-    lsof -ti:13000 | xargs kill -9 2>/dev/null || true
-    kubectl port-forward -n "$NAMESPACE_MONITORING" svc/monitoring-grafana 13000:80 &
-    local pf_pid=$!
-    sleep 3
+    start_forward "$NAMESPACE_MONITORING" svc/monitoring-grafana "$GRAFANA_PORT:80" \
+        || echo "  ✗ Grafana port-forward on :$GRAFANA_PORT never accepted a connection"
+    local pf_pid=$PF_PID
 
-    local grafana_url="http://localhost:13000"
+    local grafana_url="http://localhost:$GRAFANA_PORT"
     local ok=0 fail=0
 
     for f in "$PROJECT_DIR"/dashboards/*.json; do
@@ -413,7 +465,8 @@ import_dashboards() {
             -H "Content-Type: application/json" \
             -u admin:admin \
             -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null)
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null) \
+            || status="no JSON answer from Grafana"
 
         if [[ "$status" == "success" ]]; then
             echo "  ✓ $name"
@@ -424,7 +477,7 @@ import_dashboards() {
         fi
     done
 
-    kill "$pf_pid" 2>/dev/null; wait "$pf_pid" 2>/dev/null || true
+    stop_forward "$pf_pid"
 
     log "Dashboards imported: $ok ok, $fail failed"
 }
@@ -433,20 +486,20 @@ show_access() {
     log "Access URLs (run these in separate terminals):"
     echo
     echo "  Grafana (admin/admin):"
-    echo "    kubectl port-forward -n $NAMESPACE_MONITORING svc/monitoring-grafana 3000:80"
+    echo "    kubectl --context $PROFILE port-forward -n $NAMESPACE_MONITORING svc/monitoring-grafana 3000:80"
     echo "    http://localhost:3000"
     echo
     echo "  Prometheus:"
-    echo "    kubectl port-forward -n $NAMESPACE_MONITORING svc/monitoring-kube-prometheus-prometheus 9090:9090"
+    echo "    kubectl --context $PROFILE port-forward -n $NAMESPACE_MONITORING svc/monitoring-kube-prometheus-prometheus 9090:9090"
     echo "    http://localhost:9090"
     echo
     echo "  kconmon-ng Controller:"
-    echo "    kubectl port-forward -n $NAMESPACE_APP svc/kconmon-ng-controller 8080:8080"
+    echo "    kubectl --context $PROFILE port-forward -n $NAMESPACE_APP svc/kconmon-ng-controller 8080:8080"
     echo "    http://localhost:8080/api/v1/topology"
     echo "    http://localhost:8080/metrics"
     echo
     echo "  kconmon-ng Console (anonymous auth, admin role - no login):"
-    echo "    kubectl port-forward -n $NAMESPACE_APP svc/kconmon-ng-console 8081:8080"
+    echo "    kubectl --context $PROFILE port-forward -n $NAMESPACE_APP svc/kconmon-ng-console 8081:8080"
     echo "    http://localhost:8081/            # overview"
     echo "    http://localhost:8081/matrix      # node-to-node matrix"
     echo "    http://localhost:8081/investigate # per-pair drilldown, MTR traces"

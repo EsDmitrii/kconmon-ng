@@ -783,7 +783,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (source_zone, destination_zone) (increase(kconmon_ng_mtr_triggered_total[1h])) or 0 * sum by (source_zone, destination_zone) (kconmon_ng_zone_udp_results_total)",
+          "expr": "sum by (source_zone, destination_zone) (increase(kconmon_ng_mtr_triggered_total[1h])) or 0 * sum by (source_zone, destination_zone) ({__name__=~\"kconmon_ng_zone_(tcp|udp|icmp|pmtu)_results_total\"})",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -1266,7 +1266,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_tcp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1278,7 +1278,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_tcp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "B",
           "instant": false,
           "range": true,
@@ -1664,7 +1664,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[15m])))",
+          "expr": "sort_desc(histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[15m]))))",
           "refId": "A",
           "instant": true,
           "range": false,

@@ -32,6 +32,17 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
+{{/* A Go duration in nanoseconds, as a float; the schema has already checked the spelling. */}}
+{{- define "kconmon-ng.durationNanos" -}}
+{{- $units := dict "ns" 1.0 "us" 1000.0 "µs" 1000.0 "μs" 1000.0 "ms" 1000000.0 "s" 1000000000.0 "m" 60000000000.0 "h" 3600000000000.0 -}}
+{{- $total := 0.0 -}}
+{{- range regexFindAll "([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)" (toString .) -1 -}}
+{{- $num := regexFind "^[0-9.]+" . -}}
+{{- $total = addf $total (mulf (float64 $num) (get $units (trimPrefix $num .))) -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}
+
 {{/* Selector labels. */}}
 {{- define "kconmon-ng.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kconmon-ng.name" . }}
@@ -53,13 +64,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Component names, TRUNCATED SO THE SUFFIX SURVIVES.
-
-`fullname` is capped at 63 and the templates used to append "-agent"/"-controller" to it, so a
-release name of ~52 characters produced a Service name of 69-74 — and a Service name is a DNS-1035
-label, hard-capped at 63 by the API server. The install failed at apply time on a name the chart had
-already decided to use. Truncating the BASE keeps the component word, which is the half that carries
-meaning; truncating the whole string would leave "…-controll".
+Component names, truncated so the suffix survives: a Service name is a DNS-1035 label capped at 63,
+and truncating the base keeps the component word ("-controller", not "…-controll").
 */}}
 {{- define "kconmon-ng.agent.fullname" -}}
 {{- printf "%s-agent" (include "kconmon-ng.fullname" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
@@ -74,8 +80,8 @@ meaning; truncating the whole string would leave "…-controll".
 {{- printf "%s-console" (include "kconmon-ng.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Non-empty when the console has a database: a DSN Secret referenced or chart-created. There is
-     no mode any more — the chart does not install PostgreSQL, it dials the one you configured. */}}
+{{/* Non-empty when the console has a database: a DSN Secret referenced or chart-created. The chart
+     installs no PostgreSQL; it dials the one you configured. */}}
 {{- define "kconmon-ng.console.hasDatabase" -}}
 {{- $db := .Values.database | default dict -}}
 {{- if or $db.existingSecret (dig "secret" "create" false $db) -}}true{{- end -}}
@@ -95,16 +101,10 @@ meaning; truncating the whole string would leave "…-controll".
 {{- include "kconmon-ng.secretRef" (dict "existing" $r.existingSecret "secret" $r.secret "path" "redis" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "redis-dsn"))) -}}
 {{- end }}
 
-{{/* Port the console's Prometheus egress rule opens, read out of console.prometheus.url the way the
-     Valkey one reads its address: an explicit :port wins, otherwise the scheme's own default. The
-     rule used to hardcode 9090, so a Thanos on 10902 or an https endpoint on 443 was configured
-     correctly and then blocked by the policy — every matrix, Explore and PromQL page timing out
-     against a URL that was right.
-
-     BOTH schemes have a default: https is 443 and http is 80. Only https was handled, so
-     `http://prometheus.internal` — a Prometheus or Thanos behind an in-cluster ingress — fell through
-     to the 9090 fallback and was blocked in exactly the way this helper exists to prevent. 9090 is
-     kept for a URL with no scheme at all, where there is nothing to derive from. */}}
+{{/* Port the console's Prometheus egress rule opens, read out of console.prometheus.url: an explicit
+     :port wins, else 443 for https and 80 for http, and 9090 for a URL with no scheme. This is the
+     SERVICE port; a Service mapping it to another targetPort also needs
+     console.networkPolicy.prometheusTargetPort. */}}
 {{- define "kconmon-ng.console.prometheusEgressPort" -}}
 {{- $url := .Values.console.prometheus.url | default "" -}}
 {{- $rest := $url | replace "https://" "" | replace "http://" "" -}}
@@ -253,12 +253,9 @@ render rather than quietly widening the agent's RBAC.
 {{- end -}}
 {{- end }}
 
-{{/* Whether the geoip sources are live at all (enrichment on and a mode that provides files).
-
-     mode=auto with editions this chart cannot map to a path — a commercial subscriber asking for
-     GeoIP2-City and GeoIP2-ISP rather than the GeoLite2 pair — used to resolve to NOTHING here: no
-     sidecar, no volume, empty asnPath/cityPath, and geoip enrichment silently off behind a mode that
-     says otherwise. It fails the render instead, naming the three knobs that can fix it. */}}
+{{/* Whether the geoip sources are live at all (enrichment on and a mode that provides files). A
+     mode that promises files with no path the chart can derive (editions it cannot map, such as
+     GeoIP2-City) fails the render instead of running with enrichment silently off. */}}
 {{- define "kconmon-ng.console.geoipEnabled" -}}
 {{- $e := .Values.console.mtr.enrichment -}}
 {{- if ne (include "kconmon-ng.console.geoipMode" .) "disabled" -}}
@@ -267,12 +264,7 @@ render rather than quietly widening the agent's RBAC.
 {{- if or $asn $city -}}
 true
 {{- else -}}
-{{- /* The SAME refusal under mode=volume. It used to fire for auto only, so the identical state —
-       enrichment on, a mode that promises files, and no path the chart can derive — was a loud
-       failure one way and silence the other: a volume-mode console mounted the operator's PVC,
-       rendered empty asnPath/cityPath, and ran with hop enrichment off behind a mode that says it is
-       on. Nothing in the release, the config or the UI said which of the two it was. The mode is
-       named in the message so the operator knows which knob they set. */}}
+{{- /* One refusal for mode=auto and mode=volume; the message names the mode the operator set. */}}
 {{- fail (printf "console.mtr.enrichment.geoip.mode=%s but no database path can be derived: the chart maps only GeoLite2-ASN and GeoLite2-City to default paths, and console.mtr.enrichment.geoip.editions names neither. Add one of those editions, or point console.mtr.enrichment.geoip.asnPath / .cityPath at the files you supply" (include "kconmon-ng.console.geoipMode" .)) -}}
 {{- end -}}
 {{- end -}}
@@ -329,7 +321,7 @@ disabled
 {{- define "kconmon-ng.agent.metricRelabelings" -}}
 {{- if eq .Values.agent.metrics.detail "counters-only" -}}
 metricRelabelings:
-  # Drop only the four per-pair histograms — 64 of the ~70 series a directed pair costs.
+  # Drop only the four per-pair histograms: 64 of the 78 series a directed pair costs.
   # The prefix needs no regex escaping: the schema pins it to [a-z][a-z0-9_]*. The zone
   # histograms do not match, their names carry "zone_" between prefix and protocol.
   - sourceLabels: [__name__]
@@ -356,4 +348,45 @@ metricRelabelings:
      which keeps "kconmon" wherever the ServiceMonitor's job does (the dashboards filter on it). */}}
 {{- define "kconmon-ng.scrapeConfig.externalAgents.jobName" -}}
 {{- .Values.scrapeConfig.externalAgents.jobName | default (printf "%s-external" (include "kconmon-ng.agent.fullname" .)) -}}
+{{- end }}
+
+{{/* The default peer for off-cluster targets, with networkPolicy.clusterCIDRs carved out: on Calico
+     and Antrea an ipBlock also matches pod IPs, so 0.0.0.0/0 alone opens every pod on the port. */}}
+{{- define "kconmon-ng.offClusterIPBlock" -}}
+{{- /* The schema checks the shape; host bits need arithmetic, and the apiserver refuses such an
+       except at apply time, after the upgrade has already started. */ -}}
+{{- range $cidr := .Values.networkPolicy.clusterCIDRs }}
+{{- $prefix := atoi (last (splitList "/" $cidr)) }}
+{{- if eq $prefix 0 }}
+{{- fail (printf "networkPolicy.clusterCIDRs: %s is not a strict subset of 0.0.0.0/0, so the apiserver refuses it as an except entry; list the pod and Service CIDRs" $cidr) }}
+{{- end }}
+{{- range $i, $octet := splitList "." (first (splitList "/" $cidr)) }}
+{{- $netBits := min 8 (max 0 (sub $prefix (mul 8 $i))) }}
+{{- if mod (atoi $octet) (index (list 256 128 64 32 16 8 4 2 1) $netBits) }}
+{{- fail (printf "networkPolicy.clusterCIDRs: %s has bits set beyond its prefix length, which the apiserver refuses in an ipBlock; zero the host part (e.g. 10.244.1.0/16 is 10.244.0.0/16)" $cidr) }}
+{{- end }}
+{{- end }}
+{{- end }}
+- ipBlock:
+    cidr: 0.0.0.0/0
+    {{- with .Values.networkPolicy.clusterCIDRs }}
+    except:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}
+
+{{/* Cluster DNS egress, shared by the agent, controller and console policies. A namespaceSelector
+     selects pods only, so a host-network resolver (NodeLocal DNSCache) needs networkPolicy.dnsEgress. */}}
+{{- define "kconmon-ng.dnsEgress" -}}
+{{- if .Values.networkPolicy.dnsEgress -}}
+{{ toYaml .Values.networkPolicy.dnsEgress }}
+{{- else -}}
+- to:
+    - namespaceSelector: {}
+  ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+{{- end -}}
 {{- end }}

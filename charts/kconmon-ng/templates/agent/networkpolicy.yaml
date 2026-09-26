@@ -1,0 +1,138 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /* Agent pods only; the controller has its own policy in templates/controller/networkpolicy.yaml.
+       The peer rules here admit externalPeerCidrs and a ports-less rule, so selecting the controller
+       as well would open its unauthenticated API and in-cluster gRPC to those peers. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kconmon-ng.agent.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Agent to agent probes: the UDP probe server on grpcPort, and the TCP checker, which dials the PEER's httpPort and then GETs /readyz on it.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+        {{- /* External agents probe from outside the pod network: their CIDRs are peers in every
+               agent-to-agent rule, ingress and egress, and never in the gateway rule. */}}
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    # Inbound ICMP probes and reactive MTR: v1 ports accept only TCP/UDP/SCTP, so the rule omits
+    # ports. Not gated on config.checkers.icmp.enabled: MTR fires on any failed TCP/UDP/DNS probe.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+    {{- if .Values.networkPolicy.prometheusNamespace }}
+    # Prometheus scraping, config.metricsPort ONLY: the reasoning is on the controller's twin of
+    # this rule in templates/controller/networkpolicy.yaml.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
+        {{- with .Values.networkPolicy.prometheusPodLabels }}
+        # Narrower still when the operator can name the scraper's pod labels.
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.metricsPort }}
+    {{- end }}
+  egress:
+    # Agent to controller gRPC
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    # Agent to agent probes
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    # DNS
+    {{- include "kconmon-ng.dnsEgress" . | nindent 4 }}
+    # ICMP probes and reactive MTR: networking.k8s.io/v1 ports accept only TCP/UDP/SCTP, so this rule
+    # omits ports and allows every protocol to the agent peer. Ungated for the same reason as its
+    # ingress twin above: MTR runs whether or not the ICMP CHECKER is enabled.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+    {{- if .Values.config.checkers.external.enabled }}
+    {{- if not .Values.networkPolicy.externalEgress }}
+    {{- fail "config.checkers.external.enabled is true and networkPolicy.enabled is true but networkPolicy.externalEgress is empty: external targets take tcp/icmp/mtr on operator-chosen ports and NetworkPolicy v1 cannot express ICMP as a port rule, so the only default the chart could render is a ports-less rule to 0.0.0.0/0 — allow-everything egress, which it will not do silently. Set networkPolicy.externalEgress to the egress rules your targets need, scoped to config.checkers.external.allowedCidrs (e.g. [{to: [{ipBlock: {cidr: 10.0.0.0/8}}]}]; omit ports on an entry to allow ICMP to that peer), or ask for the old permissive shape explicitly with [{to: [{ipBlock: {cidr: 0.0.0.0/0}}]}]" }}
+    {{- end }}
+    # External checks leave the cluster; the chart renders only the rules named here, because it cannot guess ports it was never told about.
+    {{- toYaml .Values.networkPolicy.externalEgress | nindent 4 }}
+    {{- end }}
+    {{- if .Values.config.checkers.http.enabled }}
+    # HTTP checker targets; empty renders TCP 80/443 to 0.0.0.0/0.
+    {{- with .Values.networkPolicy.httpEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        {{- include "kconmon-ng.offClusterIPBlock" . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- end }}
+    {{- if .Values.config.checkers.dns.resolvers }}
+    {{- if not .Values.networkPolicy.resolverEgress }}
+    {{- fail "config.checkers.dns.resolvers names explicit resolvers and networkPolicy.enabled is true, but networkPolicy.resolverEgress is empty: the only port-53 egress this policy renders is `to: [{namespaceSelector: {}}]`, which selects PODS and can never match an address like 8.8.8.8 — under an enforcing CNI every DNS check against those resolvers times out while the config looks correct. Set networkPolicy.resolverEgress to the rules your resolvers need (e.g. [{to: [{ipBlock: {cidr: 8.8.8.8/32}}], ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]}]), or clear config.checkers.dns.resolvers to use the Pod's own resolver. This is the same refusal config.checkers.external gets, for the same reason." }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.resolverEgress }}
+    # Explicit DNS resolvers outside the cluster.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- /* networkPolicy.kubeAPIEgress is NOT spliced here: the agent has no apiserver client at all
+           (its Pod sets automountServiceAccountToken: false), and it is the most exposed component
+           in the deployment. The controller's own policy renders that rule. */}}
+{{- end }}

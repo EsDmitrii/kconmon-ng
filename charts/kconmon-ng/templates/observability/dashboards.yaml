@@ -6,7 +6,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ printf "%s-dashboard-%s" (include "kconmon-ng.fullname" $top) $name | trunc 63 | trimSuffix "-" }}
+  {{- /* The base is truncated, not the whole name: the dashboard name is what keeps the three apart. */}}
+  name: {{ printf "%s-dashboard-%s" (include "kconmon-ng.fullname" $top | trunc (int (sub 52 (len $name))) | trimSuffix "-") $name }}
   {{- with $.Values.dashboards.namespace }}
   namespace: {{ . }}
   {{- end }}

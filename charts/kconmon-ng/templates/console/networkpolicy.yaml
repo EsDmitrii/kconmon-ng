@@ -27,34 +27,17 @@ spec:
         - protocol: TCP
           port: {{ .Values.console.service.port }}
     {{- end }}
-    {{- if and .Values.serviceMonitor.enabled .Values.networkPolicy.prometheusNamespace }}
-    # Prometheus scraping the console's own /metrics.
-    #
-    # It is a SECOND rule rather than part of the one above, because the one above is the browser's
-    # and an operator who narrows it to their ingress controller is not saying anything about
-    # Prometheus. The main policy deliberately excludes the console from its own scrape rule
-    # (component NotIn [console]), so without this the ServiceMonitor rendered beside it scraped a
-    # port nothing could reach: up{job="…-console"} = 0, and every console metric — the audit drops,
-    # the rate-limit counters, the ingester health — silently absent.
-    #
-    # config.metricsPort ONLY, never the API port.
-    #
-    # The console used to serve /metrics on its API port, so this rule had to open that port — and a
-    # NetworkPolicy cannot say "this port, but only these paths". Admitting a scraper therefore
-    # admitted everything else in the scraper's namespace (on a real cluster: Grafana,
-    # node-exporter, kube-state-metrics, the operator) to the console's whole API, undoing exactly
-    # the narrowing console.networkPolicy.ingressFrom exists to express. /metrics now has a listener
-    # of its own and this rule opens that.
-    #
-    # RENDERED ONLY WITH networkPolicy.prometheusNamespace SET: with it unset the chart cannot name
-    # the scraper's namespace, so it opens nothing and the scrape fails visibly (up = 0).
+    {{- if .Values.networkPolicy.prometheusNamespace }}
+    # Prometheus scraping, config.metricsPort only: this rule admits a whole namespace, and the API
+    # port would undo the narrowing console.networkPolicy.ingressFrom expresses. A second rule, so
+    # narrowing ingressFrom says nothing about Prometheus. Rendered only with
+    # networkPolicy.prometheusNamespace set, like the agent and controller twins.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
         {{- with .Values.networkPolicy.prometheusPodLabels }}
-        # Narrower still when the operator can name the scraper's pod labels — the same knob the
-        # shared policy honours, which this rule used to ignore entirely.
+        # Narrower still when the operator can name the scraper's pod labels.
           podSelector:
             matchLabels:
               {{- toYaml . | nindent 14 }}
@@ -91,8 +74,7 @@ spec:
     {{- if .Values.console.networkPolicy.redisEgress }}
     {{- toYaml .Values.console.networkPolicy.redisEgress | nindent 4 }}
     {{- else }}
-    # Both peer kinds, for the same reason the external database rule above carries both: a
-    # namespaceSelector selects PODS and can never match an ElastiCache endpoint.
+    # Both peer kinds: a namespaceSelector selects PODS and can never match an ElastiCache endpoint.
     - to:
         - namespaceSelector: {}
         - ipBlock:
@@ -122,13 +104,14 @@ spec:
     {{- end }}
     {{- end }}
     {{- if eq .Values.console.auth.mode "oidc" }}
-    # Console to the OIDC IdP; ipBlock because an IdP is usually outside the cluster.
+    # Console to the OIDC IdP: the ipBlock for an IdP outside the cluster, the selector for one served
+    # by an in-cluster ingress controller on 443 (Cilium never matches a pod against an ipBlock).
     {{- if .Values.console.networkPolicy.oidcEgress }}
     {{- toYaml .Values.console.networkPolicy.oidcEgress | nindent 4 }}
     {{- else }}
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
+        - namespaceSelector: {}
+        {{- include "kconmon-ng.offClusterIPBlock" . | nindent 8 }}
       ports:
         - protocol: TCP
           port: 443
@@ -136,20 +119,25 @@ spec:
     {{- end }}
     # Console to Prometheus; tighten via console.networkPolicy.prometheusEgress.
     #
-    # The PORT comes from console.prometheus.url rather than a hardcoded 9090 (a Thanos on 10902 was
-    # configured correctly and then blocked here), and the peer set carries an ipBlock as well as the
-    # namespace selector, because a selector selects PODS and cannot match a Prometheus that lives
-    # outside the cluster.
+    # The port comes from console.prometheus.url, and the ipBlock covers a Prometheus outside the
+    # cluster, which a namespaceSelector cannot match. The policy matches the pod port after the
+    # Service DNAT, so a targetPort that differs from the URL's port needs prometheusTargetPort too.
     {{- if .Values.console.networkPolicy.prometheusEgress }}
     {{- toYaml .Values.console.networkPolicy.prometheusEgress | nindent 4 }}
     {{- else }}
+    {{- $promPort := include "kconmon-ng.console.prometheusEgressPort" . | int }}
+    {{- $promTargetPort := .Values.console.networkPolicy.prometheusTargetPort | default 0 | int }}
     - to:
         - namespaceSelector: {}
         - ipBlock:
             cidr: 0.0.0.0/0
       ports:
         - protocol: TCP
-          port: {{ include "kconmon-ng.console.prometheusEgressPort" . }}
+          port: {{ $promPort }}
+        {{- if and $promTargetPort (ne $promTargetPort $promPort) }}
+        - protocol: TCP
+          port: {{ $promTargetPort }}
+        {{- end }}
     {{- end }}
     {{- if include "kconmon-ng.console.k8sIdentity" . }}
     # Console to the apiserver on 443 and 6443; tighten via console.networkPolicy.kubeAPIEgress.
@@ -172,8 +160,7 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- else }}
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
+        {{- include "kconmon-ng.offClusterIPBlock" . | nindent 8 }}
       ports:
         - protocol: TCP
           port: 443
@@ -185,8 +172,7 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- else }}
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
+        {{- include "kconmon-ng.offClusterIPBlock" . | nindent 8 }}
       ports:
         - protocol: TCP
           port: 443
@@ -195,11 +181,5 @@ spec:
     {{- end }}
     {{- end }}
     # DNS
-    - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+    {{- include "kconmon-ng.dnsEgress" . | nindent 4 }}
 {{- end }}

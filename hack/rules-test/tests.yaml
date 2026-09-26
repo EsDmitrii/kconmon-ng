@@ -1,8 +1,8 @@
 ---
 # promtool test rules fixture. Purpose #1 is EVALUATION: every alert expression must evaluate
-# without an engine error against series carrying all metric families at once (the exact input
-# that collapsed the v2.3.0 zone rules). Purpose #2 is a positive proof per alert: crafted bad
-# data must actually fire it — an expression that silently matches nothing passes purpose #1.
+# without an engine error against series carrying all metric families at once (the input that
+# makes a __name__ union collide). Purpose #2 is a positive proof per alert: crafted bad data must
+# actually fire it — an expression that silently matches nothing passes purpose #1.
 rule_files:
   - RULES_FILE
 
@@ -52,9 +52,14 @@ tests:
         values: '0x40'
       - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b"}
         values: '1500x40'
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+1x40'
     alert_rule_test:
       - eval_time: 15m
         alertname: ZoneChecksFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ZonePathMTUBlackHole
         exp_alerts: []
       - eval_time: 15m
         alertname: ZoneLossHigh
@@ -128,18 +133,194 @@ tests:
               description: >-
                 UDP and ICMP probes from zone a to zone b have lost 100% of their
                 packets over the last 5m, above the 10% threshold. The ratio is
-                packet-weighted across every pair between the zones, so a single broken
-                link is diluted here and belongs to UDPLossHigh; this firing means the
-                fabric between the zones is losing traffic. Open the "kconmon-ng / Zone
-                Heatmap" Grafana dashboard to see whether the loss is one direction or
-                both, then the kconmon-ng console Matrix or Investigate page scoped to
-                these zones for the pair-level picture.
+                packet-weighted across every pair between the zones, so one broken link
+                weighs about 1/N of it with N node pairs between the zones: between small
+                zones a single link crosses the threshold on its own, and UDPLossHigh
+                names it. Open the "kconmon-ng / Zone Heatmap" Grafana dashboard to see
+                whether the loss is one direction or both, then the kconmon-ng console
+                Matrix or Investigate page scoped to these zones for the pair-level
+                picture.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+
+  # ── one pair of six UDP-blackholed: the zone ratios are not diluted enough to stay quiet ──
+  # The demo stand's first break, zone a (3 agents) -> zone c (2 nodes): 50/360 = 13.9% of the
+  # packets lost and 10/180 = 5.6% of the probes failed, above both defaults. The docs promise
+  # this for small zone pairs, so it is pinned rather than hidden.
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="fail",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+100x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+50x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+100x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+100x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+100x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+100x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+20x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+20x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ZoneChecksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: c
+            exp_annotations:
+              summary: Zone checks failing a -> c at 5.556% of probes
+              description: >-
+                5.556% of all TCP, UDP and ICMP probes from zone a to zone c failed
+                over the last 5m, above the 5% threshold. This is the
+                zone-level aggregate, so it keeps firing under the agent.metrics.detail
+                scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
+                Heatmap" Grafana dashboard to see which protocol carries the failures
+                and whether the whole fabric between the zones or only one direction is
+                affected, then the kconmon-ng console Matrix or Investigate page to find
+                the node pairs pulling the ratio up — in zone-only mode the per-pair
+                evidence lives in the console, not in Prometheus.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->c
+      - eval_time: 15m
+        alertname: ZoneLossHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: c
+            exp_annotations:
+              summary: Packet loss a -> c at 13.89%
+              description: >-
+                UDP and ICMP probes from zone a to zone c have lost 13.89% of their
+                packets over the last 5m, above the 10% threshold. The ratio is
+                packet-weighted across every pair between the zones, so one broken link
+                weighs about 1/N of it with N node pairs between the zones: between small
+                zones a single link crosses the threshold on its own, and UDPLossHigh
+                names it. Open the "kconmon-ng / Zone Heatmap" Grafana dashboard to see
+                whether the loss is one direction or both, then the kconmon-ng console
+                Matrix or Investigate page scoped to these zones for the pair-level
+                picture.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->c
+
+  # ── one pair of twenty UDP-blackholed: diluted below both defaults ──
+  # 5 x 4 nodes: 50/1200 = 4.2% lost and 10/600 = 1.7% failed, so one link stays with UDPLossHigh.
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0+30x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="fail",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+150x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p1"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p2"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p2"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p3"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p3"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p4"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p4"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p4"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p4"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p4"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p4"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p4"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="c",result="success",pod="p5"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="c",result="success",pod="p5"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="c",result="success",pod="p5"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="c",pod="p5"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="c",pod="p5"}
+        values: '0+200x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="c",pod="p5"}
+        values: '0+40x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="c",pod="p5"}
+        values: '0+40x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ZoneChecksFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ZoneLossHigh
+        exp_alerts: []
 
   # ── one external agent must not mask one missing in-cluster agent ──
   # Three schedulable nodes, three registered agents, one of them external: only two in-cluster
-  # agents are present, so exactly one is missing. The old expression (expected - registered)
-  # read this as zero and stayed silent.
+  # agents are present, so exactly one is missing.
   - interval: 30s
     input_series:
       - series: kconmon_ng_controller_expected_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
@@ -235,6 +416,40 @@ tests:
                 The kconmon-ng console keeps showing the node while it registers, so its probe
                 results tell whether the host itself is healthy.
 
+  # ── the same, under scrapeConfig.externalAgents.jobName=bare.hosts (render-and-test.sh) ──
+  # The custom job lacks "agent-external"; the dot is matched literally, so bareXhosts stays quiet.
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: up{job="bare.hosts",instance="10.20.30.41:9091",node="edge-host-02",zone="external",external="true",agent_id="edge-host-02-edge-host-02"}
+        values: '0x40'
+      # yamllint disable-line rule:line-length
+      - series: up{job="bareXhosts",instance="10.20.30.42:9091",node="edge-host-03",zone="external",external="true",agent_id="edge-host-03-edge-host-03"}
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KconmonExternalAgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: bare.hosts
+              instance: 10.20.30.41:9091
+              node: edge-host-02
+              zone: external
+              external: "true"
+              agent_id: edge-host-02-edge-host-02
+            exp_annotations:
+              summary: External kconmon-ng agent edge-host-02 is not answering scrapes
+              description: >-
+                Prometheus discovered edge-host-02 at 10.20.30.41:9091 (zone external) through
+                the controller's SD endpoint and has not scraped it successfully for 5m. The
+                agent still registers with the gateway, otherwise the target would have left the
+                list, so the usual cause is the host firewall or the monitoring namespace's egress
+                policy blocking the metrics port; on most CNIs Prometheus egress is NATed to a
+                node IP, so the host must admit the node CIDR rather than the Prometheus pod IP.
+                The kconmon-ng console keeps showing the node while it registers, so its probe
+                results tell whether the host itself is healthy.
+
   # ── MTU black hole n1 -> n2: full-size probes fail, 1400 bytes cross, TCP is fine ──
   - interval: 30s
     input_series:
@@ -250,7 +465,14 @@ tests:
       # yamllint disable-line rule:line-length
       - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
         values: '0+10x40'
+      # The zone family fails as well; with per-pair series present the pair rule names the nodes
+      # and the zone rule stays quiet.
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+1x40'
     alert_rule_test:
+      - eval_time: 15m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts: []
       - eval_time: 15m
         alertname: PathMTUBlackHole
         exp_alerts:
@@ -263,15 +485,60 @@ tests:
             exp_annotations:
               summary: Path MTU black hole n1 -> n2, only 1400-byte datagrams cross
               description: >-
-                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no
-                ICMP frag-needed while 1400-byte ones cross, in more than 50% of path MTU
-                probes over the last 10m. Small packets and TCP handshakes still work, so
-                the other pair alerts stay quiet while large transfers stall. Compare the
-                interface MTU on both nodes with the encapsulation overhead of the CNI
-                (VXLAN and Geneve take 50 bytes, WireGuard 60 to 80) and check whether ICMP
-                type 3 code 4 is filtered on the path.
+                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no ICMP
+                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
+                over the last 10m, or in more than 10% over the last 30m, at least two of them,
+                with one in the last 10m, which is what a black hole on one of several ECMP
+                paths looks like. Small packets and TCP handshakes still work, so the other
+                pair alerts stay quiet while large transfers stall. Compare the interface MTU
+                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
+                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
+                on the path.
       - eval_time: 15m
         alertname: TCPChecksFailing
+        exp_alerts: []
+
+  # ── zone-only scrape: no per-pair series, full-size probes a -> b fail, TCP and UDP stay green ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+2x40'
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0x40'
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="b",destination_zone="a",result="success",pod="p2"}
+        values: '0+2x40'
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: Path MTU black hole zone a -> zone b in 100% of probes
+              description: >-
+                100% of path MTU probes from zone a to zone b lost their full-size datagram
+                with no ICMP frag-needed: more than 50% over the last 10m, or more than 10%
+                over the last 30m, at least two of them, with one in the last 10m, which is one
+                black-holed path among several ECMP next hops. This zone-level rule fires only
+                while Prometheus holds no per-pair path MTU series for the zone pair, as under
+                agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node
+                pairs. The ratio is probe-weighted across every pair between the zones, so one
+                black-holed pair among many is diluted here. Compare the interface MTU on the
+                nodes of both zones with the encapsulation overhead of the CNI and check
+                whether ICMP type 3 code 4 is filtered between them; the kconmon-ng console
+                Matrix or Investigate page shows the node pairs.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->b
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ZoneChecksFailing
         exp_alerts: []
 
   # ── peer down: pmtu counters flat (unreachable writes nothing), the stale gauge must not fire ──
@@ -291,7 +558,265 @@ tests:
         alertname: PathMTUBlackHole
         exp_alerts: []
 
-  # ── node n3 dark: n1, n2, n4 all fail TCP to it, n3 exports nothing; one NodeUnreachable ──
+  # ── reduced n1 -> n2 (1400, every probe succeeds) next to a black hole n1 -> n3: one alert, n3 ──
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1400x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n3",source_zone="a",destination_zone="c",result="fail",pod="p1"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n3",source_zone="a",destination_zone="c",result="success",pod="p1"}
+        values: '0x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n3",source_zone="a",destination_zone="c",pod="p1"}
+        values: '1400x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              destination_node: n3
+              source_zone: a
+              destination_zone: c
+            exp_annotations:
+              summary: Path MTU black hole n1 -> n3, only 1400-byte datagrams cross
+              description: >-
+                Full-size datagrams from n1 (zone a) to n3 (zone c) are lost with no ICMP
+                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
+                over the last 10m, or in more than 10% over the last 30m, at least two of them,
+                with one in the last 10m, which is what a black hole on one of several ECMP
+                paths looks like. Small packets and TCP handshakes still work, so the other
+                pair alerts stay quiet while large transfers stall. Compare the interface MTU
+                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
+                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
+                on the path.
+
+  # ── ECMP split, 3 paths: one probe in three hashes onto the black-holed next hop (1 probe/min) ──
+  # ── the fail ratio sits at 1/3 and the gauge flips back to 1500 whenever the last probe crossed ──
+  - interval: 1m
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: >-
+          0x2 1x2 2x2 3x2 4x2 5x2 6x2 7x2 8x2 9x2 10x2 11x2 12x2 13x2 14x2 15x2 16x2 17x2 18x2 19x2 20
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: >-
+          0 1 2x1 3 4x1 5 6x1 7 8x1 9 10x1 11 12x1 13 14x1 15 16x1 17 18x1 19 20x1 21 22x1 23 24x1 25 26x1
+          27 28x1 29 30x1 31 32x1 33 34x1 35 36x1 37 38x1 39 40x1
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: >-
+          1500x2 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400
+          1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400
+          1500x1 1400 1500x1 1400 1500x1 1400 1500x1 1400
+    alert_rule_test:
+      # The last probe (minute 32) crossed at full size: the alert still names the size that crossed
+      # on the bad path, not the 1500 the gauge reads right now.
+      - eval_time: 32m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels: &ecmp_labels
+              severity: warning
+              source_node: n1
+              destination_node: n2
+              source_zone: a
+              destination_zone: b
+            exp_annotations: &ecmp_annotations
+              summary: Path MTU black hole n1 -> n2, only 1400-byte datagrams cross
+              description: >-
+                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no ICMP
+                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
+                over the last 10m, or in more than 10% over the last 30m, at least two of them,
+                with one in the last 10m, which is what a black hole on one of several ECMP
+                paths looks like. Small packets and TCP handshakes still work, so the other
+                pair alerts stay quiet while large transfers stall. Compare the interface MTU
+                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
+                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
+                on the path.
+      - eval_time: 58m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels: *ecmp_labels
+            exp_annotations: *ecmp_annotations
+
+  # ── ECMP split, 2 paths: every other probe is lost, the ratio hovers at exactly 0.5 ──
+  - interval: 1m
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: >-
+          0x1 1x1 2x1 3x1 4x1 5x1 6x1 7x1 8x1 9x1 10x1 11x1 12x1 13x1 14x1 15x1 16x1 17x1 18x1 19x1 20x1
+          21x1 22x1 23x1 24x1 25x1 26x1 27x1 28x1 29x1 30
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0 1x1 2x1 3x1 4x1 5x1 6x1 7x1 8x1 9x1 10x1 11x1 12x1 13x1 14x1 15x1 16x1 17x1 18x1 19x1 20x1 21x1
+          22x1 23x1 24x1 25x1 26x1 27x1 28x1 29x1 30x1'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1500x1 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500
+          1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400
+          1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500 1400 1500
+          1400 1500 1400'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels: *ecmp_labels
+            exp_annotations: *ecmp_annotations
+      - eval_time: 45m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels: *ecmp_labels
+            exp_annotations: *ecmp_annotations
+
+  # ── lossy path: a false black hole at minute 12 and two back to back at 40 and 41, each at a ──
+  # ── random size, the other probes cross; nothing pages ──
+  - interval: 1m
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0x11 1x27 2 3x19'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+1x11 11 12+1x26 38x1 39+1x18'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1500x11 1012 1500x26 876 1231 1500x18'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0x11 1x27 2 3x19'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+1x11 11 12+1x26 38x1 39+1x18'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 44m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 48m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 48m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts: []
+
+  # ── new pair: its second probe loses the full size once, every other probe crosses. The 30m ──
+  # ── window holds a handful of probes, so one loss reads above 10%; nothing pages ──
+  - interval: 1m
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0 0 1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0 1 1 2+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1500 1500 1400 1500x40'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+
+  # ── checkers.pmtu.interval 5m: six probes per 30m, the one at minute 60 loses the full size ──
+  # ── once; nothing pages, per pair or from the zone family ──
+  - interval: 1m
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0x59 1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x9 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1500x59 1400x4 1500x35'
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="c",destination_zone="d",result="fail",pod="p1"}
+        values: '0x59 1x40'
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="c",destination_zone="d",result="success",pod="p1"}
+        values: '0x4 1x4 2x4 3x4 4x4 5x4 6x4 7x4 8x4 9x4 10x4 11x9 12x4 13x4 14x4 15x4 16x4 17x4 18x4 19'
+    alert_rule_test:
+      - eval_time: 66m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 68m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 72m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 66m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 68m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts: []
+
+  # ── zone-only scrape, ECMP split between the zones: one probe in three loses the full size ──
+  - interval: 1m
+    input_series:
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: >-
+          0x2 1x2 2x2 3x2 4x2 5x2 6x2 7x2 8x2 9x2 10x2 11x2 12x2 13x2 14x2 15x2 16x2 17x2 18x2 19x2 20
+      - series: kconmon_ng_zone_pmtu_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: >-
+          0 1 2x1 3 4x1 5 6x1 7 8x1 9 10x1 11 12x1 13 14x1 15 16x1 17 18x1 19 20x1 21 22x1 23 24x1 25 26x1
+          27 28x1 29 30x1 31 32x1 33 34x1 35 36x1 37 38x1 39 40x1
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ZonePathMTUBlackHole
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: Path MTU black hole zone a -> zone b in 31.03% of probes
+              description: >-
+                31.03% of path MTU probes from zone a to zone b lost their full-size datagram
+                with no ICMP frag-needed: more than 50% over the last 10m, or more than 10%
+                over the last 30m, at least two of them, with one in the last 10m, which is one
+                black-holed path among several ECMP next hops. This zone-level rule fires only
+                while Prometheus holds no per-pair path MTU series for the zone pair, as under
+                agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node
+                pairs. The ratio is probe-weighted across every pair between the zones, so one
+                black-holed pair among many is diluted here. Compare the interface MTU on the
+                nodes of both zones with the encapsulation overhead of the CNI and check
+                whether ICMP type 3 code 4 is filtered between them; the kconmon-ng console
+                Matrix or Investigate page shows the node pairs.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->b
+
+  # ── five nodes, n3 registered but unreachable: n1, n2, n4, n5 all fail TCP to it and its own ──
+  # ── series are not scraped either; exactly one NodeUnreachable, no NodeIsolated ──
   - interval: 30s
     input_series:
       # yamllint disable-line rule:line-length
@@ -317,6 +842,26 @@ tests:
       - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n2",destination_zone="z",result="success"}
         values: '0+10x40'
       - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n3",destination_zone="z",result="fail"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n5",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n5",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n2",destination_node="n5",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n5",destination_node="n1",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n5",destination_node="n2",destination_zone="z",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n5",destination_node="n3",destination_zone="z",result="fail"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n5",destination_node="n4",destination_zone="z",result="success"}
         values: '0+10x40'
     alert_rule_test:
       - eval_time: 15m
@@ -374,15 +919,29 @@ tests:
         alertname: NodeUnreachable
         exp_alerts: []
 
-  # ── one bad pair among four nodes, and a two-node cluster: no node-level alert ──
+  # ── one bad pair among four nodes, the strict 0.5 boundary, and a two-node cluster: no node-level alert ──
   - interval: 30s
     input_series:
+      # n1 -> n2 fails: n2 is failed by 1 of its 3 probing peers, n1 fails 1 of its 3 targets.
       - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",result="fail"}
         values: '0+10x40'
       - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n3",result="success"}
         values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n4",result="success"}
+        values: '0+10x40'
       - series: kconmon_ng_tcp_results_total{source_node="n3",destination_node="n2",result="success"}
         values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n2",result="success"}
+        values: '0+10x40'
+      # b1 -> b2 fails: b2 is failed by exactly half of its probers and b1 fails exactly half of
+      # its targets; both rules need MORE than the 0.5 threshold.
+      - series: kconmon_ng_tcp_results_total{source_node="b1",destination_node="b2",result="fail"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="b1",destination_node="b3",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="b3",destination_node="b2",result="success"}
+        values: '0+10x40'
+      # A two-node cluster: one prober per node is below minPeers.
       - series: kconmon_ng_tcp_results_total{source_node="m1",destination_node="m2",result="fail"}
         values: '0+10x40'
     alert_rule_test:
@@ -392,3 +951,174 @@ tests:
       - eval_time: 15m
         alertname: NodeIsolated
         exp_alerts: []
+
+  # ── probing stops at minute 40: an intended pair and a source without probe_intended fire, ──
+  # ── a pair the plan dropped at minute 40 stays quiet ──
+  - interval: 1m
+    input_series:
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",result="success"}
+        values: '0+10x40 _x40'
+      - series: kconmon_ng_probe_intended{source_node="n1",destination_node="n2"}
+        values: '1x80'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n3",result="success"}
+        values: '0+10x40 _x40'
+      - series: kconmon_ng_probe_intended{source_node="n1",destination_node="n3"}
+        values: '1x40 0x40'
+      - series: kconmon_ng_tcp_results_total{source_node="old",destination_node="n2",result="success"}
+        values: '0+10x40 _x40'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: PairWentSilent
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: PairWentSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              destination_node: n2
+            exp_annotations:
+              summary: No probe results at all from n1 -> n2 for over 10m
+              description: >-
+                n1 was probing n2 within the last hour and has reported nothing for 5m plus the
+                10m this rule waits, so no failure ratio can be computed for this link and the
+                other rules in this group have gone quiet about it rather than healthy. Either
+                the source agent stopped running or stopped being scraped, or the pair left the
+                topology. Check the agent pod on n1 and its scrape target first, then the
+                controller's peer list -- a node that was drained or removed produces this too,
+                and the alert clears on its own an hour after the last result. A pair the
+                sparse topology plan dropped does NOT fire: the rule only matches pairs the
+                source agent still marks in its probe_intended series, and falls back to the
+                plain two-window comparison for agents that do not export that family yet. Zone
+                labels are absent by design: this rule compares label sets across two time
+                windows and pairs are matched on node names only.
+          - exp_labels:
+              severity: warning
+              source_node: old
+              destination_node: n2
+            exp_annotations:
+              summary: No probe results at all from old -> n2 for over 10m
+              description: >-
+                old was probing n2 within the last hour and has reported nothing for 5m plus the
+                10m this rule waits, so no failure ratio can be computed for this link and the
+                other rules in this group have gone quiet about it rather than healthy. Either
+                the source agent stopped running or stopped being scraped, or the pair left the
+                topology. Check the agent pod on old and its scrape target first, then the
+                controller's peer list -- a node that was drained or removed produces this too,
+                and the alert clears on its own an hour after the last result. A pair the
+                sparse topology plan dropped does NOT fire: the rule only matches pairs the
+                source agent still marks in its probe_intended series, and falls back to the
+                plain two-window comparison for agents that do not export that family yet. Zone
+                labels are absent by design: this rule compares label sets across two time
+                windows and pairs are matched on node names only.
+
+  # ── n1 -> n2 loses 80% of UDP and fails 10% of TCP, a resolver and an external target fail ──
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_udp_packet_loss_ratio{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b"}
+        values: '0.8x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success"}
+        values: '0+9x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_dns_results_total{source_node="n1",source_zone="a",host="db.internal",resolver="10.96.0.10",result="fail"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_external_results_total{source_node="n1",source_zone="a",target="203.0.113.10:443",target_kind="ip",check_type="tcp",result="fail"}
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: UDPLossHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              destination_node: n2
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: UDP loss n1 -> n2 at 80%
+              description: >-
+                UDP packet loss from n1 (zone a) to n2 (zone b) has held at 80% for 5m, over
+                the 50% threshold. Drill this exact pair on the kconmon-ng console Investigate
+                page, or open the "kconmon-ng / Node Detail" Grafana dashboard with node=n1 to
+                see whether the same node is losing packets to its other peers or only to this
+                one.
+      - eval_time: 15m
+        alertname: TCPChecksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              destination_node: n2
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: TCP checks failing n1 -> n2 at 10% of probes
+              description: >-
+                10% of TCP probes from n1 (zone a) to n2 (zone b) failed over the last 5m,
+                above the 5% failure-ratio threshold. Open the pair on the kconmon-ng console
+                Investigate page, or the worst-pairs table on the "kconmon-ng / Overview"
+                Grafana dashboard to see whether UDP and ICMP fail on the same link (a path
+                problem) or TCP fails alone (a listener or policy problem).
+      - eval_time: 15m
+        alertname: DNSChecksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              source_zone: a
+              host: db.internal
+              resolver: 10.96.0.10
+            exp_annotations:
+              summary: DNS failing on n1 for db.internal via 10.96.0.10 at 100%
+              description: >-
+                100% of lookups of db.internal through resolver 10.96.0.10 from n1 (zone a)
+                failed over the last 5m, above the 5% threshold. This is resolver-side, not a
+                peer link, so check CoreDNS/kube-dns and the node's resolv.conf before the
+                network. The kconmon-ng console Investigate page scoped to n1 shows whether
+                its peer probes degraded at the same moment.
+      - eval_time: 15m
+        alertname: ExternalChecksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              source_zone: a
+              target: 203.0.113.10:443
+              target_kind: ip
+              check_type: tcp
+            exp_annotations:
+              summary: External target 203.0.113.10:443 failing from n1 at 100%
+              description: >-
+                100% of probes to external target 203.0.113.10:443 (kind ip) from n1 (zone a)
+                failed over the last 5m, above the 10% threshold. A probe the allowlist
+                refused never reaches this counter, so if the target looks untested rather
+                than failing, read the external_denied_total counter for its reason (cidr,
+                resolve or disabled) before suspecting the network.
+
+  # ── both controller replicas report leader=0: nobody distributes peer lists ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_controller_leader{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '0x40'
+      - series: kconmon_ng_controller_leader{instance="c2",job="kconmon-ng-controller",pod="ctrl-1"}
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KconmonControllerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: No kconmon-ng controller has reported itself leader for 5m
+              description: >-
+                Every controller replica is reporting leader=0, or Prometheus is scraping none
+                of them. Peer lists stop being distributed, so agents keep probing a frozen
+                topology and every other rule in this group quietly stops describing reality.
+                Check the controller Deployment, its lease in the release namespace, and the
+                controller scrape target in Prometheus.

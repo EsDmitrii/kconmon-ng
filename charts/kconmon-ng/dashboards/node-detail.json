@@ -79,7 +79,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by (destination_node) (kconmon_ng_udp_results_total{source_node=\"$node\"}))",
+          "expr": "count(count by (destination_node) ({__name__=~\"kconmon_ng_(tcp|udp|icmp)_results_total\", source_node=\"$node\"}))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -2000,7 +2000,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (host, resolver) (rate(kconmon_ng_dns_results_total{source_node=\"$node\", result=\"success\"}[5m])) / sum by (host, resolver) (rate(kconmon_ng_dns_results_total{source_node=\"$node\"}[5m]))",
+          "expr": "(sum by (host, resolver) (rate(kconmon_ng_dns_results_total{source_node=\"$node\", result=\"success\"}[5m])) or 0 * sum by (host, resolver) (rate(kconmon_ng_dns_results_total{source_node=\"$node\"}[5m]))) / sum by (host, resolver) (rate(kconmon_ng_dns_results_total{source_node=\"$node\"}[5m]))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -2594,7 +2594,7 @@
       },
       "id": 31,
       "panels": [],
-      "title": "Path MTU from $node",
+      "title": "Path MTU: $node and its peers",
       "type": "row"
     },
     {
@@ -2654,14 +2654,30 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (destination_node) (kconmon_ng_pmtu_bytes{source_node=\"$node\"})",
+          "expr": "min by (destination_node) (min_over_time(kconmon_ng_pmtu_bytes{source_node=\"$node\"}[10m]))",
           "refId": "A",
           "instant": true,
           "range": false,
           "format": "table"
         }
       ],
-      "title": "Path MTU to each peer (bytes)"
+      "title": "Path MTU from $node to each peer (bytes)",
+      "description": "Smallest path MTU from $node to each peer in 10m, the size PathMTUBlackHole names: behind ECMP the last probe may have crossed at full size on a good next hop. Below the interface MTU with black-hole probes beside it is a black hole; without them it is a reduced path that ICMP frag-needed reports correctly.",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "destination_node": "Peer",
+              "Value": "Path MTU (bytes)"
+            }
+          }
+        }
+      ]
     },
     {
       "datasource": {
@@ -2757,7 +2773,187 @@
           "legendFormat": "{{destination_node}}"
         }
       ],
-      "title": "Black-hole probes by peer (15m)"
+      "title": "Black-hole probes from $node by peer (15m)",
+      "description": "Path MTU probes from $node that lost the full-size datagram with no ICMP frag-needed, per peer. Non-zero is the PathMTUBlackHole signal."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 85
+      },
+      "id": 34,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "min by (source_node) (min_over_time(kconmon_ng_pmtu_bytes{destination_node=\"$node\"}[10m]))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "title": "Path MTU into $node from each peer (bytes)",
+      "description": "Smallest path MTU from each peer to $node in 10m, so a black hole on one of several ECMP next hops stays visible: a black hole in front of this node shows up here, on its own dashboard, even when its outbound paths are clean.",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "source_node": "Peer",
+              "Value": "Path MTU (bytes)"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 85
+      },
+      "id": 35,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (source_node) (increase(kconmon_ng_pmtu_results_total{destination_node=\"$node\", result=\"fail\"}[15m]))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{source_node}}"
+        }
+      ],
+      "title": "Black-hole probes into $node by peer (15m)",
+      "description": "Path MTU probes from each peer to $node that lost the full-size datagram with no ICMP frag-needed."
     }
   ],
   "refresh": "30s",
@@ -2797,14 +2993,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(kconmon_ng_udp_results_total, source_node)",
+        "definition": "label_values({__name__=~\"kconmon_ng_(tcp|udp|icmp)_results_total\"}, source_node)",
         "hide": 0,
         "includeAll": false,
         "label": "Node",
         "multi": false,
         "name": "node",
         "options": [],
-        "query": "label_values(kconmon_ng_udp_results_total, source_node)",
+        "query": "label_values({__name__=~\"kconmon_ng_(tcp|udp|icmp)_results_total\"}, source_node)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,

@@ -52,11 +52,16 @@ data:
         bootstrapAdminPasswordFile: "/etc/kconmon-ng-console-secrets/local-admin-password"
         {{- end }}
       {{- end }}
-      {{- if eq .Values.console.auth.mode "header" }}
+      {{- /* trustedProxyCIDRs in every mode: while clientAddress.trustedProxyCIDRs is empty, and on an
+             image older than 2.5.0, the console reads the client address for per-address rate
+             limits and the audit log through this list. */}}
+      {{- if or (eq .Values.console.auth.mode "header") .Values.console.auth.header.trustedProxyCIDRs }}
       header:
+        {{- if eq .Values.console.auth.mode "header" }}
         userHeader: {{ .Values.console.auth.header.userHeader | quote }}
         groupsHeader: {{ .Values.console.auth.header.groupsHeader | quote }}
         groupsDelimiter: {{ .Values.console.auth.header.groupsDelimiter | quote }}
+        {{- end }}
         trustedProxyCIDRs:
           {{- toYaml .Values.console.auth.header.trustedProxyCIDRs | nindent 10 }}
       {{- end }}
@@ -67,16 +72,10 @@ data:
         issuer: {{ .Values.console.auth.oidc.issuer | quote }}
         clientID: {{ .Values.console.auth.oidc.clientID | quote }}
         clientSecretFile: "/etc/kconmon-ng-console-secrets/oidc-client-secret"
-        {{- /* PARSED the way the console parses it, not matched with a regular expression.
-               internal/console/config validates this with url.Parse plus a suffix test, and the pod
-               exits(1) on a value that fails either -- CrashLoopBackOff on a fresh OIDC install,
-               which `helm template` and `helm lint` both called green, and which the chart's own CI
-               values file used to ship. A regex is not a URL parser: the first cut of this guard
-               refused HTTPS:// (schemes are case-insensitive and url.Parse lowercases them) while
-               still blessing values like "a^b.example.com" that url.Parse rejects. urlParse gives
-               the same three answers the console reads, so the two agree by construction. The
-               SUFFIX is tested against the whole string, exactly as the console does -- that is why
-               a query string fails here too. */}}
+        {{- /* Parsed the way internal/console/config parses it (url.Parse, then a suffix test on
+               the whole string, so a query string fails too): a value the console would exit on
+               fails the render instead. A regex would disagree with url.Parse on scheme case and on
+               the characters it rejects. */}}
         {{- $redirect := .Values.console.auth.oidc.redirectURL | toString }}
         {{- $u := urlParse $redirect }}
         {{- if or (not (has $u.scheme (list "http" "https"))) (eq $u.host "") (not (hasSuffix "/api/v1/auth/oidc/callback" $redirect)) }}
@@ -123,6 +122,26 @@ data:
       runsPerMinute: {{ .Values.console.rateLimit.runsPerMinute | int }}
       loginPerMinute: {{ .Values.console.rateLimit.loginPerMinute | int }}
       promqlPerMinute: {{ .Values.console.rateLimit.promqlPerMinute | int }}
+    {{- /* Only for an image that knows the key: the console's decoder is strict. Keys go one by one so
+           a --reuse-values upgrade carrying some or none of them leaves the rest on the console's
+           defaults; `| int` on a missing key would write 0 and turn that cap off. */}}
+    {{- if include "kconmon-ng.console.supports" (dict "ctx" . "since" "2.5.0") }}
+    {{- $ws := dict }}
+    {{- range $k, $v := (.Values.console.websocket | default dict) }}
+    {{- if not (kindIs "invalid" $v) }}{{- $_ := set $ws $k ($v | int) }}{{- end }}
+    {{- end }}
+    {{- with $ws }}
+    websocket:
+      {{- range $k, $v := . }}
+      {{ $k }}: {{ $v }}
+      {{- end }}
+    {{- end }}
+    {{- with (.Values.console.clientAddress | default dict).trustedProxyCIDRs }}
+    clientAddress:
+      trustedProxyCIDRs:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- end }}
     {{- /* Emitted only when ON; the one gate covers all three consumers. */}}
     {{- if .Values.console.scheduler.enabled }}
     scheduler:
@@ -175,6 +194,9 @@ data:
            chart's Role would 403 when the chart renders no Role at all. */}}
     {{- if and .Values.rbac.create .Values.console.alerting.namespace (ne .Values.console.alerting.namespace .Release.Namespace) }}
     {{- fail (printf "console.alerting.namespace=%q but the chart renders the prometheusrules Role into %q — the reconciler would get a permanent 403. Leave it empty to use the release namespace, or install the chart into %q" .Values.console.alerting.namespace .Release.Namespace .Values.console.alerting.namespace) }}
+    {{- end }}
+    {{- if and .Values.prometheusRule.enabled (eq .Values.console.alerting.bundleName (include "kconmon-ng.fullname" .)) (has .Values.console.alerting.namespace (list "" .Release.Namespace)) }}
+    {{- fail (printf "console.alerting.bundleName=%q is the name of this chart's own PrometheusRule (prometheusRule.enabled): the console would overwrite the built-in alerts with its rules, or delete them while it holds none. Pick another name" .Values.console.alerting.bundleName) }}
     {{- end }}
     alerting:
       enabled: true
