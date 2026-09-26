@@ -80,8 +80,9 @@ jobs:
       - name: Extract current release notes
         run: |
           # RELEASE_NOTES.md keeps the full history; the Release body is this tag's section, never
-          # the topmost one.
+          # the topmost one. A prerelease tag (v2.5.0-rc.1) ships the section of the release it previews.
           version="${GITHUB_REF_NAME#v}"
+          version="${version%%-*}"
           awk -v want="## kconmon-ng v${version}" '
             $0 == want {found = 1; print; next}
             found && /^## kconmon-ng v/ {exit}
@@ -96,7 +97,9 @@ jobs:
       # Chart.yaml, so a forgotten bump would ship the wrong artifacthub.io/changes.
       - name: Chart version matches the tag
         run: |
+          # A prerelease tag is checked against the release it previews; helm package stamps the full version.
           version="${GITHUB_REF_NAME#v}"
+          version="${version%%-*}"
           chart_version=$(awk '$1 == "version:" {print $2; exit}' charts/kconmon-ng/Chart.yaml)
           app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' charts/kconmon-ng/Chart.yaml)
           if [ "$chart_version" != "$version" ] || [ "$app_version" != "$version" ]; then
@@ -236,6 +239,10 @@ jobs:
           printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           VERSION="${GITHUB_REF#refs/tags/v}"
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # Artifact Hub reads prereleases from this annotation only, not from the semver suffix.
+          if [[ "$VERSION" == *-* ]]; then
+            sed -i '/^annotations:$/a\  artifacthub.io/prerelease: "true"' charts/kconmon-ng/Chart.yaml
+          fi
           helm package charts/kconmon-ng --version "$VERSION" --app-version "$VERSION"
           PUSH_OUT=$(helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1)
           echo "$PUSH_OUT"
