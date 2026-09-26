@@ -1,5 +1,4 @@
 {{- if .Values.prometheusRule.enabled }}
-{{- $prefix := .Values.config.metricsPrefix }}
 {{- $rules := include "kconmon-ng.prometheusRule.builtinRules" . | fromYamlArray }}
 {{- $extra := .Values.prometheusRule.additionalRules | default list }}
 apiVersion: monitoring.coreos.com/v1
@@ -29,15 +28,8 @@ spec:
             {{- toYaml .annotations | nindent 12 }}
           {{- end }}
         {{- end }}
-        {{- /* additionalRules is spliced VERBATIM, which is what four places in the docs promise it
-               does. It used to go through the same field-by-field re-render as the built-ins, and
-               that render knows five keys: alert, expr, for, labels, annotations. A PrometheusRule
-               group legitimately holds recording rules too, and a `record:` entry came out as
-               `- alert:` with an empty name and no record key — helm template succeeded and the
-               apiserver rejected the whole object at APPLY time, after the release had started
-               changing. The quiet variant was worse: `keep_firing_for` was simply dropped, so the
-               rule resolved on the first non-firing evaluation and nothing said so. A rule the
-               operator wrote is not the chart's to rewrite. */}}
+        {{- /* additionalRules is spliced verbatim: recording rules and keys such as keep_firing_for
+               must survive. */}}
         {{- with $extra }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

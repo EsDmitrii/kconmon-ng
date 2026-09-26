@@ -3,20 +3,11 @@ kind: Pod
 metadata:
   name: "{{ include "kconmon-ng.fullname" . }}-connection-test"
   labels:
-    # NOT kconmon-ng.labels, and that is the point rather than an omission.
-    #
-    # That helper EMBEDS selectorLabels, so this Pod carried app.kubernetes.io/name and
-    # app.kubernetes.io/instance — exactly the main NetworkPolicy's podSelector — and
-    # component: test cleared its `NotIn [console]` guard. The Pod was therefore captured by the
-    # policy, its egress restricted, and no rule admits it to the controller: `helm test` failed on
-    # every install with networkPolicy.enabled, while the comment here claimed the opposite.
-    #
-    # The chart and managed-by labels stay: they are provenance, and neither is a selector.
+    # No selectorLabels: no component policy selects this Pod, and the controller policy admits it
+    # on httpPort by kconmon-ng.io/role alone. The chart and managed-by labels are provenance only.
     helm.sh/chart: {{ include "kconmon-ng.chart" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     app.kubernetes.io/component: test
-    # The label the controller's own ingress rule admits. Not a selectorLabels match — it exists so
-    # ONE rule can name this Pod without the main podSelector capturing it.
     kconmon-ng.io/role: test
   annotations:
     "helm.sh/hook": test
@@ -27,9 +18,12 @@ spec:
     - name: connection-test
       image: curlimages/curl:8.18.0
       # The four fields restricted-PSS admission checks; without them `helm test` on a hardened
-      # namespace fails at admission, not on the health check. The image already runs as uid 100.
+      # namespace fails at admission, not on the health check. runAsUser stays: the image names its
+      # user (curl_user, uid 101), and the kubelet refuses runAsNonRoot on a user it cannot resolve.
       securityContext:
         runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 102
         allowPrivilegeEscalation: false
         seccompProfile:
           type: RuntimeDefault
@@ -43,6 +37,6 @@ spec:
           set -e
           CONTROLLER="{{ include "kconmon-ng.controller.fullname" . }}"
           echo "Testing controller health at http://${CONTROLLER}:{{ .Values.config.httpPort }}/healthz"
-          curl -sf "http://${CONTROLLER}:{{ .Values.config.httpPort }}/healthz" || exit 1
-          echo "Health check passed"
+          HEALTH=$(curl -sf "http://${CONTROLLER}:{{ .Values.config.httpPort }}/healthz") || exit 1
+          echo "Health check passed: ${HEALTH}"
   restartPolicy: Never

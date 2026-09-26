@@ -17,6 +17,15 @@
 {{- if and .Values.config.checkers.external.enabled (not .Values.config.checkers.external.allowedCidrs) }}
 {{- fail "config.checkers.external.enabled is true but config.checkers.external.allowedCidrs is empty: an empty allowlist is a startup error, never read as allow-everything" }}
 {{- end }}
+{{- if lt (include "kconmon-ng.durationNanos" .Values.config.controllerAgentTtl | float64) 10000000000.0 }}
+{{- fail (printf "config.controllerAgentTtl=%v is below 10s, two agent heartbeats: the controller refuses it at startup, because the sweep would evict the whole fleet between beats" .Values.config.controllerAgentTtl) }}
+{{- end }}
+{{- if .Values.config.checkers.http.enabled }}
+{{- range $t := .Values.config.checkers.http.targets }}
+{{- /* Compiled here the way the agent compiles it, so a bad pattern fails the render, not the agent. */}}
+{{- if $t.bodyPattern }}{{- $_ := mustRegexMatch $t.bodyPattern "" }}{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

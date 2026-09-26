@@ -5,6 +5,17 @@
 {{- printf "%g" (round (mulf . 100) 3) -}}
 {{- end -}}
 
+{{/* A rule block over its defaults, as JSON for fromJson. `helm upgrade --reuse-values` renders the
+     templates over the OLD release's values, where a block added since is absent, so a block new in
+     a release carries its values.yaml defaults here too. Per key and not sprig merge: merge
+     overwrites a user's `enabled: false` with the default true. */}}
+{{- define "kconmon-ng.prometheusRule.block" -}}
+{{- $out := dict -}}
+{{- range $k, $v := .defaults }}{{ $_ := set $out $k $v }}{{ end -}}
+{{- range $k, $v := (.block | default dict) }}{{ $_ := set $out $k $v }}{{ end -}}
+{{- toJson $out -}}
+{{- end -}}
+
 {{- define "kconmon-ng.prometheusRule.builtinRules" -}}
 {{- $prefix := .Values.config.metricsPrefix -}}
 {{- $pr := .Values.prometheusRule -}}
@@ -63,23 +74,49 @@
       alone (a listener or policy problem).
 {{- end }}
 {{- end }}
-{{- with $pr.pathMtuBlackHole }}
+{{- with include "kconmon-ng.prometheusRule.block" (dict "block" $pr.pathMtuBlackHole "defaults" (dict "enabled" true "threshold" 0.5 "sustainedThreshold" 0.1 "for" "5m" "severity" "warning")) | fromJson }}
 {{- if .enabled }}
 {{- $t := float64 .threshold }}
+{{- $st := float64 .sustainedThreshold }}
 {{/* The value is the path MTU itself, not the ratio: `and on` keeps the left side, so the alert
-     says how many bytes still cross. unreachable probes write no pmtu series, so a peer that is
-     down leaves both counters flat, the ratio is 0/0 and nothing fires. */}}
+     says how many bytes still cross. It is the window's minimum because behind ECMP the gauge flips
+     back to the full size whenever the last probe took a good path. unreachable probes write no pmtu
+     series, so a peer that is down leaves both counters flat, the ratio is 0/0 and nothing fires.
+     The second arm is that ECMP case: each probe dials a fresh source port, so one bad next hop of N
+     fails about 1/N of probes for good. A lossy path fakes a black hole only when one probe loses
+     the full size three times, far below 10% until UDPLossHigh already pages that path. The floor of
+     two losses in 30m is for windows with few probes (a new pair, a pmtu interval of minutes), where
+     a single loss alone reads above 10%. */}}
 - alert: PathMTUBlackHole
   expr: >-
-    max by (source_node, destination_node, source_zone, destination_zone) ({{ $prefix }}_pmtu_bytes)
+    min by (source_node, destination_node, source_zone, destination_zone) (min_over_time({{ $prefix }}_pmtu_bytes[10m]))
     and on (source_node, destination_node, source_zone, destination_zone)
     (
-      sum by (source_node, destination_node, source_zone, destination_zone)
-      (rate({{ $prefix }}_pmtu_results_total{result="fail"}[10m]))
-      /
-      sum by (source_node, destination_node, source_zone, destination_zone)
-      (rate({{ $prefix }}_pmtu_results_total[10m]))
-      > {{ $t }}
+      (
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate({{ $prefix }}_pmtu_results_total{result="fail"}[10m]))
+        /
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate({{ $prefix }}_pmtu_results_total[10m]))
+        > {{ $t }}
+      )
+      or
+      (
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate({{ $prefix }}_pmtu_results_total{result="fail"}[30m]))
+        /
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate({{ $prefix }}_pmtu_results_total[30m]))
+        > {{ $st }}
+        and on (source_node, destination_node, source_zone, destination_zone)
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (increase({{ $prefix }}_pmtu_results_total{result="fail"}[30m]))
+        >= 2
+        and on (source_node, destination_node, source_zone, destination_zone)
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (increase({{ $prefix }}_pmtu_results_total{result="fail"}[10m]))
+        > 0
+      )
     )
   for: {{ .for }}
   labels:
@@ -94,13 +131,65 @@
       {{`{{ $labels.destination_zone }}`}}) are lost with no ICMP frag-needed while
       {{`{{ $value }}`}}-byte ones cross, in more than
       {{ include "kconmon-ng.prometheusRule.pct" $t }}% of path MTU probes over the last
-      10m. Small packets and TCP handshakes still work, so the other pair alerts stay
-      quiet while large transfers stall. Compare the interface MTU on both nodes with the
+      10m{{ if lt $st 1.0 }}, or in more than {{ include "kconmon-ng.prometheusRule.pct" $st }}% over the last
+      30m, at least two of them, with one in the last 10m, which is what a black hole on one of
+      several ECMP paths looks like{{ end }}. Small packets and TCP handshakes still work, so the other pair
+      alerts stay quiet while large transfers stall. Compare the interface MTU on both nodes with the
       encapsulation overhead of the CNI (VXLAN and Geneve take 50 bytes, WireGuard 60 to
       80) and check whether ICMP type 3 code 4 is filtered on the path.
+{{/* The same verdict from the zone family, for scrapes that drop every per-pair series
+     (agent.metrics.detail=zone-only, or a hand-written relabel). `unless` keeps it quiet wherever
+     per-pair pmtu series exist, so it never doubles PathMTUBlackHole. */}}
+- alert: ZonePathMTUBlackHole
+  expr: >-
+    (
+      (
+        sum by (source_zone, destination_zone) (rate({{ $prefix }}_zone_pmtu_results_total{result="fail"}[10m]))
+        /
+        sum by (source_zone, destination_zone) (rate({{ $prefix }}_zone_pmtu_results_total[10m]))
+        > {{ $t }}
+      )
+      or
+      (
+        sum by (source_zone, destination_zone) (rate({{ $prefix }}_zone_pmtu_results_total{result="fail"}[30m]))
+        /
+        sum by (source_zone, destination_zone) (rate({{ $prefix }}_zone_pmtu_results_total[30m]))
+        > {{ $st }}
+        and on (source_zone, destination_zone)
+        sum by (source_zone, destination_zone) (increase({{ $prefix }}_zone_pmtu_results_total{result="fail"}[30m]))
+        >= 2
+        and on (source_zone, destination_zone)
+        sum by (source_zone, destination_zone) (increase({{ $prefix }}_zone_pmtu_results_total{result="fail"}[10m]))
+        > 0
+      )
+    )
+    unless on (source_zone, destination_zone)
+    count by (source_zone, destination_zone) ({{ $prefix }}_pmtu_results_total)
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Path MTU black hole zone {{`{{ $labels.source_zone }}`}} -> zone
+      {{`{{ $labels.destination_zone }}`}} in {{`{{ $value | humanizePercentage }}`}} of probes
+    description: >-
+      {{`{{ $value | humanizePercentage }}`}} of path MTU probes from zone
+      {{`{{ $labels.source_zone }}`}} to zone {{`{{ $labels.destination_zone }}`}} lost their
+      full-size datagram with no ICMP frag-needed: more than
+      {{ include "kconmon-ng.prometheusRule.pct" $t }}% over the last 10m{{ if lt $st 1.0 }}, or more than
+      {{ include "kconmon-ng.prometheusRule.pct" $st }}% over the last 30m, at least two of them,
+      with one in the last 10m, which is one black-holed path among several ECMP next hops{{ end }}. This zone-level rule fires
+      only while Prometheus holds no per-pair path MTU series for the zone pair, as under
+      agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node pairs. The
+      ratio is probe-weighted across every pair between the zones, so one black-holed pair
+      among many is diluted here. Compare the interface MTU on the nodes of both zones with
+      the encapsulation overhead of the CNI and check whether ICMP type 3 code 4 is filtered
+      between them; the kconmon-ng console Matrix or Investigate page shows the node pairs.
+    investigateUrl: >-
+      /investigate?kind=zone-pair&scope={{`{{ $labels.source_zone }}`}}->{{`{{ $labels.destination_zone }}`}}
 {{- end }}
 {{- end }}
-{{- with $pr.nodeUnreachable }}
+{{- with include "kconmon-ng.prometheusRule.block" (dict "block" $pr.nodeUnreachable "defaults" (dict "enabled" true "threshold" 0.5 "minPeers" 2 "for" "5m" "severity" "critical")) | fromJson }}
 {{- if .enabled }}
 {{- $t := float64 .threshold }}
 {{/* A pair counts as failing when most of its TCP probes fail (> 0.5, fixed: this rule is about
@@ -144,7 +233,7 @@
       explains.
 {{- end }}
 {{- end }}
-{{- with $pr.nodeIsolated }}
+{{- with include "kconmon-ng.prometheusRule.block" (dict "block" $pr.nodeIsolated "defaults" (dict "enabled" true "threshold" 0.5 "minPeers" 2 "for" "5m" "severity" "critical")) | fromJson }}
 {{- if .enabled }}
 {{- $t := float64 .threshold }}
 - alert: NodeIsolated
@@ -221,12 +310,12 @@
   annotations:
     summary: >-
       No probe results at all from {{`{{ $labels.source_node }}`}} ->
-      {{`{{ $labels.destination_node }}`}} for 15m
+      {{`{{ $labels.destination_node }}`}} for over {{ .for }}
     description: >-
       {{`{{ $labels.source_node }}`}} was probing
       {{`{{ $labels.destination_node }}`}} within the last hour and has reported
-      nothing for the last 15m, so no failure ratio can be computed for
-      this link and the other rules in this group have gone quiet about it
+      nothing for 5m plus the {{ .for }} this rule waits, so no failure ratio can be
+      computed for this link and the other rules in this group have gone quiet about it
       rather than healthy. Either the source agent stopped running or
       stopped being scraped, or the pair left the topology. Check the agent
       pod on {{`{{ $labels.source_node }}`}} and its scrape target first, then
@@ -306,8 +395,7 @@
      branch of the union. The label_replace/or shape is load-bearing: rate() over a bare
      __name__ union drops __name__ and collapses the three families into duplicate labelsets,
      which the engine refuses at EVALUATION time ("vector cannot contain metrics with the same
-     labelset") — helm template and promtool syntax checks never see it. v2.3.0 shipped that
-     and every rule evaluation failed on both production clusters. */}}
+     labelset") — helm template and promtool syntax checks never see it. */}}
 - alert: ZoneChecksFailing
   expr: >-
     sum by (source_zone, destination_zone) (
@@ -385,12 +473,13 @@
       {{`{{ $labels.destination_zone }}`}} have lost
       {{`{{ $value | humanizePercentage }}`}} of their packets over the last 5m,
       above the {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold.
-      The ratio is packet-weighted across every pair between the zones, so a
-      single broken link is diluted here and belongs to UDPLossHigh; this
-      firing means the fabric between the zones is losing traffic. Open the
-      "kconmon-ng / Zone Heatmap" Grafana dashboard to see whether the loss is
-      one direction or both, then the kconmon-ng console Matrix or Investigate
-      page scoped to these zones for the pair-level picture.
+      The ratio is packet-weighted across every pair between the zones, so one
+      broken link weighs about 1/N of it with N node pairs between the zones:
+      between small zones a single link crosses the threshold on its own, and
+      UDPLossHigh names it. Open the "kconmon-ng / Zone Heatmap" Grafana
+      dashboard to see whether the loss is one direction or both, then the
+      kconmon-ng console Matrix or Investigate page scoped to these zones for
+      the pair-level picture.
     {{- /* Same contract as ZoneChecksFailing's investigateUrl: console-relative, "->" normalised
          by the console itself. */}}
     investigateUrl: >-
@@ -449,11 +538,19 @@
 {{- end }}
 {{- with $pr.externalAgentDown }}
 {{- if .enabled }}
-{{/* up is Prometheus' own series, so no metricsPrefix. The job regex, not the resolved jobName,
-     so the plain-Prometheus job from docs/external-agents.md is covered too; the labels are the
-     ones the controller's SD body attaches (node, zone, external, agent_id). */}}
+{{/* up is Prometheus' own series, so no metricsPrefix. The job regex, not only the resolved jobName,
+     so the plain-Prometheus job from docs/external-agents.md is covered too; a custom
+     scrapeConfig.externalAgents.jobName without "agent-external" joins it literally. The labels are
+     the ones the controller's SD body attaches (node, zone, external, agent_id). */}}
+{{- $job := ".*agent-external.*" }}
+{{- if include "kconmon-ng.scrapeConfig.externalAgents.enabled" $ }}
+{{- $name := include "kconmon-ng.scrapeConfig.externalAgents.jobName" $ }}
+{{- if not (contains "agent-external" $name) }}
+{{- $job = printf "%s|%s" (regexQuoteMeta $name) $job }}
+{{- end }}
+{{- end }}
 - alert: KconmonExternalAgentDown
-  expr: up{job=~".*agent-external.*"} == 0
+  expr: up{job=~{{ $job | quote }}} == 0
   for: {{ .for }}
   labels:
     severity: {{ .severity }}

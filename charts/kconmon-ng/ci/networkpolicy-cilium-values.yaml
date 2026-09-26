@@ -1,0 +1,15 @@
+---
+# NetworkPolicy on Cilium: the controller and the console reach the apiserver through the
+# CiliumNetworkPolicy (networkPolicy.ciliumKubeAPIEgress). Forced to true so every ci loop renders
+# it without --api-versions; hack/networkpolicy-check.py covers auto with the API present.
+networkPolicy:
+  enabled: true
+  prometheusNamespace: monitoring
+  ciliumKubeAPIEgress: true
+console:
+  enabled: true
+  replicas: 1
+  kubernetesContext:
+    enabled: true
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090

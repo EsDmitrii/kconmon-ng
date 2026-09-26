@@ -3,6 +3,53 @@
   "type": "object",
   "additionalProperties": false,
   "$defs": {
+    "positiveDuration": {
+      "description": "A Go duration above zero, e.g. 500ms, 30s or 1m30s. The agent, the controller and the console refuse zero, negative and unit-less durations at startup.",
+      "type": "string",
+      "pattern": "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$",
+      "not": {
+        "pattern": "^((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$"
+      }
+    },
+    "checkerInterval": {
+      "description": "A checker interval: a Go duration of at least 100ms, or the agent refuses to start with the checker enabled. The schema refuses a single value below that, such as a 5ns typo for 5s, 50ms or 0.05s; a spelling in several parts, such as 50ms40ms, is left to the agent.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/positiveDuration"
+        }
+      ],
+      "not": {
+        "pattern": "^((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))*((0*[0-9]{1,8}(\\.[0-9]*)?|\\.[0-9]+)ns|(0*[0-9]{1,5}(\\.[0-9]*)?|\\.[0-9]+)(us|\u00b5s|\u03bcs)|(0*[0-9]{1,2}(\\.[0-9]*)?|\\.[0-9]+)ms|0*\\.0[0-9]*s)((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))*$"
+      }
+    },
+    "checkerTimeout": {
+      "description": "A checker timeout: a Go duration of at least 1ms, or the agent refuses to start with the checker enabled. The schema refuses a single value below that, such as a 5ns typo for 5s; a spelling in several parts is left to the agent.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/positiveDuration"
+        }
+      ],
+      "not": {
+        "pattern": "^((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))*((0*[0-9]{1,6}(\\.[0-9]*)?|\\.[0-9]+)ns|(0*[0-9]{1,3}(\\.[0-9]*)?|\\.[0-9]+)(us|\u00b5s|\u03bcs)|(0*(\\.[0-9]*)?|\\.[0-9]+)ms|0*\\.000[0-9]*s)((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))*$"
+      }
+    },
+    "zeroDuration": {
+      "description": "A Go duration of zero: 0, 0s, 0m0s and the like.",
+      "type": "string",
+      "pattern": "^(0|((0+(\\.0*)?|\\.0+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$"
+    },
+    "objectName": {
+      "description": "A Kubernetes object name (DNS-1123 subdomain): lowercase alphanumerics, '-' or '.', starting and ending alphanumeric, at most 253 characters. The console refuses anything else at startup.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+    },
+    "baseURL": {
+      "description": "Empty, or an absolute http(s) URL without a trailing slash; the console refuses anything else at startup.",
+      "type": "string",
+      "pattern": "^([hH][tT][tT][pP][sS]?://[^/?#](.*[^/])?)?$"
+    },
     "alert": {
       "type": "object",
       "additionalProperties": false,
@@ -82,6 +129,37 @@
         "minPeers": {
           "type": "integer",
           "minimum": 1
+        },
+        "for": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
+      }
+    },
+    "cidr": {
+      "description": "An IPv4 or IPv6 prefix with its length, e.g. 10.0.0.0/8 or fd00::/8. A bare address has no prefix length, and the agent, the console and the apiserver refuse it.",
+      "type": "string",
+      "pattern": "^(((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*/(12[0-8]|1[01][0-9]|[1-9]?[0-9]))$"
+    },
+    "ipv4Cidr": {
+      "description": "An IPv4 prefix with its length, e.g. 10.244.0.0/16: an except entry of 0.0.0.0/0 can only be IPv4 and must be a strict subset of it, so /0 is refused. Host bits are checked at render time.",
+      "type": "string",
+      "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12][0-9]|[1-9])$"
+    },
+    "pmtuAlert": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "threshold": {
+          "$ref": "#/$defs/thresholdAlert/properties/threshold"
+        },
+        "sustainedThreshold": {
+          "$ref": "#/$defs/thresholdAlert/properties/threshold"
         },
         "for": {
           "type": "string"
@@ -696,7 +774,7 @@
                 "trustedProxyCIDRs": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "$ref": "#/$defs/cidr"
                   }
                 }
               }
@@ -743,13 +821,24 @@
               "properties": {
                 "ttl": {
                   "description": "Absolute session lifetime as a duration string. It has NO zero form: the console refuses to start on auth.session.ttl <= 0 (config.go), because a session with no lifetime is a session that never expires. Only idleTimeout below takes 0.",
-                  "type": "string"
+                  "$ref": "#/$defs/positiveDuration"
                 },
                 "idleTimeout": {
                   "description": "Duration string, or the integer 0 which disables the idle bound (documented in values.yaml and the READMEs).",
                   "type": [
                     "string",
                     "integer"
+                  ],
+                  "anyOf": [
+                    {
+                      "const": 0
+                    },
+                    {
+                      "$ref": "#/$defs/zeroDuration"
+                    },
+                    {
+                      "$ref": "#/$defs/positiveDuration"
+                    }
                   ]
                 },
                 "cookieName": {
@@ -758,17 +847,90 @@
                 "secure": {
                   "type": "boolean"
                 }
+              },
+              "if": {
+                "properties": {
+                  "cookieName": {
+                    "pattern": "^__Host-"
+                  }
+                },
+                "required": [
+                  "cookieName"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "secure": {
+                    "description": "A __Host- cookie needs Secure: browsers drop it otherwise, and the console refuses the pair at startup.",
+                    "const": true
+                  }
+                }
               }
             },
             "groupRoles": {
               "type": "object",
               "additionalProperties": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "\\S"
               },
-              "description": "Group asserted by the identity provider -> role this console grants. Union with API-made bindings; a group absent from the map grants nothing."
+              "description": "Group asserted by the identity provider -> role this console grants. Union with API-made bindings; a group absent from the map grants nothing.",
+              "propertyNames": {
+                "pattern": "\\S"
+              }
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "oidc"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "oidc": {
+                    "properties": {
+                      "issuer": {
+                        "description": "An absolute https URL without a trailing slash: discovery appends /.well-known/openid-configuration.",
+                        "pattern": "^[hH][tT][tT][pP][sS]://[^/?#](.*[^/])?$"
+                      },
+                      "clientID": {
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "header"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "header": {
+                    "properties": {
+                      "userHeader": {
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
         },
         "controller": {
           "type": "object",
@@ -782,10 +944,10 @@
               ]
             },
             "url": {
-              "type": "string"
+              "$ref": "#/$defs/baseURL"
             },
             "timeout": {
-              "type": "string"
+              "$ref": "#/$defs/positiveDuration"
             },
             "grpcAddress": {
               "type": "string"
@@ -797,17 +959,30 @@
           "additionalProperties": false,
           "properties": {
             "url": {
-              "type": "string"
+              "$ref": "#/$defs/baseURL"
             },
             "queryTimeout": {
-              "type": "string"
+              "$ref": "#/$defs/positiveDuration"
             },
             "maxRange": {
-              "type": "string"
+              "$ref": "#/$defs/positiveDuration"
             },
             "maxResponseBytes": {
               "type": "integer",
               "minimum": 1
+            }
+          }
+        },
+        "clientAddress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trustedProxyCIDRs": {
+              "description": "Proxies whose X-Forwarded-For gives the client address; never used for identity.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/cidr"
+              }
             }
           }
         },
@@ -830,6 +1005,27 @@
             }
           }
         },
+        "websocket": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxConnections": {
+              "description": "Open /ws sockets per console replica; 0 disables the cap.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxConnectionsPerAddress": {
+              "description": "Open /ws sockets per client address; 0 disables the cap.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxConnectionsPerSubject": {
+              "description": "Open /ws sockets per user or API token; 0 disables the cap.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
         "scheduler": {
           "type": "object",
           "additionalProperties": false,
@@ -839,6 +1035,23 @@
             },
             "tickInterval": {
               "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tickInterval": {
+                "$ref": "#/$defs/positiveDuration"
+              }
             }
           }
         },
@@ -931,6 +1144,23 @@
                 "ttl": {
                   "type": "string"
                 }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "ttl": {
+                    "$ref": "#/$defs/positiveDuration"
+                  }
+                }
               }
             }
           }
@@ -956,6 +1186,23 @@
             },
             "resyncInterval": {
               "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resyncInterval": {
+                "$ref": "#/$defs/positiveDuration"
+              }
             }
           }
         },
@@ -999,6 +1246,36 @@
             },
             "bundleName": {
               "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "syncInterval": {
+                "$ref": "#/$defs/positiveDuration"
+              },
+              "bundleName": {
+                "$ref": "#/$defs/objectName"
+              },
+              "namespace": {
+                "anyOf": [
+                  {
+                    "const": ""
+                  },
+                  {
+                    "$ref": "#/$defs/objectName"
+                  }
+                ]
+              }
             }
           }
         },
@@ -1084,6 +1361,11 @@
               "items": {
                 "type": "object"
               }
+            },
+            "prometheusTargetPort": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
             },
             "redisEgress": {
               "description": "Egress rules to the Redis-compatible bus. Empty renders TCP 6379 to any pod or address.",
@@ -1312,6 +1594,67 @@
             "null"
           ]
         }
+      },
+      "if": {
+        "description": "The console polls alert transitions for webhooks only with alerting on and a webhook key named.",
+        "properties": {
+          "alerting": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "webhooks": {
+            "anyOf": [
+              {
+                "properties": {
+                  "existingSecret": {
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "existingSecret"
+                ]
+              },
+              {
+                "properties": {
+                  "secret": {
+                    "properties": {
+                      "create": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "create"
+                    ]
+                  }
+                },
+                "required": [
+                  "secret"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "alerting",
+          "webhooks"
+        ]
+      },
+      "then": {
+        "properties": {
+          "webhooks": {
+            "properties": {
+              "alertPollInterval": {
+                "$ref": "#/$defs/positiveDuration"
+              }
+            }
+          }
+        }
       }
     },
     "config": {
@@ -1356,13 +1699,8 @@
           "type": "string"
         },
         "controllerAgentTtl": {
-          "type": "string",
           "description": "Grace period before an agent without a heartbeat leaves the peer list. A Go duration of at least 10s (two agent heartbeats); the controller refuses anything shorter, and 0 is not how eviction is disabled.",
-          "pattern": "^[0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h)(([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*)$",
-          "not": {
-            "description": "A zero TTL is not how eviction is disabled: the controller derives a ticker period from it and refuses to start.",
-            "pattern": "^0+(\\.0+)?(ns|us|ms|s|m|h)$"
-          }
+          "$ref": "#/$defs/positiveDuration"
         },
         "checkers": {
           "type": "object",
@@ -1380,6 +1718,26 @@
                 },
                 "timeout": {
                   "type": "string"
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "$ref": "#/$defs/checkerInterval"
+                  },
+                  "timeout": {
+                    "$ref": "#/$defs/checkerTimeout"
+                  }
                 }
               }
             },
@@ -1401,6 +1759,26 @@
                   "minimum": 1,
                   "maximum": 100
                 }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "$ref": "#/$defs/checkerInterval"
+                  },
+                  "timeout": {
+                    "$ref": "#/$defs/checkerTimeout"
+                  }
+                }
               }
             },
             "icmp": {
@@ -1415,6 +1793,26 @@
                 },
                 "timeout": {
                   "type": "string"
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "$ref": "#/$defs/checkerInterval"
+                  },
+                  "timeout": {
+                    "$ref": "#/$defs/checkerTimeout"
+                  }
                 }
               }
             },
@@ -1432,7 +1830,7 @@
                   "type": "string"
                 },
                 "size": {
-                  "description": "IP-level bytes; 0 means the interface MTU. Anything else must be a valid IPv4 datagram size an MTU can have.",
+                  "description": "IP-level bytes; 0 means the MTU of the route to the peer. Anything else must be a valid IPv4 datagram size an MTU can have.",
                   "type": "integer",
                   "anyOf": [
                     {
@@ -1443,6 +1841,40 @@
                       "maximum": 65535
                     }
                   ]
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "anyOf": [
+                      {
+                        "const": ""
+                      },
+                      {
+                        "$ref": "#/$defs/checkerInterval"
+                      }
+                    ]
+                  },
+                  "timeout": {
+                    "anyOf": [
+                      {
+                        "const": ""
+                      },
+                      {
+                        "$ref": "#/$defs/checkerTimeout"
+                      }
+                    ]
+                  }
                 }
               }
             },
@@ -1468,7 +1900,29 @@
                 "resolvers": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "description": "host, IP, host:port or [IPv6]:port with a port of 1-65535; the agent refuses any other port at startup.",
+                    "type": "string",
+                    "pattern": "^([^:\\[\\]]+|[^:\\[\\]]+:0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])|\\[[^\\]]+\\]:0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])|[^\\[\\]]*:[^\\[\\]]*:[^\\[\\]]*)$"
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "$ref": "#/$defs/checkerInterval"
+                  },
+                  "timeout": {
+                    "$ref": "#/$defs/checkerTimeout"
                   }
                 }
               }
@@ -1496,8 +1950,10 @@
                     ],
                     "properties": {
                       "url": {
+                        "description": "An http or https URL with a host; the agent refuses any other scheme at startup.",
                         "type": "string",
-                        "format": "uri"
+                        "format": "uri",
+                        "pattern": "^[hH][tT][tT][pP][sS]?://[^/?#]"
                       },
                       "method": {
                         "type": "string",
@@ -1507,7 +1963,17 @@
                         ]
                       },
                       "expectStatus": {
-                        "type": "integer"
+                        "description": "0 (unset) accepts any status below 400; anything else must be an HTTP status code between 100 and 599, which the agent checks at startup.",
+                        "type": "integer",
+                        "anyOf": [
+                          {
+                            "const": 0
+                          },
+                          {
+                            "minimum": 100,
+                            "maximum": 599
+                          }
+                        ]
                       },
                       "bodyPattern": {
                         "type": "string"
@@ -1519,6 +1985,26 @@
                     }
                   }
                 }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "interval": {
+                    "$ref": "#/$defs/checkerInterval"
+                  },
+                  "timeout": {
+                    "$ref": "#/$defs/checkerTimeout"
+                  }
+                }
               }
             },
             "mtr": {
@@ -1526,7 +2012,7 @@
               "additionalProperties": false,
               "properties": {
                 "cooldown": {
-                  "type": "string"
+                  "$ref": "#/$defs/positiveDuration"
                 },
                 "maxHops": {
                   "type": "integer",
@@ -1545,13 +2031,13 @@
                 "allowedCidrs": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "$ref": "#/$defs/cidr"
                   }
                 },
                 "deniedCidrs": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "$ref": "#/$defs/cidr"
                   }
                 },
                 "maxTargets": {
@@ -1560,6 +2046,31 @@
                 },
                 "timeout": {
                   "type": "string"
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "timeout": {
+                    "description": "0 is the agent default (10s); anything else must be at least 1ms.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/zeroDuration"
+                      },
+                      {
+                        "$ref": "#/$defs/checkerTimeout"
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -1595,9 +2106,10 @@
               "minimum": 1
             },
             "zoneChords": {
-              "description": "Cross-zone chords per directed zone pair; 0 leaves zone coverage to whatever the ring happens to cross.",
+              "description": "Cross-zone chords per agent, 0-64; 0 leaves zone coverage to whatever the ring happens to cross, and a fleet that wants more wants the full mesh.",
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 64
             },
             "autoThreshold": {
               "description": "Fleets smaller than this many nodes get the full mesh regardless of mode; 0 disables the floor.",
@@ -1704,7 +2216,7 @@
           "$ref": "#/$defs/thresholdAlert"
         },
         "pathMtuBlackHole": {
-          "$ref": "#/$defs/thresholdAlert"
+          "$ref": "#/$defs/pmtuAlert"
         },
         "nodeUnreachable": {
           "$ref": "#/$defs/nodeRollupAlert"
@@ -1760,6 +2272,14 @@
             "type": "object"
           }
         },
+        "ciliumKubeAPIEgress": {
+          "enum": [
+            "auto",
+            true,
+            false
+          ],
+          "description": "auto renders a CiliumNetworkPolicy allowing the controller (and the console, when it calls the apiserver) egress to the kube-apiserver entity when the cilium.io/v2 CiliumNetworkPolicy API exists; true or false forces it. Rendered only with networkPolicy.enabled."
+        },
         "externalEgress": {
           "type": "array",
           "items": {
@@ -1769,21 +2289,28 @@
         "externalAgentCidrs": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/cidr"
           },
           "description": "Plain CIDR strings, not rule objects; each becomes one ipBlock on the gateway port."
         },
         "nodeCidrs": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/cidr"
           },
           "description": "Plain CIDR strings; each becomes one ipBlock on the controller gRPC ingress rule. Required together with agent.hostNetwork."
+        },
+        "clusterCIDRs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ipv4Cidr"
+          },
+          "description": "IPv4 pod and Service CIDRs, each an except entry of the default 0.0.0.0/0 ipBlock in httpEgress, webhookEgress, oidcEgress and geoipEgress."
         },
         "externalPeerCidrs": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/cidr"
           },
           "description": "Plain CIDR strings; each becomes one ipBlock on the agent-to-agent probe rules, ingress and egress, never on the gateway rule."
         },
@@ -1794,6 +2321,13 @@
           }
         },
         "resolverEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "dnsEgress": {
+          "description": "Egress rules that replace the default cluster DNS rule (UDP/TCP 53 to any pod) in the agent, controller and console policies. Needed for NodeLocal DNSCache or any host-network resolver, which no namespaceSelector matches.",
           "type": "array",
           "items": {
             "type": "object"
@@ -1861,7 +2395,7 @@
           "minimum": 1
         },
         "connectTimeout": {
-          "type": "string"
+          "$ref": "#/$defs/positiveDuration"
         },
         "migrateOnStart": {
           "type": "boolean"
@@ -1901,7 +2435,7 @@
           "$ref": "#/$defs/managedSecret"
         },
         "dialTimeout": {
-          "type": "string"
+          "$ref": "#/$defs/positiveDuration"
         },
         "mode": {
           "description": "REMOVED \u2014 a DSN is the whole configuration. The chart fails with instructions.",

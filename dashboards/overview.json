@@ -30,7 +30,7 @@
       "description": "Agents currently registered with the controller.",
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 6,
         "x": 0,
         "y": 1
       },
@@ -96,8 +96,8 @@
       "description": "Distinct source_node values still producing probe results. Lower than \"registered\" means an agent registered but its scrape is stale.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 4,
+        "w": 6,
+        "x": 6,
         "y": 1
       },
       "id": 3,
@@ -145,7 +145,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by (source_node) (kconmon_ng_udp_results_total))",
+          "expr": "count(count by (source_node) ({__name__=~\"kconmon_ng_(tcp|udp|icmp)_results_total\"}))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -159,11 +159,11 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "expected_agents - registered_agents, the KconmonAgentsMissing alert value. expected_agents is published only by a leader running the node informer; without it this reads 0.",
+      "description": "expected_agents - (registered_agents - external_agents), the KconmonAgentsMissing alert value: agents that joined through the external gateway have no node to expect them on, so they cannot hide a missing in-cluster agent. expected_agents is published only by a leader running the node informer; without it this reads 0.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 8,
+        "w": 6,
+        "x": 12,
         "y": 1
       },
       "id": 4,
@@ -214,7 +214,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "clamp_min(max(kconmon_ng_controller_expected_agents) - max(kconmon_ng_controller_registered_agents), 0) or vector(0)",
+          "expr": "clamp_min(max(kconmon_ng_controller_expected_agents) - (max(kconmon_ng_controller_registered_agents) - (max(kconmon_ng_controller_external_agents) or vector(0))), 0) or vector(0)",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -231,8 +231,8 @@
       "description": "A leader must exist or peer lists stop being distributed. This is the KconmonControllerDown condition.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 12,
+        "w": 6,
+        "x": 18,
         "y": 1
       },
       "id": 5,
@@ -316,9 +316,9 @@
       "description": "Distinct source -> destination pairs currently probed.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 1
+        "w": 6,
+        "x": 0,
+        "y": 5
       },
       "id": 6,
       "type": "stat",
@@ -365,7 +365,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by (source_node, destination_node) (kconmon_ng_udp_results_total))",
+          "expr": "count(count by (source_node, destination_node) ({__name__=~\"kconmon_ng_(tcp|udp|icmp)_results_total\"}))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -382,9 +382,9 @@
       "description": "Pairs that recorded at least one failed TCP, UDP or ICMP probe in the last 15m.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
+        "w": 6,
+        "x": 6,
+        "y": 5
       },
       "id": 7,
       "type": "stat",
@@ -448,17 +448,140 @@
       "title": "Pairs with failures (15m)"
     },
     {
-      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
+        "h": 4,
+        "w": 6,
+        "x": 12,
         "y": 5
       },
-      "id": 8,
-      "panels": [],
-      "title": "Failure ratios",
-      "type": "row"
+      "id": 31,
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0) or 0 * count(kconmon_ng_pmtu_results_total) or count(sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_pmtu_results_total{result=\"fail\"}[15m])) > 0) or vector(0)",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "title": "Black-hole pairs (15m)",
+      "description": "Node pairs whose path MTU probes lost the full-size datagram with no ICMP frag-needed in the last 15m, the PathMTUBlackHole input. Under agent.metrics.detail=zone-only, where no per-pair series are scraped, it counts zone pairs instead, the ZonePathMTUBlackHole input."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "id": 32,
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count((min by (source_node, destination_node) (min_over_time(kconmon_ng_pmtu_bytes[10m])) < on (source_node, destination_node) max by (source_node, destination_node) (kconmon_ng_pmtu_probe_bytes)) unless on (source_node, destination_node) (sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0)) or vector(0)",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "title": "Reduced-path pairs (15m)",
+      "description": "Pairs whose path MTU, the smallest in 10m, is below the size the source probes that pair at while every probe of the last 15m crossed: a smaller MTU on the path that ICMP frag-needed reports correctly, not a black hole. A black-holed pair that then goes unreachable keeps its last path MTU and moves here after 15m."
     },
     {
       "datasource": {
@@ -468,9 +591,9 @@
       "description": "The single worst pair per protocol, over a 15m window so a pair that just went silent does not read as 0/0. This is the quantity the *ChecksFailing alerts threshold on.",
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 12,
         "x": 0,
-        "y": 6
+        "y": 9
       },
       "id": 9,
       "type": "bargauge",
@@ -591,12 +714,101 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Which links kconmon-ng decided were worth tracing in the last hour.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 25,
+      "type": "bargauge",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (source_node, destination_node) (increase(kconmon_ng_mtr_triggered_total[1h])))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{source_node}} -> {{destination_node}}"
+        }
+      ],
+      "title": "Pairs by MTR traces triggered (1h)"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 8,
+      "panels": [],
+      "title": "Failure ratios",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
       "description": "Failed probes over all probes, summed across the whole fleet. A fleet-wide denominator is never zero, so these lines have no NaN gaps.",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 6
+        "w": 12,
+        "x": 0,
+        "y": 18
       },
       "id": 10,
       "type": "timeseries",
@@ -729,9 +941,9 @@
       "description": "Fleet averages hide a single broken link. This tracks the worst individual pair, which is what the alerts fire on. Dashed line marks the 5% alert threshold.",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 6
+        "w": 12,
+        "x": 12,
+        "y": 18
       },
       "id": 11,
       "type": "timeseries",
@@ -854,7 +1066,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 26
       },
       "id": 12,
       "panels": [],
@@ -871,7 +1083,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 27
       },
       "id": 13,
       "type": "table",
@@ -897,6 +1109,18 @@
           }
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Pair (source -> destination)"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 360
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -1258,7 +1482,103 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 38
+      },
+      "id": 30,
+      "panels": [],
+      "title": "Path MTU",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "id": 33,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sort(min by (source_node, destination_node) (min_over_time(kconmon_ng_pmtu_bytes[10m])) < on (source_node, destination_node) max by (source_node, destination_node) (kconmon_ng_pmtu_probe_bytes))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "title": "Pairs below their probe size (path MTU, bytes)",
+      "description": "Every pair whose path MTU, the smallest in 10m as PathMTUBlackHole reads it, is below the size the source probes that pair at, smallest first. Behind ECMP the last probe may have crossed at full size on a good next hop; the window keeps the black-holed one in the table. Black holes and correctly reported reduced paths both appear here; the two stats beside it tell them apart.",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "source_node": "Source",
+              "destination_node": "Destination",
+              "Value": "Path MTU (bytes)"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
       },
       "id": 14,
       "panels": [],
@@ -1275,7 +1595,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 48
       },
       "id": 15,
       "type": "timeseries",
@@ -1421,7 +1741,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 48
       },
       "id": 16,
       "type": "timeseries",
@@ -1515,7 +1835,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 56
       },
       "id": 17,
       "panels": [],
@@ -1532,7 +1852,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 57
       },
       "id": 18,
       "type": "timeseries",
@@ -1635,7 +1955,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 57
       },
       "id": 19,
       "type": "timeseries",
@@ -1730,7 +2050,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 65
       },
       "id": 20,
       "panels": [],
@@ -1747,7 +2067,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 66
       },
       "id": 21,
       "type": "timeseries",
@@ -1850,7 +2170,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 66
       },
       "id": 22,
       "type": "timeseries",
@@ -1956,7 +2276,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 74
       },
       "id": 23,
       "panels": [],
@@ -1971,9 +2291,9 @@
       "description": "An agent triggers a trace when a pair degrades, so this is an independent confirmation that a link is bad. Traces themselves are in the console MTR Explorer. The 10 pairs are picked ONCE, by total traces over the whole dashboard range pinned with @ end(), so the line set does not churn from step to step.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 54
+        "y": 75
       },
       "id": 24,
       "type": "timeseries",
@@ -2061,301 +2381,12 @@
       "title": "MTR traces triggered per pair"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Which links kconmon-ng decided were worth tracing in the last hour.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 54
-      },
-      "id": 25,
-      "type": "bargauge",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 0,
-          "mappings": [],
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "displayMode": "gradient",
-        "maxVizHeight": 300,
-        "minVizHeight": 16,
-        "minVizWidth": 8,
-        "namePlacement": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showUnfilled": true,
-        "sizing": "auto",
-        "valueMode": "color"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "topk(10, sum by (source_node, destination_node) (increase(kconmon_ng_mtr_triggered_total[1h])))",
-          "refId": "A",
-          "instant": true,
-          "range": false,
-          "legendFormat": "{{source_node}} -> {{destination_node}}"
-        }
-      ],
-      "title": "Pairs by MTR traces triggered (1h)"
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
-      },
-      "id": 30,
-      "panels": [],
-      "title": "Path MTU",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 63
-      },
-      "id": 31,
-      "type": "stat",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 0,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "count(sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0) or vector(0)",
-          "refId": "A",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "title": "Black-hole pairs (15m)"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 63
-      },
-      "id": 32,
-      "type": "stat",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 0,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "count((max by (source_node, destination_node) (kconmon_ng_pmtu_bytes) < on (source_node) group_left max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes)) unless on (source_node, destination_node) (sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0)) or vector(0)",
-          "refId": "A",
-          "instant": false,
-          "range": true
-        }
-      ],
-      "title": "Pairs on a reduced path MTU"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 63
-      },
-      "id": 33,
-      "type": "table",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "filterable": false,
-            "inspect": false
-          },
-          "decimals": 0,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": []
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sort(max by (source_node, destination_node) (kconmon_ng_pmtu_bytes) < on (source_node) group_left max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes))",
-          "refId": "A",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        }
-      ],
-      "title": "Pairs below their probe size (path MTU, bytes)"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 71
+        "y": 83
       },
       "id": 26,
       "panels": [],
@@ -2372,7 +2403,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 72
+        "y": 84
       },
       "id": 27,
       "type": "timeseries",
@@ -2470,7 +2501,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 72
+        "y": 84
       },
       "id": 28,
       "type": "timeseries",
@@ -2548,7 +2579,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (source_node) (rate(kconmon_ng_udp_results_total[5m]))",
+          "expr": "sum by (source_node) (label_replace(rate(kconmon_ng_tcp_results_total[5m]), \"proto\", \"tcp\", \"\", \"\") or label_replace(rate(kconmon_ng_udp_results_total[5m]), \"proto\", \"udp\", \"\", \"\") or label_replace(rate(kconmon_ng_icmp_results_total[5m]), \"proto\", \"icmp\", \"\", \"\"))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -2567,7 +2598,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 72
+        "y": 84
       },
       "id": 29,
       "type": "timeseries",

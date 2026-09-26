@@ -1,20 +1,106 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if and .Values.agent.hostNetwork (not .Values.networkPolicy.nodeCidrs) }}
+{{- fail "agent.hostNetwork and networkPolicy.enabled are both true but networkPolicy.nodeCidrs is empty: host-network agents register from their NODE's IP, and Kubernetes leaves NetworkPolicy behaviour for hostNetwork pods undefined; the common implementation treats their traffic as node-IP traffic, which no podSelector matches, so every registration except the agent on the controller's own node would be dropped silently while the config looks correct. Set networkPolicy.nodeCidrs to the node CIDRs (plain strings), or ask for the open shape explicitly with [0.0.0.0/0]" }}
+{{- end }}
+{{- /* The controller's own ingress and DNS egress. Every controller port is unauthenticated inside
+       the cluster (gRPC registration, the HTTP API), so each rule names one peer and one port; the
+       agent's peer rules (externalPeerCidrs, ports-less ICMP) must never select this pod. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kconmon-ng.controller.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Agent to controller gRPC
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+        {{- /* Host-network agents register from node IPs, which no podSelector matches. */}}
+        {{- range .Values.networkPolicy.nodeCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    {{- if .Values.console.enabled }}
+    # Console to controller HTTP API (topology).
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    {{- if .Values.controller.events.enabled }}
+    # Console to controller gRPC; the controller side of console traffic is opened here.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    {{- end }}
+    {{- end }}
+    # The `helm test` Pod's health probe. The Pod carries no selectorLabels, so no policy selects it
+    # and this rule names it by its own label.
+    - from:
+        - podSelector:
+            matchLabels:
+              kconmon-ng.io/role: test
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    {{- if .Values.networkPolicy.prometheusNamespace }}
+    # Prometheus scraping, config.metricsPort only: httpPort serves the unauthenticated control API
+    # (topology, diagnostics, external-check assignments) and this rule admits a whole namespace.
+    # The external-agent SD route is on metricsPort too. Rendered only with
+    # networkPolicy.prometheusNamespace set.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
+        {{- with .Values.networkPolicy.prometheusPodLabels }}
+        # Narrower still when the operator can name the scraper's pod labels.
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.metricsPort }}
+    {{- end }}
+  egress:
+    # DNS. The apiserver egress is the separate -apiserver policy below.
+    {{- include "kconmon-ng.dnsEgress" . | nindent 4 }}
+---
 {{- /*
 The controller's OWN egress to the Kubernetes apiserver.
 
-It used to live in the shared policy, which selects every component except the console — the agent
-DaemonSet included. The default there rendered `ipBlock: 0.0.0.0/0` on 443 and 6443, so the most
-network-exposed component in the deployment, the one that runs on every node and takes packets from
-the whole cluster, was handed clean unrestricted egress to the internet. The agent has no apiserver
-client at all: its Pod sets automountServiceAccountToken: false and says so in a comment.
-
 The controller is the only apiserver client (the node informer and, with leader election on, the
-Lease). NetworkPolicies are additive, so this policy grants that egress and nothing else; the shared
-policy still governs everything else the controller does.
+Lease); the agent has none (its Pod sets automountServiceAccountToken: false), so this rule must
+never land on an agent policy. NetworkPolicies are additive: this policy grants that egress and
+nothing else.
 
 kubernetes.default.svc is a ClusterIP with no Pod behind it, so a namespaceSelector matches nothing
 here — it has to be an ipBlock. networkPolicy.kubeAPIEgress overrides the default for operators who
-can name their apiserver endpoint, which is the tighter and preferable form.
+can name their apiserver endpoint, which is the tighter and preferable form. Cilium matches no ipBlock
+against its kube-apiserver entity; templates/shared/ciliumnetworkpolicy.yaml covers that case.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -45,14 +131,13 @@ spec:
     {{- end }}
 {{- if .Values.controller.externalGateway.enabled }}
 {{- if not .Values.networkPolicy.externalAgentCidrs }}
-{{- fail "controller.externalGateway.enabled and networkPolicy.enabled are both true but networkPolicy.externalAgentCidrs is empty: the shared policy default-denies controller ingress it does not name, so the gateway would render unreachable and every external agent would time out on the TLS handshake while the config looks correct. Set networkPolicy.externalAgentCidrs to the agents' source CIDRs — through a NodePort or a LoadBalancer with externalTrafficPolicy: Cluster that source is the NODE's own IP, so cover the node CIDR or use externalTrafficPolicy: Local — or ask for the open shape explicitly with [0.0.0.0/0]" }}
+{{- fail "controller.externalGateway.enabled and networkPolicy.enabled are both true but networkPolicy.externalAgentCidrs is empty: the controller policy default-denies controller ingress it does not name, so the gateway would render unreachable and every external agent would time out on the TLS handshake while the config looks correct. Set networkPolicy.externalAgentCidrs to the agents' source CIDRs — through a NodePort or a LoadBalancer with externalTrafficPolicy: Cluster that source is the NODE's own IP, so cover the node CIDR or use externalTrafficPolicy: Local — or ask for the open shape explicitly with [0.0.0.0/0]" }}
 {{- end }}
 ---
 {{- /*
-Ingress for the external gateway, scoped to the CONTROLLER alone. It cannot live in the shared
-policy: that podSelector matches the agent DaemonSet too, and a rule there would open the gateway
-port from external CIDRs on every node's agent — the widest-exposed component in the deployment.
-Only the gateway port, never config.grpcPort: same reasoning as service-external.yaml.
+Ingress for the external gateway, scoped to the CONTROLLER alone: a rule on the agent policy would
+open the gateway port from external CIDRs on every node's agent, the widest-exposed component in
+the deployment. Only the gateway port, never config.grpcPort: same reasoning as service-external.yaml.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -33,9 +33,11 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- if and .Values.console.enabled (not (include "kconmon-ng.console.webhooksKeySecretName" .)) }}
 {{- $todo = append $todo "console.webhooks — no encryption key, so creating or testing a webhook endpoint answers 503 (every other webhook route works)." }}
 {{- end }}
-{{- /* Only while the ingress rule really is open. With console.networkPolicy.ingressFrom set, the
-       policy admits exactly the peers it names, and telling the operator otherwise sent them to
-       narrow something they had already narrowed. */}}
+{{- if and .Values.console.enabled .Values.console.ingress.enabled (not (dig "clientAddress" "trustedProxyCIDRs" (list) .Values.console)) (not (dig "auth" "header" "trustedProxyCIDRs" (list) .Values.console)) }}
+{{- $todo = append $todo "console.clientAddress.trustedProxyCIDRs — empty behind an Ingress, so every client shares the ingress controller's address: one budget for logins, PromQL, runs and live sockets, and one remoteAddr in the audit log. Set it to the ingress controller's addresses (its pod CIDR at the widest); a pod inside the list can name any client address." }}
+{{- end }}
+{{- /* Only while the ingress rule really is open: with console.networkPolicy.ingressFrom set, the
+       policy admits exactly the peers it names. */}}
 {{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") (not .Values.console.ingress.enabled) .Values.networkPolicy.enabled (not .Values.console.networkPolicy.ingressFrom) }}
 {{- $todo = append $todo "console exposure — anonymous auth and the NetworkPolicy admits console ingress from ANY namespace; narrow it with console.networkPolicy.ingressFrom or move off anonymous." }}
 {{- end }}
@@ -44,6 +46,10 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- end }}
 {{- if and .Values.controller.externalGateway.enabled (not .Values.controller.externalGateway.tls.clientCaKey) }}
 {{- $todo = append $todo "controller.externalGateway.tls.clientCaKey — empty, so the gateway runs token-only: fleet membership is authenticated but agents are indistinguishable, and any token holder can impersonate any agent. Point it at the CA key that signs agent client certs to pin identities." }}
+{{- end }}
+{{- $gwService := .Values.controller.externalGateway.service }}
+{{- if and .Values.controller.externalGateway.enabled (ne $gwService.externalTrafficPolicy "Local") (not (and (eq $gwService.type "LoadBalancer") $gwService.loadBalancerSourceRanges)) }}
+{{- $todo = append $todo "controller.externalGateway.service.externalTrafficPolicy — Cluster, so external agents reach the gateway from node IPs and its flood eviction cannot tell apart the agents behind one node. Use Local with tight networkPolicy.externalAgentCidrs, or loadBalancerSourceRanges on the LoadBalancer." }}
 {{- end }}
 {{- if and .Values.controller.externalGateway.enabled (not (include "kconmon-ng.scrapeConfig.externalAgents.enabled" .)) }}
 {{- $todo = append $todo "scrapeConfig.externalAgents.enabled=true — the gateway admits external agents but nothing scrapes them, so their matrix rows and dashboard panels stay empty (needs the operator's ScrapeConfig CRD)." }}

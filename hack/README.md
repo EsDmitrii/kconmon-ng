@@ -19,6 +19,8 @@ the console applies is stored and never evaluated. Here it is picked up and eval
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.31+ | `brew install kubectl` |
 | [Go](https://go.dev/) | 1.26+ | `brew install go` |
 
+`local-test.sh` also needs `openssl`, `python3`, `curl` and `lsof` on `PATH`.
+
 ## Quick Start (automated)
 
 The `local-test.sh` script handles everything in one command:
@@ -49,9 +51,15 @@ Other commands:
 ./hack/local-test.sh down     # delete the cluster
 ```
 
-`up` and `smoke` print `PASS:` / `FAIL:` lines per console check and exit non-zero if any of them
-failed — the URLs and dashboards still get printed first, so a failure never costs you the rest of
-the output.
+`up` and `smoke` print `PASS:` / `FAIL:` lines per controller and console check and exit non-zero
+if any of them failed — the URLs and dashboards still get printed first, so a failure never costs
+you the rest of the output.
+
+Every `kubectl` and `helm` call in the script carries `--context kconmon-test`, whatever your
+current context is: switching kubectl to another cluster between runs cannot redirect an install
+there. The manual steps below use plain `kubectl` and `helm`, so check
+`kubectl config current-context` says `kconmon-test` before running them (`minikube start` selects
+it).
 
 ## Manual Step-by-Step
 
@@ -521,7 +529,8 @@ minikube delete -p kconmon-test
 - Ensure `pullPolicy: Never` is set in `values-local.yaml`
 
 **Port-forward conflicts**
-- Kill stale port-forwards: `lsof -ti:8080 | xargs kill -9 2>/dev/null`
+- Stop a stale port-forward: `lsof -a -t -c kubectl -iTCP:8080 -sTCP:LISTEN | xargs kill`. A bare
+  `lsof -ti:8080` also lists every client connected to that port, so do not feed it to `kill -9`
 - The script uses 18080 (controller), 18081 (agent), 18082 (console) and 13000 (Grafana) so it does
   not collide with hand-run forwards on 8080/8081/3000
 
@@ -554,10 +563,40 @@ minikube delete -p kconmon-test
   must be set on the kube-prometheus-stack install (step 4), otherwise Prometheus only loads rule
   objects that chart created itself
 
+## Path MTU on a real kernel
+
+`hack/pmtu-netns/` checks the pmtu verdicts against a real kernel: `run.sh` builds three network
+namespaces (probe, router, echo), shrinks the router's link and drops ICMP frag-needed, and expects
+`ok`, `reduced`, `blackhole` and `unreachable` over IPv4 and the first three over IPv6. It also
+puts a route MTU of 1400 under a 1500 link with the router dropping anything larger (Cilium's
+layout, expects `ok` at 1400 in both families) and moves the probe's source address onto `lo`
+(expects `ok` at 1500). Last, it gives the echo side a second address in each family and expects
+`ok` at 1500 and a successful udp probe at both addresses of each family: the echo must answer from
+the address it was probed at, since the probes use connected sockets. It needs root, `iproute2` and
+`iptables`, so never run it in your workstation's own namespaces. CI runs it on the runner VM
+(`PMTU in network namespaces` in `.github/workflows/ci.yaml`); locally, use a privileged container
+for your host's architecture:
+
+```bash
+docker run --rm --privileged --platform linux/arm64 -v "$PWD":/src:ro -w /src golang:1.27 bash -c \
+    'apt-get update -qq && apt-get install -y -qq iproute2 iptables \
+     && cp -r /src /work && cd /work && hack/pmtu-netns/run.sh'
+```
+
+The last line reads `pmtu-netns: ok, reduced, blackhole and unreachable match on a real kernel ...`
+and the exit code is 0.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `local-test.sh` | Automated setup/teardown script |
 | `values-local.yaml` | Helm values override for local testing (local images, all checkers enabled, debug logging, console with database + alerting + webhooks + Prometheus) |
+| `pmtu-netns/` | Real-kernel pmtu verdict check across three network namespaces (see above) |
+| `networkpolicy-check.py` | Renders the chart's NetworkPolicies and evaluates them with NetworkPolicy v1 semantics: every legitimate flow open, the controller closed to peers and external CIDRs, `networkPolicy.dnsEgress` reaching a node-local DNS cache. It also models Cilium: no ipBlock reaches the `kube-apiserver` entity, so the controller and the console get the apiserver only through the chart's CiliumNetworkPolicy (`networkPolicy.ciliumKubeAPIEgress`), which renders exactly when that knob and the `cilium.io/v2` API say so. CI runs it in Helm Lint; locally `python3 hack/networkpolicy-check.py charts/kconmon-ng` |
+| `chart-render-check.py` | Render-time contracts: values the agent refuses at startup (`mtr.cooldown`, zero timing or an interval below 100ms on an enabled checker, `expectStatus` other than 0 or 100-599) and negative `console.websocket` caps fail `helm install` on the schema, naming the key; `console.clientAddress.trustedProxyCIDRs` and `console.auth.header.trustedProxyCIDRs` reach the console's `config.yaml` in every auth mode, the first only for a console image 2.5.0 or newer; `console.websocket` caps reach it as set, 0 included, and stay out for a console image older than 2.5.0; the alerting and leader-election Roles stay scoped to their own objects, rendered names are unique, numeric Secret fields render as digits, and `NOTES.txt` flags the risky combinations. CI runs it in Helm Lint, and `make helm-template` runs it too; locally `python3 hack/chart-render-check.py charts/kconmon-ng` |
 | `postgres-local.yaml` | Throwaway PostgreSQL for the console: Deployment on an `emptyDir`, Service, and the Secret holding the DSN under key `dsn` |
+| `values-keys-lint.py` | Fails when a CI workflow, an E2E values file or `values-local.yaml` sets a chart key `values.yaml` does not define (Helm accepts unknown keys silently), including the `--set` and `f"key=..."` lists `ci.yaml` builds in Python. CI runs it in Helm Lint; locally `python3 hack/values-keys-lint.py` |
+| `schema-lint.py` | Rejects duplicate keys in `values.schema.json`, which `json.load` would silently collapse. Helm Lint and `make helm-lint` run it |
+| `rules-test/` | promtool unit tests for the chart's alert rules, rendered from the chart by `render-and-test.sh`, which needs `helm` and `promtool` on `PATH`. CI runs them in Helm Lint |
+| `scale-rig/` | Controller scale rig: a real controller against N in-process agent clients; see its own `README.md` |
