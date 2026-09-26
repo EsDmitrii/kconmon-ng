@@ -1,11 +1,15 @@
 # kconmon-ng
 
+![The console matrix of a 10-node cluster: on TCP all 90 pairs are green; on PMTU the pairs between zone-b and zone-c, every path into worker2 except worker3's and three single pairs turn red as black holes at 1400 and 1280 bytes and worker3's row, its path into worker2 included, turns amber on a reduced 1400-byte path, 38 of 90 pairs in all, while TCP stays green; last, the worker6 to worker2 pair card shows 0.0% TCP failures next to a 1400 of 1500 byte black hole one way and full size the other](img/pmtu-black-hole.gif)
+
 **When someone says "the network is fine", answer with data.**
 
 kconmon-ng turns inter-node connectivity into a measured fact. An agent runs
 on every Kubernetes node and probes every other node over TCP, UDP and ICMP
-every five seconds; it also resolves DNS from each node and can check HTTP
-endpoints you configure. Each probe is a specific act: a UDP probe sends a
+every five seconds, and once a minute checks that a full-size datagram with
+Don't Fragment set still crosses each pair (the path MTU probe, since 2.5.0);
+it also resolves DNS from each node and can check HTTP endpoints you
+configure. Each probe is a specific act: a UDP probe sends a
 burst of 5 packets with a 250 ms reply timeout and computes loss as sent
 minus received over sent, while a TCP probe dials the peer with a 1 s
 timeout. The default DNS check resolves
@@ -18,7 +22,7 @@ vanishing into a green aggregate: UDP dropping on one pair while TCP stays
 clean, or DNS timing out from a single node. When a TCP, UDP or ICMP probe
 fails, the agent fires an MTR trace to that peer, so the bad hop is on record
 before anyone starts looking. One caution before a big rollout: pairs grow as
-N×(N−1) and each directed pair keeps roughly 75 series, so read
+N×(N−1) and each directed pair keeps 78 series, so read
 [Scaling and cardinality](metrics.md#scaling-and-cardinality) before pointing
 this at a large cluster.
 
@@ -30,20 +34,20 @@ broke.
 [Install in 15 minutes](getting-started/install-15-min.md){ .md-button .md-button--primary }
 
 <figure markdown="span">
-  ![Console Overview on a kind cluster with an external agent: all 110 pairs healthy, 11/11 nodes ready plus one external agent, no failing or degraded pairs, no firing alert, one open incident](img/console-overview.png){ loading=lazy }
-  <figcaption>The Overview page on a kind cluster with ten in-cluster agents and the external agent edge-host-01: all 110 pairs healthy, 11/11 nodes ready plus one external agent, an empty worst-pairs panel over 110 measured pairs, no firing alert and one open incident, a zone-c blackhole drill.</figcaption>
+  ![Console Overview on a six-node kind cluster during a staged outage: 10 pairs failing (TCP) in the header, 6/6 nodes ready, 10 failing and 0 degraded pairs, the Worst pairs table with five worker4 pairs at 100.0%, the console rules NodeTcpUnreachable (critical) and PairPmtuBlackHole (warning) firing, and three open incidents: PMTU black hole to worker5, Zone b network degradation and worker4 TCP outage](img/console-overview.png){ loading=lazy }
+  <figcaption>The Overview page mid-incident on a six-node kind cluster: worker4 has lost TCP to and from every peer, so 10 of 30 pairs fail and the worst-pairs table ranks five of them at 100.0%. Two console rules fire, NodeTcpUnreachable (critical) for worker4 and PairPmtuBlackHole (warning) for a path MTU black hole from worker3 to worker5, and three incidents are open: PMTU black hole to worker5, Zone b network degradation and worker4 TCP outage.</figcaption>
 </figure>
 
 <div class="grid" markdown>
 
 <figure markdown="span">
-  ![Console Matrix, TCP, live, during a staged break: worker2, worker5, worker6 and worker7 red at 100% as rows and columns, 68 of 110 cells red, the external agent edge-host-01 green as a row and a column everywhere except toward the four broken nodes](img/console-matrix.png){ loading=lazy }
-  <figcaption>The Matrix on TCP, live, mid-break: worker2, worker5, worker6 and worker7 are red at 100% as rows and as columns, 68 of 110 cells. The external agent edge-host-01 is the top row and the first column, green against every healthy node and red only where the break is.</figcaption>
+  ![Console Matrix, TCP, live, zoomed to 150% during a staged break: the worker4 row and column red at 100.0%, 10 of 30 cells, the other 20 green at 0.0%](img/console-matrix.png){ loading=lazy }
+  <figcaption>The Matrix on TCP, live, mid-break and zoomed to 150%: worker4 is red at 100% as a row and as a column, 10 of 30 cells, and the 20 pairs among the other five nodes stay green.</figcaption>
 </figure>
 
 <figure markdown="span">
-  ![Console Time Machine: the Matrix resolved at 9/15/2026 09:36:00 instead of now, the amber banner and time control marking the instant, all 110 cells green including the edge-host-01 row and column](img/console-timemachine.png){ loading=lazy }
-  <figcaption>The Matrix rewound with <code>?at=</code> to 9/15/2026 09:36:00, a minute before the break in the frame above: the amber banner and time control mark the viewed instant, and every one of the 110 pairs is green, the external agent's row and column included.</figcaption>
+  ![Console Time Machine: the Matrix resolved at 9/26/2026 08:37:30 instead of now, the amber banner and time control marking the instant, all 30 cells green](img/console-timemachine.png){ loading=lazy }
+  <figcaption>The Matrix rewound with <code>?at=</code> to 9/26/2026 08:37:30, about a minute and a half before the break in the frame above: the amber banner and time control mark the viewed instant, and every one of the 30 pairs is green, worker4 included.</figcaption>
 </figure>
 
 </div>

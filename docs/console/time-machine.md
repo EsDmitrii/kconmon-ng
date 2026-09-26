@@ -3,8 +3,8 @@
 View the console at a past instant: what did this page say at 03:12 last night? Open the console *as of* the incident and read every page in that moment's terms, or put two tabs on two `?at=` values for a before/after of a change.
 
 <figure markdown>
-![Overview with the Time Machine engaged at 9/15/2026, 11:53:14: the amber banner You are viewing … return to Live to act with a Return to Live button, 68 pairs failing (TCP), 11/11 nodes ready with +1 external agent, 68 failing pairs, the Worst pairs table at 30.5% with kconmon-stand-worker2 → edge-host-01 badged external, the Firing alerts panel saying alert state is a live-only signal, the open incident zone-c blackhole drill, and the time picker popover open with 15m ago, 1h ago, 6h ago and 24h ago presets, a September 2026 calendar with the 15th selected, date and time fields, Now, Cancel and Apply](../img/console-timemachine-engaged.png){ loading=lazy }
-<figcaption>Engaged, with the picker open: the amber control top right shows the viewed instant and opens a popover with relative presets, a calendar, date and time fields and <em>Now</em>. The banner offers <em>Return to Live</em>, and the page reads in that instant's terms: 68 pairs failing on TCP, 11 of 11 nodes ready plus one external agent, <code>edge-host-01</code> badged external in the worst pairs, and a Firing alerts panel explaining that alert state is live-only and has no history here.</figcaption>
+![Overview with the Time Machine engaged at 9/26/2026, 06:26:30: the amber banner You are viewing … return to Live to act with a Return to Live button, 18 pairs failing (TCP), 6/6 nodes ready, 18 failing pairs, the Worst pairs table at 100.0% led by kc-accept-control-plane → kc-accept-worker2, the Firing alerts panel saying alert state is a live-only signal, the open incident acc-worker2-worker5 cut drill, and the time picker popover open with 15m ago, 1h ago, 6h ago and 24h ago presets, a September 2026 calendar with the 26th selected, date and time fields, Now, Cancel and Apply](../img/console-timemachine-engaged.png){ loading=lazy }
+<figcaption>Engaged, with the picker open: the amber control top right shows the viewed instant and opens a popover with relative presets, a calendar, date and time fields and <em>Now</em>. The banner offers <em>Return to Live</em>, and the page reads in that instant's terms: 18 pairs failing on TCP, 6 of 6 nodes ready, every worst pair touching worker2 or worker5, and a Firing alerts panel explaining that alert state is live-only and has no history here.</figcaption>
 </figure>
 
 ## The ?at= parameter
@@ -15,7 +15,7 @@ The parameter is strict on purpose, so a shared link means the same thing to the
 
 ## Entering and leaving
 
-The control lives in the page header, next to the range presets: the presets pick how long the window is, this picks where it ends. Idle it reads **Time Machine: Now**; engaged it shows the viewed instant, turns amber, and a banner appears — "You are viewing {at}", with a **Return to Live** button.
+The control lives in the page header, next to the range presets: the presets pick how long the window is, this picks where it ends. Idle it reads **Time Machine: Now**; engaged it shows the viewed instant, turns amber, and a banner appears: "You are viewing {at}", with a **Return to Live** button. Pressing it moves keyboard focus to the page's Time Machine control, or to the page itself where there is none, so focus is never dropped.
 
 Other routes in and out:
 
@@ -45,6 +45,7 @@ Even on time-aware pages, some data has no past to travel to, and each page stat
 - **Alert firing state** is live-only, since Prometheus keeps no firing history (Overview, Incidents).
 - The **MTR Explorer's** route panes are live; those endpoints take no time parameter ([Routes · MTR](routes-mtr.md)).
 - **Run history** is cut to the instant client-side over loaded pages, because `GET /api/v1/runs` has no time filter.
+- **Open incidents**, on the Overview and in the incident card of the pair, node and target pages, are cut to the instant client-side. The incident list has no "open at" filter: its time parameters match the window an incident was saved with, not when it was declared or resolved. So the page scans the list newest first and keeps the incidents declared by the instant and not resolved by then. The scan stops after 50 pages, and when that cuts it short, the panel says an older incident open at the instant may be missing. The object pages' card says "at {instant}" under its title.
 - A **Topology** past view is a [reconstruction from topology events](topology.md#the-map-under-the-time-machine), bounded by database retention. It starts from the topology snapshot the console stores on connect and hourly, so an instant from before the first snapshot shows only the nodes whose agents changed after recording began.
 
 How far back you can go is bounded by `database.retentionDays` (default 90 days) for event-backed views, and by Prometheus's own retention for metric-backed ones.

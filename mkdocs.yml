@@ -114,7 +114,7 @@ nav:
       - Matrix: console/matrix.md
       - Topology: console/topology.md
       - Incidents: console/incidents.md
-      - Routes (MTR): console/routes-mtr.md
+      - Routes · MTR: console/routes-mtr.md
       - Run checks: console/run-checks.md
       - Metrics: console/metrics.md
       - PromQL: console/promql.md
@@ -123,7 +123,7 @@ nav:
       - Settings: console/settings.md
       - Command palette: console/command-palette.md
       - Time Machine: console/time-machine.md
-      - Pair and node pages: console/pair-and-node-pages.md
+      - Pair, node and target pages: console/pair-and-node-pages.md
   - Scenarios:
       - Diagnose a slow pair: scenarios/diagnose-a-slow-pair.md
       - Catch an MTU black hole: scenarios/mtu-black-hole.md

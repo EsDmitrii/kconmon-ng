@@ -36,7 +36,7 @@ config:
       allowedCidrs: ["10.20.0.0/16"] # matched against the RESOLVED address
       deniedCidrs: []                # carve-outs; denied wins
 networkPolicy:
-  externalEgress: # required when networkPolicy.enabled — see below
+  externalEgress: # required when networkPolicy.enabled; see below
     - to:
         - ipBlock:
             cidr: 10.20.0.0/16 # no ports: key, so ICMP and MTR pass too
@@ -62,12 +62,15 @@ over three object kinds. The path is target → definition → schedule:
    name to resolve), `http` needs a target of kind `url`. A definition no
    agent could run as written (http against a `host` target, dns with no
    query) is refused at save time with `422`, not accepted and silently
-   skipped later.
+   skipped later. A `dns` check asks the target itself: the agent sends the
+   A and AAAA queries to that address (over TCP again when the answer is
+   truncated) and never answers from `/etc/hosts` or `hostAliases`, so a
+   resolver that is down reads red even for a name pinned there.
 3. **Schedules tab → New schedule**: pick the definition, kind `continuous`.
 
 <figure markdown>
-  ![Scheduled checks, Definitions tab with the New definition form open: Name billing-db-tcp-per-zone, Check type tcp, Source selection one-per-zone, Destination kind target, Destination target legacy-billing-db, Plane pod, an empty Params field, Enabled ticked, the projection ~5 series (5 agents × 1 protocol), limit 400, and Create definition](../img/console-scheduled-checks-definitions.png){ loading=lazy }
-  <figcaption>Definitions tab → New definition, filled in for a TCP check against the <code>legacy-billing-db</code> target from one agent per zone, with the projected cost (~5 series from 5 agents) shown before the save.</figcaption>
+  ![Scheduled checks, Definitions tab with the New definition form open: Name acc-billing-db-tcp-per-zone, Check type tcp, Source selection one-per-zone, Destination kind target, Destination target acc-legacy-billing-db, Plane pod, an empty Params field, Enabled ticked, the projection ~3 series (3 agents × 1 protocol), limit 400, and Create definition](../img/console-scheduled-checks-definitions.png){ loading=lazy }
+  <figcaption>Definitions tab → New definition, filled in for a TCP check against the <code>acc-legacy-billing-db</code> target from one agent per zone, with the projected cost (~3 series from 3 agents) shown before the save.</figcaption>
 </figure>
 
 Continuous checks run at a **fixed cadence: every 30s, with a 5s per-probe
@@ -105,10 +108,20 @@ cannot fail the whole assignment. The reasons differ:
   unbounded for internet paths. A **one-shot** MTR to an external target
   still works through diagnostics.
 
-A definition that slips through with either type (written before the guard,
-or straight to the database) is skipped by the reconciler and counted in
+Since 2.5.0 the console refuses both earlier: a `udp` definition toward a
+target or ad-hoc destination at write time, and a `continuous` schedule of an
+`mtr` one (a `once` or `interval` schedule of it still runs the one-shot
+trace). A definition that slips through with either type (written before
+2.5.0, or straight to the database) is skipped by the reconciler and counted in
 `kconmon_ng_console_external_specs_skipped_total{reason="check-type"}`. That
 metric, not an error page, is the observable symptom.
+
+The controller takes at most 8 MiB of assignment in one PUT. When the enabled
+continuous definitions would need more, the reconciler leaves whole
+definitions out, newest first, logs a WARN once per definition and reason per
+console process, and counts them as `reason="over-budget"`, so a definition
+added later never pushes out one already running. A 413 from the controller
+itself still logs an ERROR.
 
 ## The target cap
 

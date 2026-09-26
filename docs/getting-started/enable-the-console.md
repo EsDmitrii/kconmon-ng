@@ -39,8 +39,8 @@ flag is off. It renders a teaching empty state that names the capability and
 the value that turns it on, and the API routes behind it answer `503`.
 
 <figure markdown="span">
-  ![Overview on a database-less install whose Prometheus has no agent series yet: the Setup progress card (Agents registered 11, Prometheus scraped not yet, First probe round waiting), 11/11 nodes ready plus one external agent, pair tiles showing dashes, and the Open incidents and Recent events panels each saying History needs a database — set console.database.mode](../img/console-overview-setup.png){ loading=lazy }
-  <figcaption>Overview on a minimal install, before Prometheus holds a single agent series: the Setup progress card names the next step, the pair tiles print dashes instead of zeros, and the two history panels explain that history needs a database and which value turns it on, instead of erroring. Eleven agents are registered: ten in the cluster and the external agent counted under the node tile as <em>+1 external agent</em>.</figcaption>
+  ![Overview on an install whose Prometheus has no agent series yet: the Setup progress card (Agents registered 6, Prometheus scraped not yet, First probe round waiting), 6/6 nodes ready, pair tiles showing dashes with No pair was measured here, no firing alert, and, since this install has a database, the Open incidents panel with acc-worker2-worker5 cut drill and Recent events rows](../img/console-overview-setup.png){ loading=lazy }
+  <figcaption>Overview before Prometheus holds a single agent series: the Setup progress card names the next step and the pair tiles print dashes instead of zeros. Six agents are registered. This install has a database, so the Open incidents and Recent events panels show history; without one they say that history needs a database and which value turns it on.</figcaption>
 </figure>
 
 The replicas restriction has a concrete reason. Sessions, the fixed-window
@@ -57,23 +57,31 @@ documents the stack it is tested against (CloudNativePG, valkey-helm).
 
 ## Minimal enable
 
-One flag on the release from the [install page](install-15-min.md), nothing
+Two keys on the release from the [install page](install-15-min.md), nothing
 else changes:
 
 ```bash
-helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --reset-then-reuse-values \
   --set console.enabled=true \
   --set console.prometheus.url=http://prometheus-operated.monitoring:9090
 
 kubectl port-forward svc/kconmon-ng-console 8081:8080
 ```
 
+`--reset-then-reuse-values` keeps what you set on the install page
+(`serviceMonitor`, `prometheusRule`, `dashboards`). Without it Helm resets
+every earlier `--set` to the chart default: the ServiceMonitor,
+PrometheusRule and dashboards disappear, Prometheus stops scraping the agents
+and the Matrix comes back empty. If you keep your values in a file, pass
+`-f <your-values.yaml>` together with the two `--set` flags instead.
+
 That gets you the read-only pages as an anonymous viewer on
 <http://localhost:8081>.
 
 <figure markdown="span">
-  ![Matrix on TCP with the Live badge and the anonymous-mode banner: ten kconmon-stand nodes plus the external agent edge-host-01, all 110 cells green](../img/enable-the-console-minimal.png){ loading=lazy }
-  <figcaption>The console in anonymous mode: Matrix on TCP, every one of the 110 pairs green, the external agent <code>edge-host-01</code> included as a row and a column. The <em>Live</em> badge means this stand also had <code>controller.events.enabled</code> on; with the Prometheus URL alone the page polls instead.</figcaption>
+  ![Matrix on TCP with the Live badge: six kc-accept nodes, all 30 cells green at 0.0% with a p95 RTT of 1.4 to 2.4 ms](../img/enable-the-console-minimal.png){ loading=lazy }
+  <figcaption>The Matrix on TCP, every one of the 30 pairs green. This stand runs local auth with admin signed in, so the frame has no anonymous-mode banner. The <em>Live</em> badge means this stand also had <code>controller.events.enabled</code> on; with the Prometheus URL alone the page polls instead.</figcaption>
 </figure>
 
 Add flags from the table above one at a time as you need them; every knob is
@@ -88,7 +96,7 @@ and custom roles can be added).
 
 | Mode | Identity comes from | Requires |
 | --- | --- | --- |
-| `anonymous` (default) | nobody — every request gets the fixed `console.auth.anonymous.role` (`viewer` by default) | nothing |
+| `anonymous` (default) | nobody: every request gets the fixed `console.auth.anonymous.role` (`viewer` by default) | nothing |
 | `local` | username/password against the database, with a bootstrap admin created on first start | `database.existingSecret` |
 | `header` | a trusted in-cluster reverse proxy setting `X-Remote-User`/`X-Remote-Groups` | non-empty `console.auth.header.trustedProxyCIDRs`; otherwise headers are an auth bypass, and the console refuses to start |
 | `oidc` | your identity provider, authorization-code flow with PKCE | `database.existingSecret`; plus `redis.existingSecret` when `console.replicas > 1` |
@@ -98,6 +106,20 @@ console roles with `console.auth.groupRoles`: that map is what makes a fresh
 install usable before anyone can create role bindings through the API. The
 [OIDC setup scenario](../scenarios/oidc-setup.md) walks the full flow.
 
+Behind an Ingress, set `console.clientAddress.trustedProxyCIDRs` to the
+ingress controller's addresses (its pod CIDR at the widest) in every mode; a
+pod inside the list can name any client address. The console takes the client
+address for its per-address rate limits, the `/ws` socket cap and the audit
+log from `X-Forwarded-For` only when the connection comes from one of those
+networks; without them every client shares the ingress's address and one
+budget. That list never grants identity. In `header` mode,
+`console.auth.header.trustedProxyCIDRs` names only the authenticating proxy
+(see [below](#why-header-mode-ships-no-default-for-trustedproxycidrs)); while
+the client-address list is empty, the header list gives the client address
+too. With `console.ingress.enabled` on and both lists empty, the notes
+`helm install` prints name `console.clientAddress.trustedProxyCIDRs` under
+STILL TO DECIDE. See [Configuration](../configuration.md#console).
+
 ### First login in `local` mode
 
 The bootstrap admin is fully declarative. `console.auth.local.bootstrapAdmin`
@@ -106,6 +128,17 @@ names the account, and its password comes from a Secret you point at with
 default; a chart-managed Secret is the alternative). The account is created
 on first start only, gated on the users table being empty. A console booting
 against a database that already holds any user creates nothing.
+
+The login form posts `{"username": ..., "password": ...}` to
+`POST /api/v1/auth/login`. A successful sign-in answers `204 No Content`
+with no body and sets two cookies: the session cookie
+(`console.auth.session.cookieName`, `__Host-kconmon_session` by default) and
+`csrf`, whose value every later
+mutating request echoes in `X-CSRF-Token`. A script that signs in this way
+checks for 204, not for a JSON body. An API token is the simpler route for
+automation, but a token holds exactly `console.auth.defaultRole` and nothing
+else: that is empty by default, so a token gets 403 on every permissioned
+route until you set it (see [Settings](../console/settings.md#api-tokens)).
 
 The user and its admin role binding are written in one transaction, and that
 detail is operational, not academic. An earlier design re-created a missing

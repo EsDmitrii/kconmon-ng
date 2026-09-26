@@ -1,160 +1,352 @@
 ## kconmon-ng v2.5.0
 
-> The failure small probes cannot see gets a probe of its own. A pair where
-> handshakes and pings cross while full-size packets vanish (an overlay that
-> eats the headroom, an underlay smaller than the pods were told, a firewall
-> that drops ICMP "fragmentation needed") stayed green on every plane; a path
-> MTU probe now turns it red with the size that still crosses. The rest of the
-> release pays the debts a first outside user runs into: one page per
-> unreachable node instead of one per pair, maintenance windows that also hold the
-> console's webhooks, local users managed from the console, a config reload
-> that survives the way files are really replaced, and a console that loads a
-> fifth of the JavaScript it used to. **The probe is on by default and two of
-> the three new rules are critical: read Upgrade notes before rolling out.**
+> 2.5.0 adds a path MTU probe for the failure small probes cannot see: a pair
+> where handshakes and pings cross while full-size packets vanish now turns red
+> with the size that still crosses, instead of staying green on every plane.
+> The rest of the release pays the debts a first outside user runs into:
+> node-level alerts, maintenance windows that hold the console's webhooks,
+> local users managed from the console, a config reload that survives the way
+> files are really replaced and applies what it reads, a console whose first
+> load is a fifth of what it was, and a set of security fixes.
+
+**Read the Upgrade notes before rolling out: the probe is on by default, two of
+the four new rules are critical, and the chart's NetworkPolicy is split per
+component.**
 
 ### Added
 
-- **Path MTU probe.** Once a minute (`config.checkers.pmtu.interval`) every
-  agent sends each peer, to its UDP echo port, a 64-byte datagram and a
-  full-size one with Don't Fragment set. The full size is the MTU of the
-  interface that routes to the peer, what the CNI configured in a pod and the
-  NIC's under `agent.hostNetwork`; `config.checkers.pmtu.size` overrides it
-  in IP-level bytes. The small and the full-size datagram get two attempts
-  each. When the full size does not come back, the agent bisects (at most 16
-  sizes, one datagram each, `timeout` per datagram, 500ms by default), then
-  sends the full size and the size it found once more each: the first must
-  vanish again and the second must cross again before the pair counts as a
-  black hole, so a lossy path does not pass for one. A pair reads:
-    - `ok`: the full size is echoed back;
-    - `reduced`: the path refuses it with ICMP frag-needed. TCP adapts; UDP
-      without its own path MTU discovery does not;
-    - `blackhole`: full-size datagrams vanish while the small one crosses,
-      and every large transfer on the pair stalls;
-    - nothing when the small datagram is lost too, or when the sizes above it
-      are lost at random: that is a connectivity failure, and the UDP plane
-      owns it.
-  On Linux the socket probes with `IP_PMTUDISC_PROBE`, so a path MTU the
-  kernel cached from an earlier ICMP never shrinks the probe. A pmtu failure
-  does not trigger MTR: the route is not what broke. New series:
-  `kconmon_ng_pmtu_bytes` (per pair, the size that crossed on the last probe),
-  `kconmon_ng_pmtu_results_total` (`success` for ok and reduced, `fail` for a
-  black hole), `kconmon_ng_zone_pmtu_results_total`, and
-  `kconmon_ng_agent_pmtu_probe_bytes` (the size an agent probes at). Agents
-  advertise `plane:pmtu`. Walkthrough with a kind reproduction in
+- **Path MTU probe** (`config.checkers.pmtu`, on by default). Once a minute
+  every agent sends each peer's UDP echo port a 64-byte datagram and a
+  full-size one with Don't Fragment set. The full size is the MTU of the route
+  to the peer (the route's own `mtu` when the CNI sets one, as Cilium does,
+  else the egress device's); `size` overrides it. When the full size does not
+  come back, the agent bisects (at most 16 sizes, `timeout` 500ms each) and
+  confirms both ends, so a lossy path does not pass for a black hole. A pair
+  reads `ok` (the full size is echoed), `reduced` (the path answers ICMP
+  frag-needed: TCP adapts, UDP without its own path MTU discovery does not) or
+  `blackhole` (full-size datagrams vanish while the small one crosses, and
+  large transfers stall). A lost small datagram is a connectivity failure,
+  left to the UDP plane, and a pmtu failure does not trigger MTR. The agent
+  warns when `interval` is under 28 timeouts (14s) or 3m and more. New series:
+  `kconmon_ng_pmtu_bytes` and `kconmon_ng_pmtu_probe_bytes` (per pair: the
+  size that crossed, the size probed), `kconmon_ng_pmtu_results_total`
+  (`success` for ok and reduced, `fail` for a black hole),
+  `kconmon_ng_zone_pmtu_results_total` and `kconmon_ng_agent_pmtu_probe_bytes`.
+  Agents advertise `plane:pmtu`. Walkthrough in
   [Catch an MTU black hole](https://esdmitrii.github.io/kconmon-ng/scenarios/mtu-black-hole/).
-- **`PathMTUBlackHole`** (`prometheusRule.pathMtuBlackHole`, warning): more
-  than half of a pair's path MTU probes failed over ten minutes, held for
-  five; the summary names the path MTU. A network that runs below the
-  interface MTU on purpose and clamps TCP MSS can probe at the size it really
-  carries with `config.checkers.pmtu.size`, or turn the rule off.
+- **`PathMTUBlackHole` and `ZonePathMTUBlackHole`**
+  (`prometheusRule.pathMtuBlackHole`, warning): more than half of a pair's
+  probes failed over 10 minutes, or more than `sustainedThreshold` (0.1) over
+  30 minutes with at least two failures and one in the last 10, held for 5.
+  The second arm catches a black hole on one of several ECMP paths. The zone
+  rule fires only where no per-pair pmtu series exist
+  (`agent.metrics.detail=zone-only`). A network that carries less than its
+  routes say on purpose and clamps TCP MSS can set `config.checkers.pmtu.size`
+  or turn the rule off.
 - **`NodeUnreachable` and `NodeIsolated`** (`prometheusRule.nodeUnreachable`,
-  `.nodeIsolated`, critical, `for: 5m`). A node is unreachable when more than
-  half of the peers probing it over TCP fail most of their probes, and
-  isolated when it fails to reach more than half of its own peers; either
-  needs at least `minPeers` (2) peers reporting, so a two-node test cluster
-  does not page on one bad pair. Both fire for a node that stays registered
-  while the TCP probes fail (a host firewall, a NetworkPolicy, the node's CNI
-  datapath); a node that stops altogether leaves the mesh within
-  `config.controllerAgentTtl` and pages as `KconmonAgentsMissing`. The
-  per-pair alerts still fire; the
+  `.nodeIsolated`, critical, `for: 5m`): most peers fail most of their TCP
+  probes to a node, or a node fails to reach most of its peers, with at least
+  `minPeers` (2) reporting. They catch a node that stays registered behind a
+  host firewall, a NetworkPolicy or a broken CNI datapath; the
   [inhibit rules](https://esdmitrii.github.io/kconmon-ng/metrics/#one-alert-per-node-instead-of-one-per-pair)
-  on the metrics page fold them under the node alert in Alertmanager.
-- **Path MTU on the dashboards.** Overview: black-hole pairs over 15
-  minutes, pairs on a reduced path (black holes not counted twice), and the
-  pairs below their probe size with the size that crosses. Node Detail: the
-  path MTU to each peer and black-hole probes by peer.
+  on the metrics page fold the per-pair alerts under them.
+- **Path MTU on the dashboards.** Overview opens with the key indicators in
+  two rows (agents, leader, pairs, pairs with failures, black-hole and
+  reduced-path pairs), then the worst-pair and MTR bars, with the charts and
+  tables below, pairs below their probe size among them. Node Detail: the path
+  MTU to and from each peer and black-hole probes by peer. Panels show the
+  smallest size of the last 10 minutes, so an ECMP-split black hole stays on
+  screen.
 - **PMTU in the console and the CLI.** The matrix gains a PMTU protocol: the
-  cell's figure is the path MTU in bytes, green at full size, amber on a
-  reduced path ("1400 of 1500"), red from the first failed probe of a black
-  hole, and dashed "not probed" across the row of an agent older than 2.5.0,
-  which does not run the probe. The
-  Overview tiles and worst pairs (with a Path MTU / probe column), the node
-  page and the pair page (a Path MTU card with both directions) follow it.
-  Run checks accepts `pmtu` (each pair gets at least 15s) and shows the
-  verdict, the path MTU and the datagrams it took per pair.
-  `kubectl kconmon check <source> <destination> --type pmtu` prints the same
-  and exits 2 on a black hole.
-- **Local users in the console.** With `auth.mode=local`, Settings has a
-  Users section: add an account, change its role, reset its password,
-  disable it. It needs the new `users:manage` permission, which only the
-  built-in admin role carries, and the last account that can manage users
-  can be neither disabled nor moved to a role without it. Every local user
-  gets Change password in the user menu (the current password is required,
-  and attempts share the login's per-username rate limit). A password change
-  or a reset signs that user out of every other session. API:
-  `/api/v1/users`, `/api/v1/users/{id}`, `/api/v1/users/{id}/password` and
-  `/api/v1/auth/password`, in the
+  path MTU in bytes, green at full size, amber on a reduced path ("1400 of
+  1500") or while recovering, red while recent probes fail, dashed "Not run"
+  for a 2.4.x agent. The Overview, node and pair pages follow it. Run checks
+  accepts `pmtu` between nodes, and
+  `kubectl kconmon check <source> <destination> --type pmtu` exits 2 on a
+  black hole.
+- **Local users in the console.** With `auth.mode=local`, Settings > Users
+  adds, re-roles, resets, disables and deletes accounts under the new
+  `users:manage` permission (built-in admin only), which the last enabled
+  holder cannot lose. Every local user can change their own password. A
+  password change or reset ends the user's other sessions; a disable or delete
+  also revokes their API tokens. Routes under `/api/v1/users` in the
   [Console API](https://esdmitrii.github.io/kconmon-ng/reference/console-api/).
-- **Fault-injection end-to-end tests.** The e2e job now breaks the network
-  on purpose with iptables on a kind node: a cut pair must fail its probes,
-  get a reactive MTR and recover, and a black hole on full-size datagrams
-  must come out of the pmtu probe named as one. A local-auth leg drives user
-  management through the API.
+- **NetworkPolicy keys** (Upgrade notes 4 to 6):
+    - `networkPolicy.dnsEgress` replaces the default DNS rule, for NodeLocal
+      DNSCache and other host-network resolvers;
+    - `networkPolicy.ciliumKubeAPIEgress` (`auto`) adds CiliumNetworkPolicies
+      for apiserver and node traffic, which no ipBlock matches on Cilium;
+    - `networkPolicy.clusterCIDRs` carves pod and Service CIDRs out of the
+      default `0.0.0.0/0` egress, which on Calico and Antrea matches pods;
+    - `console.networkPolicy.prometheusTargetPort` opens the pod port behind
+      a Prometheus Service that maps it (Thanos 9090 to 10902).
+- **`console.clientAddress.trustedProxyCIDRs`**: the proxies whose
+  `X-Forwarded-For` names the client for rate limits, the WebSocket cap and
+  the audit log, never for identity (Upgrade note 20).
+- **`agent.tls.enabled`** (`false`): TLS verified against the system trust
+  pool with no other TLS field set, for an external agent whose gateway has a
+  publicly signed certificate.
 
 ### Changed
 
-- **Maintenance windows hold the console's alert webhooks.** A
-  console-managed alert that starts firing inside an open window matching it
-  (fleet-wide, its source or destination node, the pair, or its target) is
-  not delivered. If the window closes while the alert still fires, the fired
-  webhook goes out then; if it resolves inside the window, nothing is sent at
-  all. `kconmon_ng_console_webhook_suppressed_total{event}` counts what the
-  windows held.
-- **The node page covers both directions.** Its health figure and tier take
-  every pair the node is on, into it as well as out of it, so the node
-  `NodeUnreachable` names no longer reads Healthy on its own page; the tier
-  follows the matrix, so a reduced path reads Degraded. The per-peer
-  breakdown switches between To peers and From peers and opens on the
-  direction the trouble is in.
-- **Diagnostic runs list failed pairs first**, then the ones still running,
-  then the rest, so page one of a 90-pair run shows what broke.
-- **Console pages load on demand.** Each page is its own chunk, fetched on
-  the first visit or when the pointer rests on its link. The JavaScript the
-  first page load needs drops from 935 kB to 198 kB gzipped, and the charts
-  pull in only the ECharts parts they draw with (180 kB gzipped instead of
-  371 kB, on chart pages only).
-- **Build stack.** The Go toolchain moves to 1.27.1 (the module stays on
-  language version 1.26), images build on distroless `static-debian13`, the
-  console UI on Vite 8; the e2e and dev fixtures run PostgreSQL 18 and
-  Valkey 9.
+- **Maintenance windows hold the console's alert webhooks.** An alert that
+  starts firing inside a matching window (fleet-wide, a node, the pair or its
+  target) is delivered only if it still fires when the window closes, and not
+  at all if it resolves inside. A restarted console keeps holding.
+  `kconmon_ng_console_webhook_suppressed_total{event}` counts what was held.
+- **Config hot reload applies what it reads.** The keys that go live and the
+  ones that wait for a restart are in Upgrade note 11 and
+  [What reloads and what does not](https://esdmitrii.github.io/kconmon-ng/configuration/#what-reloads-and-what-does-not).
+- **The node page covers both directions**, so a node `NodeUnreachable` names
+  no longer reads Healthy there, and its peer breakdown switches between To
+  peers and From peers. Diagnostic runs list failed pairs first.
+- **Console pages load on demand.** The first page load drops from 935 kB to
+  198 kB gzipped, and charts load only the ECharts parts they draw with.
+- **DNS probes against an explicit resolver ask the absolute name**, so the
+  search list no longer multiplies the query or sends cluster names outside.
+  `checkers.dns.timeout` defaults to 2s (was 5s).
+- **A departed peer's series go away** ten minutes after it leaves the agent's
+  peer list.
+- **The controller refuses what cannot run.** `POST /api/v1/diagnostics`
+  answers 400 for an external destination with a type other than `tcp`,
+  `icmp` or `mtr` or for a `plane` other than `pod`, 501 when the source
+  agent does not run the type, and 503 `leadership lost` when the lease goes
+  mid-task. `kubectl kconmon check` exits 1 on these, and `kubectl kconmon`
+  finds the leader itself.
+- **So does the console.** Runs, definitions and schedules toward a target or
+  an ad-hoc address take only `tcp`, `icmp` and `mtr` (a continuous schedule
+  also `dns` and `http`), and an edit that would leave a stored schedule or
+  definition unable to run answers 422; `enabled: false` always saves. The
+  import follows the same rules, and the forms offer only what runs.
+- **Console API input.** Malformed input answers 400 or 422 instead of 502,
+  and alert rule names that become one Prometheus alert name are refused.
+- **The console's agent-missing template** renders the chart's
+  `KconmonAgentsMissing` expression; existing rules change on the next sync.
+- **`ZoneLossHigh` description.** Below about ten node pairs between two zones
+  one broken link crosses the default 10% alone; raise
+  `prometheusRule.zoneLossHigh.threshold` and `zoneChecksFailing.threshold`.
+- **Continuous external checks fit the controller's 8 MiB limit**: the console
+  leaves out whole definitions, newest first, and counts them in
+  `kconmon_ng_console_external_specs_skipped_total{reason="over-budget"}`.
+- **Console UI.** A silent MTR hop shows a dash, not 100% loss; refused forms
+  focus the refused field; a foreign rule import asks to confirm; phones get a
+  drawer Close button and tables that scroll inside their card.
+- **Chart.** The console gets `GOMEMLIMIT` from its memory limit. The GeoLite2
+  sidecar moves to `ghcr.io/maxmind/geoipupdate:v8.0.0`. The schema refuses
+  what the binaries refuse at startup. The install notes flag an Ingress with
+  no trusted proxies and an external gateway neither on
+  `externalTrafficPolicy: Local` nor behind `loadBalancerSourceRanges`.
+- **deb/rpm.** The packaged agent config ships with the DNS checker off, and
+  the postinstall keeps a `net.ipv4.ping_group_range` the admin already set.
+- **Release images.** `:latest`, the chart and the GitHub release follow a tag
+  only after e2e passes on its images, and only the newest stable release
+  moves `:latest`, the Latest badge and the krew index.
+- **Build stack.** Go 1.27.1, distroless `static-debian13`, Vite 8. The unused
+  OpenTelemetry SDK is gone; `observability.otel.*` logs a warning.
 
 ### Fixed
 
-- **Config hot reload stopped after the first atomic replacement.** The
-  loader watched the config file itself, so an editor's save, an ansible or
-  puppet file resource, or the kubelet's ConfigMap `..data` swap replaced the
-  watched inode and every later change went unnoticed without a word. It now
-  watches the directory and reloads when the content's hash changes.
-- **The Overview missed pairs red for packet loss.** Its tiles and worst
-  pairs tiered by the failure ratio alone, so a UDP or ICMP pair the matrix
-  painted red for loss read healthy there. Both now use the matrix's rule, and
-  the worst-pairs column reads "Fail / loss %".
-- **Deleting a target still in use on PostgreSQL 18.** PostgreSQL 18 reports
-  `ON DELETE RESTRICT` as `restrict_violation` (23001), not
-  `foreign_key_violation`, so deleting a target a check definition still
-  references came back as a store error instead of 409 target in use.
+- **Agents.**
+    - Hot reload stopped for good after the first atomic replacement of the
+      file (an editor's save, a puppet file resource, a ConfigMap swap).
+    - `logLevel: DEBUG` and `logFormat: TEXT` ran at info in JSON.
+    - An agent probed at a secondary IP, a multi-homed `advertiseAddress` or a
+      VIP read as 100% UDP loss.
+    - A dead DNS resolver read green for names in `/etc/hosts` or
+      `hostAliases`.
+    - Departed peers, targets and zones left stale series behind.
+    - A node relabel overwrote an explicit `agent.zone`.
+- **Controller.**
+    - After a failover, pairs towards late agents went unprobed for about a
+      minute.
+    - A rolling restart left no leader for the 15s lease; now about 2s.
+    - An external-check assignment or removal that an agent's stream could not
+      take was lost.
+    - A subscriber that stopped reading was never cut off, except on the peer
+      list.
+- **Console.**
+    - Chart tooltips were white on the dark theme and ignored a theme switch.
+    - An unreachable IdP, or replicas refreshing a rotating token at once,
+      signed OIDC users out.
+    - A PostgreSQL restart or a Valkey failover signed everyone out; the
+      console now answers 503 until the store is back.
+    - A custom `config.metricsPrefix` broke the browser views.
+    - Rate limits failed on Redis and Valkey before 7.0, and Redis 5 or an
+      endpoint without `CLIENT TRACKING` left each replica on its own state.
+    - A transient apply failure, a rule-name collision or a shared
+      `bundleName` could delete, overwrite or freeze the managed alert rules.
+    - A `prometheus.queryTimeout` above 30s never took effect.
+    - `/metrics` had no `go_*` or `process_*` families.
+    - The Overview read healthy a pair the matrix painted red for loss.
+    - Deleting a target in use on PostgreSQL 18 gave a store error, not 409.
+    - The Time Machine lost a node when one of its two agents deregistered.
+    - A failed MTR hop lookup waited the full enrichment TTL for a retry.
+    - A cancelled run left pairs at `dispatched`, and permalinks could miss
+      their final frames.
+    - Concurrent role changes could leave a user with two roles.
+    - Investigate lost unsaved notes, Time Machine incident lists kept
+      resolved incidents, and failed reads showed "none".
+- **Chart and dashboards.**
+    - `helm test` never started its Pod (`CreateContainerConfigError`).
+    - An unquoted numeric geoip `accountId` crash-looped geoipupdate.
+    - `PairWentSilent` said 15m whatever its `for`.
+    - The console's scrape rule needed `serviceMonitor.enabled`, and
+      `KconmonExternalAgentDown` missed a custom `jobName`.
+    - The Overview dashboard's Agents missing let external agents mask
+      missing ones, and several panels went blank with UDP off.
+    - Under a long release name the dashboard ConfigMaps collided.
+
+### Security
+
+- **NetworkPolicy.** Every agent pod and every `externalPeerCidrs` address
+  reached the controller's unauthenticated gRPC, HTTP and metrics ports.
+- **Chart RBAC.** The console could change or delete every PrometheusRule in
+  its namespace, and the controller could update any Lease there.
+- **UDP echo loop.** One spoofed datagram could start an endless echo loop
+  between two agents.
+- **Webhooks.** A receiver could redirect a signed delivery to any host, and
+  failed deliveries logged the webhook URL, often a credential itself.
+- **External gateway.** Any token holder could read the event stream, and
+  unauthenticated connections piled up without limit.
+- **Controller.** One large request body could run it out of memory.
+- **HTTP check URLs.** A password in a target URL leaked into the `url` label,
+  logs, diagnostic results and config errors.
+- **Console.**
+    - A burst of logins could run a 256Mi console out of memory.
+    - A crafted `X-Forwarded-For` could become a rate-limit key or an audit
+      address, and anyone behind the ingress could spend every user's sign-in
+      budget.
+    - A flood of refused requests could push sign-ins and admin actions out
+      of the audit log, and OIDC sign-ins were not audited.
+    - `run:{id}` WebSocket topics skipped `runs:read`, and `/ws` took any
+      number of sockets.
+    - `GET /api/v1/export` gave a role with `settings:write` every section,
+      webhook URLs included.
+    - A credential-less 16 MiB body cost about 50 MiB of heap, other sites
+      could frame the console, and Redis errors logged session keys.
 
 ### Upgrade notes
 
-1. **The path MTU probe is on by default.** Chart 2.5.0 with 2.4.x agent
-   images renders no `pmtu` key, and the old agents keep running without the
-   probe; upgraded agents probe them anyway, because the probe uses the UDP
-   echo every 2.4.x agent already answers. Tuning any `config.checkers.pmtu.*` key needs 2.5.0 agent images:
-   the config decoder is strict and an older agent refuses the unknown key.
-2. **Cardinality.** Three new series per directed pair and one per agent:
-   about 30 thousand more at 100 nodes. `agent.metrics.detail=zone-only`
-   keeps only the zone counter.
-3. **Three new rules, two of them critical.** Check your Alertmanager
-   routing before the upgrade reaches a paging receiver; lower
+1. **The path MTU probe is on by default and sizes itself from the route.** On
+   CNIs that set a route MTU the pmtu gauges read it (1450 on Cilium with
+   VXLAN), not the pod's 1500. The chart renders no `pmtu` key until you tune
+   one, so 2.4.x agents keep running without the probe and still answer it.
+   Set `config.checkers.pmtu.*` or `agent.tls.enabled` only with 2.5.0 agents:
+   an older agent refuses the unknown key.
+2. **Cardinality.** Up to four new series per directed pair and one per agent,
+   about 40 thousand more at 100 nodes. `agent.metrics.detail=zone-only`
+   drops the per-pair ones; `config.checkers.pmtu.enabled=false` drops all.
+3. **Two of the four new rules are critical.** Check Alertmanager routing for
+   `NodeUnreachable` and `NodeIsolated`, or lower
    `prometheusRule.nodeUnreachable.severity` and
-   `prometheusRule.nodeIsolated.severity` if the first week should not page.
-4. **`users:manage` is a new permission.** Custom roles that should
-   administer users need it added; the built-in admin role has it.
-5. **Local sessions opened before 2.5.0 keep working until they expire.**
-   From 2.5.0 on, a password change or reset signs the user out everywhere
-   else.
-6. **Maintenance windows govern the console's own webhooks only.** Alerts
-   routed through Alertmanager still need a silence.
+   `prometheusRule.nodeIsolated.severity` for the first week. A black hole
+   resolves up to ten minutes after its last failed probe unless
+   `prometheusRule.pathMtuBlackHole.sustainedThreshold` is 1.
+4. **The NetworkPolicy is split per component.** With `networkPolicy.enabled`,
+   `helm upgrade` replaces `<fullname>` with `<fullname>-agent` and
+   `<fullname>-controller`; the controller admits agents and `nodeCidrs` on
+   `grpcPort` only and nothing from `externalPeerCidrs`. Update your own
+   policies that name the old object or relied on the wider rules.
+5. **Cilium gets its own policies.** With `networkPolicy.ciliumKubeAPIEgress`
+   at `auto` the upgrade creates the CiliumNetworkPolicy
+   `<fullname>-kube-apiserver`, plus `<fullname>-node-ingress` under
+   `agent.hostNetwork` or the external gateway. `helm template` without
+   cluster access needs `--api-versions cilium.io/v2/CiliumNetworkPolicy` or
+   `true`; set `false` if your own policies cover that traffic.
+6. **Off-cluster egress depends on the CNI.** The default HTTP-check, webhook,
+   OIDC and geoipupdate rules allow `0.0.0.0/0` on their ports, which on
+   Calico and Antrea opens pods too: list the pod and Service CIDRs in
+   `networkPolicy.clusterCIDRs`. The OIDC rule also admits any pod on 443; to
+   close that, or to reach an IdP pod on its own port, set
+   `console.networkPolicy.oidcEgress`.
+7. **From 2.4.x, upgrade with `--reset-then-reuse-values`** (Helm 3.14+) or
+   `-f`. `--reuse-values` keeps every changed default at its old value (DNS
+   timeout 5s, geoipupdate v7.1.1); a release older than 2.3.0 stops with a
+   message.
+8. **Changed chart defaults.** `config.checkers.dns.timeout` drops to 2s, and
+   the console gets `GOMEMLIMIT` from `console.resources.limits.memory`.
+   `checksum/secret` changes once, then ignores
+   `console.auth.local.secret.password`, which only seeds an empty users table.
+9. **geoipupdate v8 sidecar.** With `console.mtr.enrichment.geoip.mode=auto`
+   the sidecar runs v8.0.0, which stops at the first edition that fails to
+   download; `console.mtr.enrichment.geoip.image.tag=v7.1.1` keeps the old
+   behaviour.
+10. **Stricter validation.** The agent and the controller at startup, and the
+    chart schema at `helm upgrade`, refuse an enabled checker `interval` under
+    100ms or `timeout` under 1ms (`5ns` for `5s`), a zero `mtr.cooldown`,
+    `topology.sparse.zoneChords` above 64 and an invalid `metricsPrefix`,
+    `bodyPattern`, `expectStatus`, resolver port or CIDR, and the agent a
+    loopback or unspecified `agent.advertiseAddress`. Each error names the key.
+    `mode` and `observability.otel.*` load with a warning: remove them.
+11. **Hot reload applies now.** An in-place edit of a ConfigMap or config file
+    goes live when saved, so review it first. Live: `logLevel` and `checkers.*`
+    on the agent; `logLevel`, `topology.*`, `controller.agentTtl` and
+    `checkers.external.enabled`/`.allowedCidrs` on the controller. Anything
+    else, `logFormat` and ports included, logs a warning and needs a restart.
+12. **DNS against an explicit resolver needs full names.** A relative name
+    such as `kubernetes.default`, or one only `/etc/hosts` knows, now fails
+    against `checkers.dns.resolvers` and in external DNS checks: use an FQDN.
+13. **The UDP echo refuses some sources and listens twice.** Ports below 1024
+    and known agent echo endpoints get no reply. Full peer lists carry the
+    whole fleet's echo endpoints (about 20 KB at 1000 agents, sparse mode
+    included), and `ss -lun` shows two listeners on `config.grpcPort`.
+14. **Masked HTTP check labels.** A target URL with a password gets a new
+    `url` label value (`https://user:xxxxx@host/...`); update queries on it.
+15. **`users:manage` is new and admin-equivalent**: a holder can create an
+    admin. Add it to custom roles that should administer users.
+16. **`runs:read` for live runs.** A `run:{id}` WebSocket subscribe needs it;
+    a custom role with `events:read` alone loses live run progress.
+17. **Exports follow section permissions.** Each section of
+    `GET /api/v1/export` also needs its read permission (`targets:read`,
+    `checks:read`, `alerts:read`, `webhooks:manage`, `maintenance:read`,
+    `rbac:manage`), else it is listed in `omitted`: grant backup roles all six.
+18. **Sessions.** Local sessions from before 2.5.0 last until
+    `console.auth.session.ttl` (12h). A password change now signs the user
+    out elsewhere, and a disable revokes their API tokens for good.
+19. **Login lockout.** `console.rateLimit.loginPerMinute` (5) counts attempts
+    per username, so anyone who knows a username can keep it locked out; where
+    that matters, use OIDC or header auth, or limit sources at the ingress.
+20. **Set the client-address proxies behind an Ingress, in every auth mode.**
+    List the ingress controller's addresses (its pod CIDR at the widest) in
+    `console.clientAddress.trustedProxyCIDRs`, or every client shares one
+    address for rate limits, the WebSocket cap and the audit log. While it is
+    empty the console reads `console.auth.header.trustedProxyCIDRs`, which in
+    `auth.mode=header` also decides identity: keep that to the auth proxy.
+21. **WebSocket caps.** Each console replica accepts 1024 `/ws` sockets
+    (`console.websocket.maxConnections`), 256 per client address
+    (`.maxConnectionsPerAddress`) and 32 per user or token
+    (`.maxConnectionsPerSubject`); 0 turns a cap off. Behind an unlisted proxy
+    a whole team shares the 256. The chart writes these keys and
+    `clientAddress` only for console images 2.5.0 or newer.
+22. **OIDC sign-in state lives in the browser**, sealed under a key derived
+    from the client secret: rotating the secret fails sign-ins in flight for
+    up to 5 minutes, and one that crosses versions mid-rollout fails once.
+23. **Maintenance windows hold console webhooks only**; Alertmanager routes
+    still need a silence. Existing windows start holding once the console runs
+    2.5.0: review them, since a long global window holds every managed alert.
+24. **Webhook receivers must be the final URL.** A 3xx now fails the delivery.
+25. **Give the console's alert bundle its own name.** With
+    `prometheusRule.enabled`, `helm upgrade` refuses a
+    `console.alerting.bundleName` equal to the chart's own PrometheusRule, and
+    any other collision shows a sync error on every rule.
+26. **Rename rules whose alert names collide.** Of two stored rules with one
+    Prometheus alert name, the one not deployed under it shows the sync error
+    `alert name collision`.
+27. **Schedules the agents cannot run.** A stored once or interval schedule of
+    a `udp`, `dns` or `http` definition toward a target or an ad-hoc address,
+    or with a `plane` other than `pod`, no longer starts runs: pause, delete
+    or repoint it. A stored `udp` definition toward a target saves only with
+    `enabled: false`.
+28. **API limits.** `POST /api/v1/diagnostics` takes 64 KiB and
+    `PUT /api/v1/external-checks` 8 MiB. A definition's `params` hold 4096
+    bytes and an address 2048: shorten a longer stored row before editing it.
+    `kubectl kconmon check --plane` takes `pod` only.
+29. **Dashboard ConfigMap names.** From a release fullname of 41 characters
+    up, the dashboard ConfigMaps get new names; tools that look them up by
+    name need them.
+30. **A signed image can precede its release.** A tag pushes and signs
+    `:<version>` before e2e, and a failed e2e leaves it with no chart, release
+    or `:latest`. Deploy, or mirror `:latest`, once the release is published.
 
 ## kconmon-ng v2.4.0
 

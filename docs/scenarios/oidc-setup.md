@@ -59,9 +59,35 @@ console:
 The client secret rides a Secret you create (`existingSecret`), or let the
 chart render one for a secrets injector with
 `console.auth.oidc.secret.create: true` and a `${vault:...}` placeholder,
-never a literal in values. With `networkPolicy` narrowed, remember the
-console must reach the IdP: `console.networkPolicy.oidcEgress` defaults to
-TCP 443 anywhere, and naming your IdP there is the tightening.
+never a literal in values. Since 2.5.0 the console also derives from it the
+key that seals each sign-in's PKCE verifier and return path into the OIDC
+`state`, so nothing is stored per sign-in until the IdP answers. Rotating the
+secret therefore fails the sign-ins started before it, for at most the five
+minutes a sign-in may take; those users sign in again. With `networkPolicy` narrowed, remember the
+console must reach the IdP. `console.networkPolicy.oidcEgress` defaults to
+TCP 443 off the cluster and to any pod on 443, which covers an IdP outside
+the cluster and one served through an in-cluster ingress controller
+listening on 443. An IdP pod reached through its own Service, such as
+Keycloak on 8080 or 8443, needs a rule on the pod's port: on Calico and
+Antrea policy sees the pod port after kube-proxy's DNAT, and Cilium never
+matches a pod against an `ipBlock`. A list you set replaces the default, so
+keep an `ipBlock` rule on 443 if the IdP's discovery or keys live outside
+the cluster. Naming your IdP there is also the tightening; see
+[NetworkPolicy on Cilium, Calico and Antrea](../configuration.md#networkpolicy-and-cilium).
+
+Behind an Ingress or a NAT, also set `console.clientAddress.trustedProxyCIDRs`
+to the proxy's addresses, the ingress controller's pod CIDR at the widest. Sign-in is
+budgeted per client address: the start of a sign-in and the IdP's redirect
+back to the callback each get `console.rateLimit.loginPerMinute` x 20 a
+minute. Without the list every browser shares the ingress's address and one
+budget, so one noisy client makes everyone's sign-in answer 429. The console
+logs a one-time warning naming the key the first time the start budget trips
+with no trusted proxies set. The audit log's
+`remoteAddr` comes from the same address. The list gives the client address
+only and never identity; before 2.5.0 the same job fell to
+`console.auth.header.trustedProxyCIDRs`, which the console still reads for
+it while the new list is empty. More in
+[Configuration](../configuration.md#console).
 
 ## Identity: why `oidc:<sub>` and nothing else
 
@@ -72,8 +98,9 @@ CVE-2023-3128 (CVSS 9.4) let a leaver's address inherit their roles.
 `console.auth.oidc.usernameClaim` therefore decides only the **display** name
 (falling back to `name`, then `email`, then the sub itself): the label in the
 header menu, not an identity. The audit log is keyed on the identity and
-records `oidc:<sub>`, so a display name never appears there at all; changing
-this claim renames a person in the UI and moves nothing else.
+records `oidc:<sub>`; the display name is stored beside it as
+`subjectDisplay`, a label for whoever reads the row and never the key.
+Changing this claim renames a person in the UI and moves nothing else.
 
 Two logins are refused outright: an ID token with no `sub`, and one whose
 `sub` sits inside a reserved namespace (`oidc:`, `local:`, `header:`,
@@ -99,10 +126,10 @@ What the four built-ins actually grant:
 
 | Role | Grants | Held back |
 | --- | --- | --- |
-| `viewer` | every read: topology, matrix, events, PromQL queries, runs, MTR, annotations, incidents, maintenance windows, alert state | any write: viewer must never gain configuration authority |
-| `operator` | everything viewer has, plus: create runs; manage targets, check definitions and schedules; write annotations, incidents, maintenance windows; manage alert rules | `webhooks:manage`, `tokens:manage`, `rbac:manage`: credential-posture permissions stay admin-only |
-| `alert-editor` | the read set, run creation, and `alerts:manage` (alerting is this role's charter) | the operator's targets/checks/schedules authority |
-| `admin` | every permission this build knows | — |
+| `viewer` | the telemetry reads: topology, matrix, events, PromQL queries, runs, MTR, annotations, incidents, maintenance windows, alert state | any write, and three reads: `targets:read`, `checks:read`, `audit:read`; viewer must never gain configuration authority |
+| `operator` | everything viewer has, plus: create runs; read and manage targets, check definitions and schedules; write annotations, incidents, maintenance windows; manage alert rules | `audit:read`, `settings:write`, `users:manage`, `webhooks:manage`, `tokens:manage`, `rbac:manage`: the credential and settings posture stays admin-only |
+| `alert-editor` | viewer's reads, run creation, and `alerts:manage` (alerting is this role's charter) | `targets:read`, `checks:read`, `audit:read` and the operator's targets/checks/schedules authority |
+| `admin` | every permission this build knows | nothing |
 
 Group membership is re-read on every token refresh, so removing someone from
 a group at the IdP takes effect within the access token's lifetime, not at
@@ -156,9 +183,13 @@ IdP's end-session endpoint, so the IdP session survives and a fresh
 one of `anonymous | local | header | oidc`, so oidc mode has no local
 break-glass account. Live sessions degrade in two tiers. A session holding a
 refresh token is proactively refreshed ~2 minutes before its access token
-expires; when that refresh fails at the IdP, the session is deleted and the
-user gets `401`. A session the IdP never gave a refresh token rides out the
-outage until its own ttl/idle bounds. Getting locked-out operators back in
+expires, detached from the request and bounded at 15 s. Only an IdP that
+refuses the refresh (`invalid_grant`, or a 4xx other than 408 and 429) gets
+the session deleted and the user a `401`. An IdP that is unreachable, times
+out or answers 5xx, 408 or 429 leaves the session in place: it works until
+its access token actually expires, is refused from then on, and resumes once
+the IdP answers again. A session the IdP never gave a refresh token rides out
+the outage until its own ttl/idle bounds. Getting locked-out operators back in
 during a long outage means changing `auth.mode` and rolling the console.
 
 ## Verify login
@@ -177,7 +208,11 @@ during a long outage means changing `auth.mode` and rolling the console.
     `/`).
 
 3. Confirm the audit log records your writes as `oidc:<sub>`
-   (`GET /api/v1/audit`): display names never appear there; the log is keyed
-   on the identity.
+   (`GET /api/v1/audit`): the log is keyed on the identity, and a display
+   name appears only beside it, as `subjectDisplay`. Since 2.5.0 the sign-in
+   itself is there too: `GET /api/v1/auth/oidc/callback` with outcome
+   `allowed` as the identity that signed in, and an `error` row with no
+   subject for each refused callback, up to 120 such rows a minute from one
+   client address.
 
 <!-- screenshot oidc-setup-roles.png: needs a real OIDC login against a live IdP; not stageable on the docs stand without personal credentials -->

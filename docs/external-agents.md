@@ -7,8 +7,8 @@ same mesh as the in-cluster DaemonSet: the same Linux binary, the same
 checkers, the same metrics, one matrix with every vantage point on it.
 
 <figure markdown>
-  ![Matrix on TCP, Live: ten kconmon-stand cluster nodes and the external agent edge-host-01 as the first row and column, all 110 cells green at 0.0% with their p95 RTT](img/enable-the-console-minimal.png){ loading=lazy }
-  <figcaption>One matrix, every vantage point: <code>edge-host-01</code> is the first row and the first column, and both are green. The column is the cluster probing the external host; the row is the host's own probes, which reach the console because Prometheus <a href="#scraping-external-agents">scrapes the external agent</a>.</figcaption>
+  ![Matrix on TCP, Live: six kc-accept cluster nodes, all 30 cells green at 0.0% with a p95 RTT of 1.4 to 2.4 ms](img/enable-the-console-minimal.png){ loading=lazy }
+  <figcaption>One matrix of cluster nodes, all 30 pairs green on TCP. No external agent was registered on this stand, so the frame has no extra row or column; an external agent adds one of each, the column for the cluster probing the host and the row for the host's own probes, which reach the console because Prometheus <a href="#scraping-external-agents">scrapes the external agent</a>.</figcaption>
 </figure>
 
 What differs is trust and delivery. In-cluster agents dial the controller's
@@ -45,18 +45,30 @@ CNI even after the host firewall is satisfied, and
 only the **gateway port on the controller**, registration and nothing else.
 The probe half is `networkPolicy.externalPeerCidrs` (since 2.4.0): the CIDRs
 you list there are spliced as `ipBlock` peers into the agent↔agent rules of
-the shared policy, ingress and egress, UDP `grpcPort` (9090) and TCP
+the agents' own NetworkPolicy (the controller has a separate one that
+never sees this list), ingress and egress, UDP `grpcPort` (9090) and TCP
 `httpPort` (8080) plus the ports-less ICMP/MTR rule (NetworkPolicy v1 cannot
 name ICMP as a port), and never into the gateway rule. Set both lists.
 Without `externalAgentCidrs` the agent cannot register; without
 `externalPeerCidrs` it registers fine and every cell between it and the
 cluster stays red.
 
+On Cilium, a source that is a node IP matches no `ipBlock`: Cilium tags it
+with the `remote-node` or `host` entity first. That is what the gateway sees
+behind a NodePort or an `externalTrafficPolicy: Cluster` LoadBalancer, so
+there `externalAgentCidrs` admits nothing. With the gateway on,
+`networkPolicy.ciliumKubeAPIEgress` (`auto` on a cluster that serves
+`CiliumNetworkPolicy`) renders `<fullname>-node-ingress`, which admits those
+entities to the controller's gateway port and nothing else; see
+[NetworkPolicy on Cilium, Calico and Antrea](configuration.md#networkpolicy-and-cilium).
+
 A third list, `networkPolicy.nodeCidrs`, belongs to
 [`agent.hostNetwork`](#when-the-pod-network-does-not-route) rather than to
 external agents as such: host-network agents register from node IPs, and the
-chart refuses to render the policy without the list. Read that section
-before turning the option on.
+chart refuses to render the policy without the list. On Cilium that list
+matches nothing either, and the same `<fullname>-node-ingress` policy admits
+the nodes to the controller's `grpcPort`. Read that section before turning
+the option on.
 
 ## The trust model
 
@@ -74,8 +86,9 @@ member the moment it authenticates. Three layers stack:
 3. **An optional client CA** proves identity. When configured, every
    connection must present a certificate signed by that CA, and the
    certificate's CN (or a URI SAN) is pinned against the identity each
-   request claims: registration must claim exactly the certified node name,
-   and every later call may only speak for agent IDs that extend it. A
+   request claims: registration must claim exactly the certified node name
+   and an agent ID that extends it with a `-` suffix (`edge-host-01-…`), and
+   every later call may only speak for such agent IDs. A
    mismatch is `PermissionDenied`; a missing certificate fails the TLS
    handshake itself (the agent sees `Unavailable`).
 
@@ -83,12 +96,43 @@ Without the client CA the gateway runs in **token-only mode**: membership is
 authenticated, but agents cannot be told apart. See
 [the v1 limitations](#what-v1-does-not-do) before choosing it.
 
-One nuance of the pinning layer is security-relevant even when you enable
-it: pinning applies to messages that *claim* an identity (registration, and
-everything carrying an `agent_id`). A message that carries no identity (an
-event-stream subscription, for instance) passes on the token alone. Any
-token holder can therefore subscribe to domain events even with a client CA
-configured; the CA constrains who can *act as* an agent, not who can listen.
+The token is checked per RPC, so since 2.5.0 the gateway also bounds what a
+client that has not proven membership can hold. None of these limits is
+configurable, and none touches a working agent, which authenticates with its
+first RPC and then holds its Watch stream:
+
+- the TLS handshake and the HTTP/2 preface must finish within 10 seconds;
+- a connection must authenticate, with a first RPC carrying a valid token,
+  within 30 seconds of connecting, or it is closed; a failing RPC does not
+  extend that;
+- at most 128 connections may be unauthenticated at once. Past that, the new
+  connection is still admitted and one unauthenticated connection of the
+  source holding the most (an IPv4 address or an IPv6 /64, the new
+  connection counted) is closed. Within that source a connection still in
+  its TLS handshake goes before one that finished TLS, oldest first, so a
+  flooding source pushes out its own connections first, and bare TCP
+  sockets push out each other rather than an agent. The controller logs
+  `external gateway closing the oldest unauthenticated connections: too many have not authenticated yet`
+  at WARN, at most once a minute, with the number `closed` since the last
+  line and the `source` of the last one;
+- a connection with no RPC in flight for 2 minutes is closed (gRPC keepalive
+  `MaxConnectionIdle`).
+
+Behind a NodePort or an `externalTrafficPolicy: Cluster` LoadBalancer every
+client arrives from a node IP, so the gateway sees only a few sources. A
+client there can still push an agent's connection out, by opening more than
+128 connections from the agent's source while the agent is in its TLS
+handshake, or by completing more than 128 TLS handshakes before the agent's
+first RPC; the agent then reconnects. `loadBalancerSourceRanges`, or
+`externalTrafficPolicy: Local` with tight `externalAgentCidrs`, narrows who
+can try.
+
+Pinning applies to messages that *claim* an identity (registration, and
+everything carrying an `agent_id`). The one service whose calls carry no
+identity, the domain event stream, is not served on the gateway at all since
+2.5.0: `WatchEvents` there answers `Unimplemented`, and the console
+subscribes on the in-cluster gRPC port. Diagnostics results are accepted
+only from the agent a task was dispatched to.
 
 Token-only mode has one more consequence since 2.4.0, and it deserves its own
 paragraph. The controller now publishes every external agent's advertised
@@ -125,16 +169,17 @@ controller:
 ```
 
 An enabled gateway refuses to start half-configured: missing cert, key or
-token file is a startup error, never a silently-open listener. When
-`controller.events.enabled` is on, the domain event stream is served on the
-gateway too, gated by the same token.
+token file is a startup error, never a silently-open listener. The gateway
+serves the agent registry only: the domain event stream stays on the
+in-cluster gRPC port even with `controller.events.enabled` on.
 
 !!! warning "Rotation needs a controller restart, and the restart has a cost"
     The gateway reads the certificate and the token **once at startup**; the
     config hot-reload does not rebuild the listener. After rotating either,
     restart the controller (`kubectl rollout restart deployment/...`). Budget
-    the blast radius: on a leader change agents re-register over roughly 15
-    seconds (lease acquisition plus their reconnect backoff), each
+    the blast radius: on a leader change agents re-register within a few
+    heartbeats (a clean restart hands the lease over in about 2 seconds, a
+    crashed leader's lease runs out after 15), each
     re-registration broadcasts a full peer-list resync to the whole fleet,
     and any Console diagnostics run in flight records the pairs dispatched
     into that window as failed. The agent side is friendlier: agents re-read
@@ -152,7 +197,7 @@ controller:
     enabled: true
     port: 9443
     service:
-      # NodePort | LoadBalancer — the rendered Service exposes the gateway
+      # NodePort | LoadBalancer; the rendered Service exposes the gateway
       # port ALONE, never the plaintext in-cluster gRPC port.
       type: LoadBalancer
       annotations: {}
@@ -183,11 +228,17 @@ kubectl create secret generic kconmon-ng-gateway-token \
   --from-literal=token="$(openssl rand -hex 32)"
 ```
 
-Mind NAT when the NetworkPolicy is on: behind a NodePort or a LoadBalancer
-with `externalTrafficPolicy: Cluster`, the source IP the policy sees is the
-**node's**, not the agent's. Either cover the node CIDR in
-`externalAgentCidrs` or set `externalTrafficPolicy: Local`. The full knob
-list is in the [Helm values reference](reference/helm-values.md).
+Mind NAT: behind a NodePort or a LoadBalancer with
+`externalTrafficPolicy: Cluster` (the apiserver default), the source IP the
+gateway and the NetworkPolicy see is the **node's**, not the agent's. The
+policy then needs the node CIDR in `externalAgentCidrs`, and the gateway's
+per-source eviction of unauthenticated connections (above) cannot tell apart
+the agents behind one node. Prefer `externalTrafficPolicy: Local` with tight
+`networkPolicy.externalAgentCidrs`, at the cost of only the nodes running a
+controller pod answering, or `loadBalancerSourceRanges` on a LoadBalancer.
+The chart's install notes list the gateway under STILL TO DECIDE while it
+runs with any other policy and no source ranges. The full knob list is in the
+[Helm values reference](reference/helm-values.md).
 
 ## Host side: install the agent
 
@@ -210,17 +261,24 @@ Each release publishes the agent as a deb and an rpm for `amd64` and
 
 The package installs:
 
-- `/usr/bin/kconmon-ng-agent` — the binary.
-- `/usr/lib/systemd/system/kconmon-ng-agent.service` — a hardened unit: a
+- `/usr/bin/kconmon-ng-agent`: the binary.
+- `/usr/lib/systemd/system/kconmon-ng-agent.service`: a hardened unit, a
   dedicated `kconmon-ng` system user, `NoNewPrivileges`,
   `ProtectSystem=strict`, and `CAP_NET_RAW` granted back via ambient
   capabilities so MTR hop tracing works unprivileged.
-- `/usr/lib/sysctl.d/50-kconmon-ng.conf` — opens
+- `/usr/lib/sysctl.d/50-kconmon-ng.conf`: opens
   `net.ipv4.ping_group_range`, which the kernel requires for the ICMP
   checker's unprivileged datagram socket (`CAP_NET_RAW` does not cover it).
   The shipped range is wide because the package user's GID is allocated
-  dynamically; narrow it in `/etc/sysctl.d` if your policy requires.
-- `/etc/kconmon-ng/config.yaml` — a commented example config, marked as a
+  dynamically; narrow it in `/etc/sysctl.d` if your policy requires. The
+  package applies its file at install only when no `/etc/sysctl.conf`,
+  `/etc/sysctl.d` or `/run/sysctl.d` file sets the key (in the dotted or the
+  slash form, `net/ipv4/ping_group_range`), so a narrowed range survives
+  upgrades. With systemd it applies the file by name through
+  `systemd-sysctl`, which honours a same-name file in `/etc/sysctl.d` or
+  `/run/sysctl.d` and a `/dev/null` mask; without systemd it skips when such
+  a same-name file exists.
+- `/etc/kconmon-ng/config.yaml`: a commented example config, marked as a
   conffile so upgrades never overwrite your edits.
 
 The service is installed but **not started**: the shipped config points at a
@@ -233,7 +291,7 @@ sudo systemctl enable --now kconmon-ng-agent
 No packages for your platform? The same binary ships in the release
 tarballs `kconmon-ng_<version>_linux_amd64.tar.gz` /
 `..._linux_arm64.tar.gz` (alongside the controller binary). You then own the
-unit file and the sysctl yourself — copy them from
+unit file and the sysctl yourself; copy them from
 [`packaging/agent/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/packaging/agent)
 in the repository. The agent reads `/etc/kconmon-ng/config.yaml` by default;
 `KCONMON_NG_CONFIG` overrides the path.
@@ -243,7 +301,7 @@ in the repository. The agent reads `/etc/kconmon-ng/config.yaml` by default;
 A complete external-agent config, with every gateway-related key:
 
 ```yaml
-# The controller's EXTERNAL GATEWAY — not the in-cluster gRPC port. The host
+# The controller's EXTERNAL GATEWAY, not the in-cluster gRPC port. The host
 # part is also the name the server certificate is verified against, unless
 # agent.tls.serverName overrides it.
 controllerAddress: gateway.example.com:9443
@@ -253,7 +311,7 @@ agent:
   # pins identities, the client cert CN (or a URI SAN) must equal this
   # name EXACTLY.
   nodeName: edge-host-01
-  # The IP peers probe — an IP literal, no hostname, no port. Empty =
+  # The IP peers probe: an IP literal, no hostname, no port. Empty =
   # autodetected from the route towards controllerAddress. Set it
   # explicitly on NATed or multi-homed hosts.
   advertiseAddress: 203.0.113.10
@@ -262,49 +320,65 @@ agent:
   # agent in the "" zone. Set it.
   zone: external
   tls:
-    # CA that signed the GATEWAY's serving cert; empty = system trust pool.
+    # TLS with nothing else set, verified against the system trust pool; not
+    # needed here, since caFile below turns TLS on by itself.
+    # enabled: true
+    # CA that signed the GATEWAY's serving cert. Empty = the system trust
+    # pool, but an empty caFile alone does not turn TLS on.
     caFile: /etc/kconmon-ng/ca.crt
-    # Client pair — both or neither. Required when the gateway sets
+    # Client pair: both or neither. Required when the gateway sets
     # tls.clientCaFile.
     certFile: /etc/kconmon-ng/client.crt
     keyFile: /etc/kconmon-ng/client.key
-    # Verify the server cert against this name instead of the dialed host —
+    # Verify the server cert against this name instead of the dialed host:
     # for dialing by IP or through a load balancer.
     serverName: ""
   # Same content as the controller's bootstrapTokenFile. Keep it mode 0600,
-  # owned by the service user.
+  # owned by the service user. Refused unless TLS is on (enabled, caFile,
+  # the client pair or serverName): a token never rides plaintext.
   bootstrapTokenFile: /etc/kconmon-ng/bootstrap-token
 
 checkers:
   dns:
-    # The default probe host is kubernetes.default.svc.cluster.local, which
-    # no bare host resolves — point the checker at names that matter here,
-    # or disable it.
+    # Off in the packaged config: the default probe host,
+    # kubernetes.default.svc.cluster.local, resolves only inside a cluster.
+    # Turn it on with names this host must resolve.
+    enabled: true
     hosts:
       - example.internal
 ```
 
-Note the `checkers.dns` override is not decoration. The **packaged** config
-file carries no `checkers.dns` block at all, so a stock install probes the
-built-in default host, `kubernetes.default.svc.cluster.local`, a name no
-bare host resolves, and the DNS checker fails from first start until you
-set `hosts` or disable it. That failure is on the checker only; the mesh
-probes are unaffected.
+Note the `checkers.dns` block. The **packaged** config ships
+`checkers.dns.enabled: false`, because the built-in default host,
+`kubernetes.default.svc.cluster.local`, is a name no bare host resolves and
+the checker would fail from the first start. To check DNS from the host, set
+`enabled: true` and a `hosts` list of names it must resolve, as above. An
+installation from before 2.5.0 keeps its own config file on upgrade (it is a
+conffile), so its DNS checker keeps failing until you do the same.
 
 Rules the config loader enforces, so they fail at startup with a message
 rather than at registration:
 
-- `agent.bootstrapTokenFile` **without** an `agent.tls` block is refused:
-  the token never rides plaintext. (The credential itself also refuses
-  insecure transport at runtime, as a second net.)
+- `agent.bootstrapTokenFile` **without** TLS is refused: set
+  `agent.tls.enabled`, a `caFile`, a client certificate or a `serverName`.
+  An empty `caFile` alone leaves the dial plaintext, and the token never
+  rides plaintext. (The credential itself also refuses insecure transport
+  at runtime, as a second net.)
 - `agent.tls.certFile` and `keyFile` go together; one without the other is
   an error.
-- `agent.advertiseAddress` must be an IP literal; the controller publishes
-  it fleet-wide as a probe target and rejects anything else.
+- `agent.advertiseAddress` must be an IP literal peers can reach; the
+  controller publishes it fleet-wide as a probe target and rejects anything
+  else. The unspecified address (`0.0.0.0`, `::`), loopback, multicast and
+  `255.255.255.255` are refused at load; link-local, private and IPv6
+  addresses are fine. Without it, an autodetect that finds a loopback source
+  (a `controllerAddress` through a local tunnel, `127.0.0.1:<port>`) stops
+  startup with `set agent.advertiseAddress explicitly`.
 
-The `agent.tls` block is itself the switch: setting any key in it moves the
-dial to TLS, while an empty block keeps the plaintext in-cluster dial
-byte-identical.
+The `agent.tls` block is itself the switch: `enabled: true` or any other key
+set in it moves the dial to TLS, while an empty block keeps the plaintext
+in-cluster dial byte-identical. A gateway with a publicly trusted
+certificate needs only `enabled: true` (2.5.0 or newer): the system trust
+pool verifies it against the `controllerAddress` host.
 
 ### Ports
 
@@ -333,10 +407,15 @@ Identity resolution (env over file over fallback) is shared with in-cluster
 agents and spelled out in
 [Configuration → Agent identity](configuration.md#agent-identity). Two
 external-specific notes. Identity is resolved once at startup, so changes to
-the `agent` block take a service restart. And an agent running outside any
-Pod is automatically labeled `kconmon-ng.io/external=true` in its
-registration metadata; the label comes back verbatim in every
-`GET /api/v1/topology` response (`agents[].labels`), which is how API
+the `agent` block take a service restart. And every agent that registers
+through the gateway is labeled `kconmon-ng.io/external=true` in its
+registration metadata. Since 2.5.0 the controller's listener sets the label,
+not the agent: the gateway always adds it, and the in-cluster gRPC port drops
+it if an agent claims it. A bare host registering through the plaintext
+in-cluster port, which is not supported, counts as an in-cluster agent. The
+label decides `kconmon_ng_controller_external_agents`, the Prometheus SD
+target list and the missing-agents arithmetic, and it comes back verbatim in
+every `GET /api/v1/topology` response (`agents[].labels`), which is how API
 consumers tell bare-host agents apart.
 
 Since 2.4.0 the Console reads that label too. The Topology map draws the host
@@ -344,7 +423,7 @@ beside the cluster nodes with a neutral **external** badge and "readiness
 unknown" (a bare host has no Kubernetes node to be ready); the node page
 swaps *Pod IP* for *Advertised address*, notes that readiness is not reported
 for an external host, and lists the probe planes the agent advertised
-(TCP, UDP, ICMP, MTR chips; "unknown" for an agent older than 2.4.0, which
+(TCP, UDP, ICMP, PMTU, MTR chips; "unknown" for an agent older than 2.4.0, which
 advertises none); the Matrix marks the row and column header "external
 agent"; Overview badges the name in *Worst pairs* and adds "+N external
 agent(s)" beside the *Nodes ready* tile without counting them in, since that
@@ -427,7 +506,11 @@ What must already be true, because each miss fails in its own quiet way:
   host networking, so the chart stops rendering it.
 - `networkPolicy.nodeCidrs` is set when `networkPolicy.enabled`: registrations
   now arrive from node IPs, which no pod selector matches, and the chart
-  refuses to render the policy without the list.
+  refuses to render the policy without the list. On Cilium the list matches
+  nothing, since node IPs are the `remote-node` and `host` entities there;
+  the `<fullname>-node-ingress` `CiliumNetworkPolicy` that
+  `networkPolicy.ciliumKubeAPIEgress` renders under `agent.hostNetwork`
+  admits them to the controller's `grpcPort`.
 - `agent.dnsPolicy` can stay empty: the chart renders
   `ClusterFirstWithHostNet` under host networking, because `controllerAddress`
   is a bare Service name that only cluster DNS resolves.

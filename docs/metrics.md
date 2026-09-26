@@ -1,21 +1,21 @@
 # Metrics and alerting reference
 
 All metric names use the configurable prefix (default `kconmon_ng`). The common
-label set for peer metrics — "peer" below — is `source_node`,
+label set for peer metrics ("peer" below) is `source_node`,
 `destination_node`, `source_zone`, `destination_zone`.
 
-External checks use a **different** label set — "external" below:
+External checks use a **different** label set ("external" below):
 `source_node`, `source_zone`, `target`, `target_kind`, `check_type`. There is
 no `destination_node` or `destination_zone`, because the destination is not a
 peer: `target` is the operator's NAME for it (never an address), `target_kind`
 is the closed set `host|url` and `check_type` is the probe's own type
 (`icmp|tcp|dns|http`). `check_type` is what keeps two checks on one target
 apart. Everything that is not http collapses to `target_kind="host"`, so
-without it an icmp and a tcp check on the same target shared one series and
-averaged each other's failures away. **The peer label set was not changed by
-the external family**: no external metric reuses it and no peer family gained
-a `target` label, so a dashboard or recording rule keyed on peer labels
-behaves exactly as it did before v1.6.0.
+without it an icmp and a tcp check on the same target would share one series
+and average each other's failures away. **The two label sets never mix**: no
+external metric carries the peer labels and no peer family carries a `target`
+label, so a dashboard or recording rule keyed on peer labels never picks up an
+external series.
 
 Every histogram on this page uses the same 13-bucket scale, in seconds:
 
@@ -23,9 +23,9 @@ Every histogram on this page uses the same 13-bucket scale, in seconds:
 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0
 ```
 
-plus the implicit `+Inf`, `_sum` and `_count` — 16 series per histogram.
+plus the implicit `+Inf`, `_sum` and `_count`: 16 series per histogram.
 
-## Agent — TCP
+## Agent: TCP
 
 | Metric                                    | Type      | Labels          | Description                        |
 | ----------------------------------------- | --------- | --------------- | ---------------------------------- |
@@ -33,7 +33,7 @@ plus the implicit `+Inf`, `_sum` and `_count` — 16 series per histogram.
 | `kconmon_ng_tcp_total_duration_seconds`   | histogram | peer            | Total TCP probe RTT                |
 | `kconmon_ng_tcp_results_total`            | counter   | peer + `result` | Probe outcomes: `success` / `fail` |
 
-## Agent — UDP
+## Agent: UDP
 
 | Metric                             | Type      | Labels          | Description                  |
 | ---------------------------------- | --------- | --------------- | ---------------------------- |
@@ -42,7 +42,7 @@ plus the implicit `+Inf`, `_sum` and `_count` — 16 series per histogram.
 | `kconmon_ng_udp_packet_loss_ratio` | gauge     | peer            | Packet loss ratio (0.0–1.0)  |
 | `kconmon_ng_udp_results_total`     | counter   | peer + `result` | Probe outcomes               |
 
-## Agent — ICMP
+## Agent: ICMP
 
 | Metric                              | Type      | Labels          | Description                 |
 | ----------------------------------- | --------- | --------------- | --------------------------- |
@@ -50,17 +50,43 @@ plus the implicit `+Inf`, `_sum` and `_count` — 16 series per histogram.
 | `kconmon_ng_icmp_packet_loss_ratio` | gauge     | peer            | Packet loss ratio (0.0–1.0) |
 | `kconmon_ng_icmp_results_total`     | counter   | peer + `result` | Probe outcomes              |
 
-## Agent — Path MTU
+## Agent: Path MTU
 
-Since 2.5.0. Once a minute per peer, a small datagram and a full-size one with
+Agents 2.5.0 and newer. Once a minute per peer, a small datagram and a full-size one with
 Don't Fragment set go to the peer's UDP echo port; on a loss the agent bisects
-the size. See [Catch an MTU black hole](scenarios/mtu-black-hole.md).
+the size and confirms a black hole before it reports one. The algorithm and
+the direction each series covers are in
+[The path MTU plane](concepts/mesh-and-planes.md#the-path-mtu-plane); the
+failure itself in [Catch an MTU black hole](scenarios/mtu-black-hole.md).
 
 | Metric                                | Type    | Labels          | Description |
 | ------------------------------------- | ------- | --------------- | ----------- |
 | `kconmon_ng_pmtu_bytes`               | gauge   | peer            | Largest IP datagram in bytes that crossed the pair on the last path MTU probe; written for ok, reduced and blackhole |
-| `kconmon_ng_pmtu_results_total`       | counter | peer + `result` | `result="success"` for ok and reduced, `fail` for a black hole; nothing when even the small datagram was lost |
-| `kconmon_ng_agent_pmtu_probe_bytes`   | gauge   | `source_node`   | The size this agent probes at: its interface MTU, or `checkers.pmtu.size` |
+| `kconmon_ng_pmtu_results_total`       | counter | peer + `result` | `result="success"` for ok and reduced, `fail` for a black hole; nothing for `unreachable` |
+| `kconmon_ng_pmtu_probe_bytes`         | gauge   | peer            | The size the source probes this pair at: the MTU of its route to the peer (the route's `mtu`, never above the egress device's), or `checkers.pmtu.size`; written with `pmtu_bytes` |
+| `kconmon_ng_agent_pmtu_probe_bytes`   | gauge   | `source_node`   | The largest `pmtu_probe_bytes` over this agent's pairs: the one probe-size series `agent.metrics.detail: zone-only` keeps. Compare a pair against its own `pmtu_probe_bytes` |
+
+`unreachable` is the search ending without an MTU verdict: the 64-byte
+datagram was lost twice, every size above 64 bytes was lost, the size the
+bisection found was lost when sent again, or the time budget (half of
+`checkers.pmtu.interval`) ran out before anything above 64 bytes crossed. It
+writes neither the counter nor the gauge, so a lossy path reads as a pair
+with no path MTU result rather than as a black hole; its loss shows on the
+UDP plane. On Cilium the probe size, and with it every gauge on a healthy
+path, is the route MTU (1450 with VXLAN), not the pod `eth0`'s 1500. Calico
+sets the MTU on the pod's `eth0` instead: with IPIP that is 1480, and the
+probe and the gauge read 1480 on every healthy pair.
+
+The probe size is per pair because it comes from the route to each peer: a
+hostNetwork or bare-host agent with a VPN route next to a 1500-byte LAN
+probes its peers at different sizes. `agent_pmtu_probe_bytes` holds only the
+largest of them, so a pair behind the smaller route would read as reduced
+against it. `pmtu_probe_bytes` goes when `pmtu_bytes` goes: the peer leaves,
+a zone changes, or a reload switches the pmtu plane off. The agent-level
+series disappears once the agent has no pmtu pair left. Under
+`agent.metrics.detail: zone-only` the per-pair gauge is dropped with every
+other series that names a `destination_node`, and the agent-level one is the
+probe size that remains.
 
 ### Telling a reduced path from a healthy one
 
@@ -68,27 +94,33 @@ A reduced path fails nothing, so no failure ratio shows it. Compare the size
 that crossed with the size the source probes at:
 
     max by (source_node, destination_node) (kconmon_ng_pmtu_bytes)
-      < on (source_node) group_left
-    max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes)
+      < on (source_node, destination_node)
+    max by (source_node, destination_node) (kconmon_ng_pmtu_probe_bytes)
+
+That reads the last probe. Behind ECMP the last probe may have crossed at
+full size on a good next hop, so the bundled dashboards read the smallest size
+in 10 minutes instead, as `PathMTUBlackHole` does:
+`min by (source_node, destination_node) (min_over_time(kconmon_ng_pmtu_bytes[10m]))`
+in place of the first operand.
 
 A black hole is below the probe size too. To keep only the paths that say
 so, drop the pairs with failed probes, as the Overview dashboard's reduced
 path tile does:
 
-    (max by (source_node, destination_node) (kconmon_ng_pmtu_bytes)
-      < on (source_node) group_left
-    max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes))
+    (min by (source_node, destination_node) (min_over_time(kconmon_ng_pmtu_bytes[10m]))
+      < on (source_node, destination_node)
+    max by (source_node, destination_node) (kconmon_ng_pmtu_probe_bytes))
       unless on (source_node, destination_node)
     (sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result="fail"}[15m])) > 0)
 
-## Agent — DNS
+## Agent: DNS
 
 | Metric                            | Type      | Labels                                           | Description                              |
 | --------------------------------- | --------- | ------------------------------------------------ | ---------------------------------------- |
 | `kconmon_ng_dns_duration_seconds` | histogram | `host`, `resolver`, `source_node`, `source_zone` | Resolution duration per (host, resolver) |
 | `kconmon_ng_dns_results_total`    | counter   | same + `result`                                  | Resolution outcomes                      |
 
-## Agent — HTTP
+## Agent: HTTP
 
 | Metric                                     | Type      | Labels                                                                 | Description            |
 | ------------------------------------------ | --------- | ---------------------------------------------------------------------- | ---------------------- |
@@ -99,7 +131,13 @@ path tile does:
 | `kconmon_ng_http_total_duration_seconds`   | histogram | same                                                                   | Total request duration |
 | `kconmon_ng_http_results_total`            | counter   | `url`, `method`, `status_code`, `source_node`, `source_zone`, `result` | Request outcomes       |
 
-## Agent — MTR
+The `url` label is the target URL as configured, except that a password in
+its userinfo reads `xxxxx` (`https://probe:xxxxx@example.com/health`); the
+agent's `check failed` log and on-demand results mask it the same way, and
+so do the config errors about a target's `url` at startup and on a hot
+reload. The query string is kept verbatim, so do not put tokens in it.
+
+## Agent: MTR
 
 | Metric                           | Type    | Labels                                                    | Description                    |
 | -------------------------------- | ------- | --------------------------------------------------------- | ------------------------------ |
@@ -107,11 +145,19 @@ path tile does:
 | `kconmon_ng_mtr_hops`            | gauge   | peer                                                      | Hop count in the last trace    |
 | `kconmon_ng_mtr_hop_rtt_seconds` | gauge   | `source_node`, `destination_node`, `hop_number`, `hop_ip` | Per-hop RTT                    |
 
-## Agent — External
+## Agent: External
 
-Every probe whose destination is not a peer agent: the Console's external
-targets (continuous) and one-shot external diagnostics. Gated on
+The probes of the Console's continuous external assignment: every external
+target an agent checks on its own cadence. Gated on
 `config.checkers.external.enabled`, which is **off by default**.
+
+One-shot external diagnostics (`POST /api/v1/diagnostics` with
+`destinationKind: external`) record no `kconmon_ng_external_*` series: their
+target names are typed ad hoc, and nothing would ever retire a series minted
+under one. They are counted by `kconmon_ng_controller_diagnostics_total` and
+answered in the response and in the `CheckObserved` event (`MTRCompleted` for
+`mtr`). A refused one-shot shows there as `success: false` with the refusal
+text.
 
 Every metric vector below stays empty until an external probe reports. A
 "vec" in Prometheus client terms is a metric family whose series appear only
@@ -139,12 +185,15 @@ failure rate. `reason=cidr` means the resolved address fell outside
 resolve; `disabled` means a spec arrived while `checkers.external.enabled`
 was false.
 
-## Agent — Zone aggregates
+When a target leaves the agent's assignment, every `kconmon_ng_external_*`
+series of that target goes at once, counters and histograms included.
+
+## Agent: Zone aggregates
 
 The zone plane: every peer probe is recorded a second time under only
-`source_zone` and `destination_zone` — "zone" below. Where the per-pair
-families grow as N×(N−1) directed pairs, this family grows as Z² directed
-zone pairs and is what the `agent.metrics.detail: zone-only` scrape mode
+`source_zone` and `destination_zone` ("zone" below). Where the per-pair
+families grow as N×(N−1) directed pairs, this family grows as N×Z (one set
+per agent and destination zone), linear in N, and is what the `agent.metrics.detail: zone-only` scrape mode
 keeps (see [Scaling and cardinality](#scaling-and-cardinality)). Each agent
 exports its own zone view, so queries aggregate with
 `sum by (source_zone, destination_zone)` exactly as they would across nodes.
@@ -190,20 +239,59 @@ MTR has no zone family, also on purpose: a traceroute is evidence about one
 concrete path, and folding hop counts across a zone would describe no path at
 all.
 
+## Agent: plan and self-monitoring
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kconmon_ng_build_info` | gauge | `version`, `commit` | Build info; the value is always 1. The controller exports it too |
+| `kconmon_ng_probe_intended` | gauge | `source_node`, `destination_node` | 1 for every directed pair the topology plan assigns this agent; absent means unplanned, never failing |
+| `kconmon_ng_agent_probe_cycle_duration_seconds` | histogram | `checker` | Wall-clock duration of one checker's full round over all peers; buckets 0.05s to 60s |
+| `kconmon_ng_agent_probe_cycle_overruns_total` | counter | `checker` | Rounds that took longer than the checker's configured interval |
+| `kconmon_ng_agent_controller_reconnects_total` | counter | none | Times the agent lost its controller stream and registered again |
+| `kconmon_ng_agent_peer_list_age_seconds` | gauge | none | Seconds since the last peer-list update from the controller (process age until the first one) |
+| `kconmon_ng_agent_mtr_reactive_inflight` | gauge | none | Reactive MTR traces running now |
+| `kconmon_ng_agent_mtr_reactive_coalesced_total` | counter | `reason` | Failed probes that started no new trace: `cooldown`, `saturated` |
+
+`probe_intended` is the plan made visible: under `topology.mode: sparse` it
+names exactly the pairs this agent probes, and `PairWentSilent` joins on it
+so that a pair the plan dropped does not page. It costs one series per
+directed pair.
+
+### When series go away
+
+A peer that leaves the agent's peer list loses its per-pair gauges
+(`udp_packet_loss_ratio`, `udp_jitter_seconds`, `icmp_packet_loss_ratio`,
+`pmtu_bytes`, `mtr_hops`, `mtr_hop_rtt_seconds`, `probe_intended`) at once.
+Its counters and histograms (`tcp`, `udp`, `icmp` and `pmtu`
+`_results_total`, the four per-pair histograms and `mtr_triggered_total`)
+are deleted 10 minutes later, so a controller failover, which re-registers
+the fleet one agent at a time, does not reset live pairs; a peer back within
+those 10 minutes keeps its counters. For 30s after re-registering, an agent
+also keeps the peers it had, so the new leader's first peer lists, which name
+only the agents already back, do not drop the gauges of the others (see
+[High availability](concepts/architecture.md#high-availability)). The zone family is never deleted. When
+a node moves to another zone, or a peer does, the pair's series under the
+old zone go at once: the per-pair gauges and, on agents 2.5.0 and newer,
+the counters and histograms listed above too. The series under the new zone
+start right away. A
+checker switched off by a config reload drops its gauges at once; its
+counters and histograms stop growing and stay until the restart.
+
 ## Controller
 
 | Metric                                     | Type    | Labels             | Description                                |
 | ------------------------------------------ | ------- | ------------------ | ------------------------------------------ |
-| `kconmon_ng_controller_registered_agents`  | gauge   | —                  | Currently registered agents, external ones included |
-| `kconmon_ng_controller_expected_agents`    | gauge   | —                  | Schedulable nodes expected to run an agent |
-| `kconmon_ng_controller_external_agents`    | gauge   | —                  | Registered agents running outside the cluster (through the external gateway); a subset of `registered_agents`, since 2.4.0 |
-| `kconmon_ng_controller_grpc_connections`   | gauge   | —                  | Active gRPC streaming connections          |
-| `kconmon_ng_controller_peer_updates_total` | counter | —                  | Peer-list updates broadcast to agents      |
-| `kconmon_ng_controller_leader`             | gauge   | —                  | `1` if this instance is the active leader  |
-| `kconmon_ng_controller_diagnostics_total`  | counter | `type`, `result`   | On-demand diagnostics dispatched. `type` is the check type (`tcp`/`udp`/`icmp`/`dns`/`http`/`mtr`); `result` is `ok`, `not_found`, `unsupported`, `timeout`, `error` or `undelivered` |
-| `kconmon_ng_controller_event_subscribers`  | gauge   | —                  | Open Console `WatchEvents` subscriptions on this replica |
-| `kconmon_ng_controller_external_subscribers` | gauge | —                  | Active agent `WatchExternalChecks` subscriptions on this replica |
-| `kconmon_ng_controller_external_assignments` | gauge | —                  | Agents with a non-empty continuous external-check assignment |
+| `kconmon_ng_controller_registered_agents`  | gauge   | none                | Currently registered agents, external ones included |
+| `kconmon_ng_controller_expected_agents`    | gauge   | none                | Schedulable nodes expected to run an agent |
+| `kconmon_ng_controller_external_agents`    | gauge   | none                | Registered agents running outside the cluster (through the external gateway); a subset of `registered_agents`, since 2.4.0 |
+| `kconmon_ng_controller_grpc_connections`   | gauge   | none                | Active gRPC streaming connections          |
+| `kconmon_ng_controller_peer_updates_total` | counter | none                | Peer-list updates broadcast to agents      |
+| `kconmon_ng_controller_leader`             | gauge   | none                | `1` if this instance is the active leader  |
+| `kconmon_ng_controller_diagnostics_total`  | counter | `type`, `result`   | On-demand diagnostics dispatched. `type` is the check type (`tcp`/`udp`/`icmp`/`pmtu`/`dns`/`http`/`mtr`); `result` is `ok`, `not_found`, `unsupported`, `timeout`, `error`, `undelivered` or `cancelled` (the caller's own connection to the controller closed first; a CLI interrupted through its port-forward is not seen and counts by its outcome) |
+| `kconmon_ng_controller_event_subscribers`  | gauge   | none                | Open Console `WatchEvents` subscriptions on this replica |
+| `kconmon_ng_controller_events_published_total` | counter | `type`         | Domain events published to `WatchEvents` subscribers: `topology_changed`, `check_observed`, `mtr_triggered`, `mtr_completed`, `diagnostic_progress` |
+| `kconmon_ng_controller_external_subscribers` | gauge | none                | Active agent `WatchExternalChecks` subscriptions on this replica |
+| `kconmon_ng_controller_external_assignments` | gauge | none                | Agents with a non-empty continuous external-check assignment |
 
 All three external gauges are unlabelled by design. `external_assignments`
 counts **agents, never specs**: a per-agent series would grow with the cluster
@@ -213,11 +301,34 @@ lease; it exists so that `KconmonAgentsMissing` can subtract bare hosts from
 the registered count, which `expected_agents` (schedulable nodes) never
 included.
 
+### On a standby replica
+
+A family appears on `/metrics` on its first write, and most of the table is
+written only by the leader's work. A replica that has never held the lease
+exports `kconmon_ng_build_info`, `expected_agents` (every replica runs the
+node informer), `leader` at `0` and the Go runtime and process families, and
+nothing else from the table. A replica that lost the lease keeps what it
+wrote while leading: `registered_agents`, `external_agents` and
+`external_assignments` drop to `0`, the counters keep their totals. A panel
+or rule that wants the leader's view joins on
+`kconmon_ng_controller_leader == 1`, as `KconmonAgentsMissing` does.
+
 ## Console
 
 The Console exposes its own families under the same prefix, namespaced
-`_console_`. What follows is the full current registry, grouped by what each
-family watches.
+`_console_`, next to the Go runtime (`go_*`) and process (`process_*`)
+families the agent and controller export too. What follows is the full
+current registry, grouped by what each family watches.
+
+A family appears on `/metrics` on its first write, not at `0` from startup,
+and that includes the ones whose Labels column says `none`: they are vectors
+with an empty label list. `ws_topics`, `ws_dropped_clients_total`,
+`audit_dropped_total`, `runs_reaped_total` or
+`webhook_maintenance_read_errors_total` stay absent until the first run,
+drop or error, and a feature that is off never writes its families at all.
+`build_info`, set at startup, and `ws_refused_total`, whose three series
+exist at `0` from startup, are the exceptions. Read an absent family as zero
+(`… or vector(0)`) rather than as a broken scrape.
 
 ### HTTP, realtime and the ingester
 
@@ -227,14 +338,15 @@ family watches.
 | `kconmon_ng_console_http_requests_total` | counter | `method`, `path`, `status` | Console HTTP requests |
 | `kconmon_ng_console_http_request_duration_seconds` | histogram | `method`, `path` | Request duration |
 | `kconmon_ng_console_events_received_total` | counter | `type` | Controller domain events received by this replica's ingester |
-| `kconmon_ng_console_events_deduped_total` | counter | — | Live events dropped by the WebSocket hub as duplicates another replica already ingested |
-| `kconmon_ng_console_ingester_connected` | gauge | — | 1 while this replica holds an established `WatchEvents` stream to the controller |
+| `kconmon_ng_console_events_deduped_total` | counter | none | Live events dropped by the WebSocket hub as duplicates another replica already ingested |
+| `kconmon_ng_console_ingester_connected` | gauge | none | 1 while this replica holds an established `WatchEvents` stream to the controller |
 | `kconmon_ng_console_ingester_reconnects_total` | counter | `reason` | Reconnect attempts: `dial`, `stream`, `capability` |
-| `kconmon_ng_console_ws_clients` | gauge | — | Currently connected WebSocket clients on this replica |
+| `kconmon_ng_console_ws_clients` | gauge | none | Currently connected WebSocket clients on this replica |
 | `kconmon_ng_console_ws_messages_sent_total` | counter | `topic` | Envelopes handed to a client's send buffer |
-| `kconmon_ng_console_ws_dropped_clients_total` | counter | — | Clients closed because their send buffer overflowed |
+| `kconmon_ng_console_ws_dropped_clients_total` | counter | none | Clients closed because their send buffer overflowed |
+| `kconmon_ng_console_ws_refused_total` | counter | `limit` | `/ws` connections refused by a `websocket.*` cap: `total`, `address`, `subject`; all three series exist at 0 from startup (since 2.5.0) |
 | `kconmon_ng_console_push_snapshots_total` | counter | `topic`, `result` | Server-side snapshot pushes: `ok`, `error` |
-| `kconmon_ng_console_ws_topics` | gauge | — | Ephemeral `run:{id}` WebSocket topics currently registered |
+| `kconmon_ng_console_ws_topics` | gauge | none | Ephemeral `run:{id}` WebSocket topics currently registered |
 
 ### Store and retention
 
@@ -250,10 +362,9 @@ family watches.
 the only visibility into the pruner. The `table` label is the pruner's sweep
 list, a closed set of ten: `topology_events`, `audit_log`, `check_results`,
 `check_runs`, `mtr_path_snapshots`, `mtr_hop_enrichment`, `annotations`,
-`k8s_events`, `incidents`, `maintenance_windows`. The tenth, `check_results`,
-is the highest-volume table the pruner sweeps; earlier docs left it out of
-this list, which made a sweep falling behind on the biggest table look idle in
-any view built from them. There is no `webhooks` value on purpose: webhook
+`k8s_events`, `incidents`, `maintenance_windows`. `check_results` is the
+highest-volume table of them, so a sweep falling behind shows there first.
+There is no `webhooks` value on purpose: webhook
 rows are configuration, not observation, and are never swept.
 
 ### Auth, RBAC and rate limits
@@ -262,10 +373,10 @@ rows are configuration, not observation, and are never swept.
 | --- | --- | --- | --- |
 | `kconmon_ng_console_auth_requests_total` | counter | `mode`, `result` | Authentication attempts: `ok`, `invalid`, `expired`, `error` |
 | `kconmon_ng_console_authz_denied_total` | counter | `permission` | Requests denied by the authz policy |
-| `kconmon_ng_console_audit_dropped_total` | counter | — | Audit entries dropped because the async write buffer was full |
+| `kconmon_ng_console_audit_dropped_total` | counter | none | Audit entries dropped: the async write buffer (64 rows) was full, or a row found its share of it used up. Rows of failed requests and of anonymous or credential-less callers wait in an eighth of the buffer of their own on the RBAC, token, user, import, export and audit routes, and use at most half of the rest on other routes; one subject has at most 16 such rows waiting. Other rows stop at three quarters of the rest. What remains is kept for signed-in callers' successful requests on those routes and for successful sign-ins (local and OIDC) and password changes, which also wait up to 2 s for room. Also counts the failed rows of callers with no credential (a 401, a refused OIDC callback, a failed or rate-limited sign-in) past 120 a minute from one client address (/64 for IPv6), which are not stored |
 | `kconmon_ng_console_rate_limited_total` | counter | `limit` | Requests refused with 429: `runs`, `login`, `promql` |
 | `kconmon_ng_console_rate_limit_failopen_total` | counter | `limit` | Requests admitted because the KV backend was unreadable (fail-open) |
-| `kconmon_ng_console_projection_guard_failopen_total` | counter | — | Definition writes admitted because the topology was unreadable (fail-open) |
+| `kconmon_ng_console_projection_guard_failopen_total` | counter | none | Definition writes admitted because the topology was unreadable (fail-open) |
 
 The two `failopen` counters exist because the console deliberately fails open
 in both places: a Valkey outage must not become a login outage, and a
@@ -282,7 +393,8 @@ count is a control that did not run, which is exactly why they are counted.
 | `kconmon_ng_console_scheduler_ticks_total` | counter | `result` | Schedule loop ticks: `ok`, `not-leader`, `error` |
 | `kconmon_ng_console_scheduler_fired_total` | counter | `kind` | Runs started by the loop: `once`, `interval` |
 | `kconmon_ng_console_scheduler_skipped_total` | counter | `reason` | Due schedules not fired: `overrun`, `disabled` |
-| `kconmon_ng_console_runs_reaped_total` | counter | — | Runs force-finished as cancelled by the stuck-run reaper |
+| `kconmon_ng_console_runs_reaped_total` | counter | none | Runs force-finished as cancelled by the stuck-run reaper |
+| `kconmon_ng_console_sweep_results_total` | counter | `source_zone`, `destination_zone`, `result` | Topology sweeper probes per zone pair: `ok`, `failed`, `timeout` |
 
 `scheduler_ticks_total{result="not-leader"}` is the **normal** case on every
 replica but one (the loop is a singleton on a PostgreSQL advisory lock), so
@@ -292,17 +404,24 @@ alerting on it is alerting on correct behavior.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `kconmon_ng_console_external_series_projected` | gauge | — | Prometheus series the assigned continuous external checks project |
-| `kconmon_ng_console_external_reconciles_total` | counter | `result` | Reconcile ticks: `pushed`, `unchanged`, `not-leader`, `error` |
-| `kconmon_ng_console_external_specs_skipped_total` | counter | `reason` | Definitions left out of the assignment: `check-type`, `destination-kind`, `unrunnable` |
+| `kconmon_ng_console_external_series_projected` | gauge | none | Prometheus series the assigned continuous external checks project |
+| `kconmon_ng_console_external_reconciles_total` | counter | `result` | Reconcile ticks: `pushed`, `unchanged`, `not-leader`, `error`, `too-large` |
+| `kconmon_ng_console_external_specs_skipped_total` | counter | `reason` | Definitions left out of the assignment: `check-type`, `destination-kind`, `unrunnable`, `over-budget` |
 
 The skip reasons: `check-type` is a definition whose type cannot be a
 continuous external check (udp, mtr; see
 [External targets](scenarios/external-targets.md)); `destination-kind` is a
 continuous check against cluster nodes, which is the agents' own peer mesh
 already; `unrunnable` is the backstop for a definition no agent could parse
-(http against a `host` target, dns without `params.query`) written before the
-API started refusing those at the door.
+(http against a `host` target, dns without `params.query`) that a console
+older than 2.5.0 stored, since the API refuses those at write time;
+`over-budget` is a definition left out
+so the assignment fits the controller's 8 MiB limit on
+`PUT /api/v1/external-checks`. The reconciler sheds whole definitions, newest
+first, so one added later never pushes out one already running, and logs one
+WARN per skipped definition and reason, as for the other skips. `too-large` is
+a tick the controller refused with 413 anyway, logged at ERROR: it refuses the whole assignment, and the agents keep the last one they
+accepted until it shrinks.
 
 ### MTR path history and enrichment
 
@@ -313,7 +432,7 @@ API started refusing those at the door.
 | `kconmon_ng_console_enrichment_lookups_total` | counter | `source`, `result` | Source lookups run for cache misses: `rdns\|asn\|city` × `ok\|miss\|error` |
 
 `mtr_snapshots_total{result="new-path"}` is **the route-changed alerting
-primitive** — it fires when a pair takes a route it has never taken before,
+primitive**: it fires when a pair takes a route it has never taken before,
 which is otherwise something an operator notices by diffing two traces by
 hand. `repeat` is the steady state (a stable route re-confirmed) and is what
 makes `new-path` meaningful: without it a silent projector and a stable
@@ -342,6 +461,8 @@ series pinned at zero would read as "working and finding nothing".
 | --- | --- | --- | --- |
 | `kconmon_ng_console_k8s_events_total` | counter | `result` | Kubernetes events the reader decided about: `stored`, `duplicate`, `filtered`, `error` |
 | `kconmon_ng_console_webhook_deliveries_total` | counter | `result` | Webhook deliveries reaching a terminal decision: `ok`, `failed`, `filtered` |
+| `kconmon_ng_console_webhook_suppressed_total` | counter | `event` | Alert edges a maintenance window held back: `alert.fired`, `alert.resolved` |
+| `kconmon_ng_console_webhook_maintenance_read_errors_total` | counter | none | Alert watcher polls whose maintenance-window read failed |
 
 `k8s_events_total{result="duplicate"}` is the normal outcome of a relist, not
 a failure: `kubernetesContext.resyncInterval` forces a periodic list, and
@@ -362,6 +483,15 @@ artefact. `filtered` is the steady state of an endpoint that does not
 subscribe to the event (the equivalent of `repeat` above), and a disabled
 endpoint is not counted at all, since a switched-off endpoint that kept
 incrementing a series would read as a working one.
+
+`webhook_suppressed_total` counts each edge once, when the window holds it: a
+held `alert.fired` delivered after the window closes is not counted again.
+The counter is per process, so a console restarted inside a window counts the
+edges it still holds once more. `webhook_maintenance_read_errors_total` is the
+alert watcher's own failed reads of the maintenance windows, apart from
+`store_queries_total{query="ListMaintenanceWindows"}`, which the HTTP API
+feeds too. On a failed read new alert edges go out unsuppressed and edges
+already held stay held until a read succeeds.
 
 ### What the Console never puts in a label
 
@@ -428,22 +558,78 @@ story, including how not to get paged twice, lives in
     summary: More than 5% of TCP probes on a pair are failing
 
 - alert: PathMTUBlackHole
-  # The value is the path MTU that still crosses, not the ratio.
+  # The value is the smallest path MTU that crossed in the last 10m, not the ratio. The second arm
+  # (sustainedThreshold over 30m, at least two losses, one in the last 10m) catches one black-holed
+  # ECMP path.
   expr: >-
-    max by (source_node, destination_node, source_zone, destination_zone) (kconmon_ng_pmtu_bytes)
+    min by (source_node, destination_node, source_zone, destination_zone)
+    (min_over_time(kconmon_ng_pmtu_bytes[10m]))
     and on (source_node, destination_node, source_zone, destination_zone)
     (
-      sum by (source_node, destination_node, source_zone, destination_zone)
-      (rate(kconmon_ng_pmtu_results_total{result="fail"}[10m]))
-      /
-      sum by (source_node, destination_node, source_zone, destination_zone)
-      (rate(kconmon_ng_pmtu_results_total[10m])) > 0.5
+      (
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_pmtu_results_total{result="fail"}[10m]))
+        /
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_pmtu_results_total[10m]))
+        > 0.5
+      )
+      or
+      (
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_pmtu_results_total{result="fail"}[30m]))
+        /
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_pmtu_results_total[30m]))
+        > 0.1
+        and on (source_node, destination_node, source_zone, destination_zone)
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (increase(kconmon_ng_pmtu_results_total{result="fail"}[30m]))
+        >= 2
+        and on (source_node, destination_node, source_zone, destination_zone)
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (increase(kconmon_ng_pmtu_results_total{result="fail"}[10m]))
+        > 0
+      )
     )
   for: 5m
   labels:
     severity: warning
   annotations:
     summary: Full-size datagrams on a pair are lost with no ICMP frag-needed
+
+- alert: ZonePathMTUBlackHole
+  # The same verdict per zone pair, only where Prometheus holds no per-pair pmtu series
+  # (agent.metrics.detail: zone-only); shares the prometheusRule.pathMtuBlackHole knobs.
+  expr: >-
+    (
+      (
+        sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_pmtu_results_total{result="fail"}[10m]))
+        /
+        sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_pmtu_results_total[10m]))
+        > 0.5
+      )
+      or
+      (
+        sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_pmtu_results_total{result="fail"}[30m]))
+        /
+        sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_pmtu_results_total[30m]))
+        > 0.1
+        and on (source_zone, destination_zone)
+        sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_pmtu_results_total{result="fail"}[30m]))
+        >= 2
+        and on (source_zone, destination_zone)
+        sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_pmtu_results_total{result="fail"}[10m]))
+        > 0
+      )
+    )
+    unless on (source_zone, destination_zone)
+    count by (source_zone, destination_zone) (kconmon_ng_pmtu_results_total)
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: Full-size datagrams between a zone pair are lost with no ICMP frag-needed
 
 - alert: NodeUnreachable
   # A pair counts as failing above 0.5 of its TCP probes (fixed); the last clause is minPeers.
@@ -498,12 +684,32 @@ story, including how not to get paged twice, lives in
     summary: One node cannot reach most of its peers over TCP
 
 - alert: PairWentSilent
+  # First half: pairs the plan still assigns. Second half: sources that export no plan at all
+  # (an agent older than 2.3.0, or one that stopped being scraped).
   expr: >-
-    sum by (source_node, destination_node)
-    (rate(kconmon_ng_tcp_results_total[1h] offset 5m)) > 0
-    unless
-    sum by (source_node, destination_node)
-    (rate(kconmon_ng_tcp_results_total[5m])) > 0
+    (
+      (
+        sum by (source_node, destination_node)
+        (rate(kconmon_ng_tcp_results_total[1h] offset 5m)) > 0
+        unless
+        sum by (source_node, destination_node)
+        (rate(kconmon_ng_tcp_results_total[5m])) > 0
+      )
+      and on (source_node, destination_node)
+      (kconmon_ng_probe_intended == 1)
+    )
+    or
+    (
+      (
+        sum by (source_node, destination_node)
+        (rate(kconmon_ng_tcp_results_total[1h] offset 5m)) > 0
+        unless
+        sum by (source_node, destination_node)
+        (rate(kconmon_ng_tcp_results_total[5m])) > 0
+      )
+      unless on (source_node)
+      kconmon_ng_probe_intended
+    )
   for: 10m
   labels:
     severity: warning
@@ -616,24 +822,23 @@ story, including how not to get paged twice, lives in
     summary: External kconmon-ng agent {{ $labels.node }} is not answering scrapes
 ```
 
-Thirteen rules, twelve of them on by default; `KconmonExternalAgentDown` ships off
+Fourteen rules, thirteen of them on by default; `KconmonExternalAgentDown` ships off
 because its job only exists once external agents are
 [scraped](external-agents.md#scraping-external-agents). `expr`/`for`/`severity`
 above are what the chart renders at its default knob values; the
 `annotations` are abridged; what ships carries a templated `summary` and
 `description` naming the pair, the zones and the measured value.
 
-Two of those expressions changed in 2.4.0. `KconmonAgentsMissing` used to be
-a plain `expected - registered`, and `registered` counts external agents
-while `expected` (schedulable nodes) never did, so one bare host masked one
-missing cluster node. The rule now subtracts
-`kconmon_ng_controller_external_agents`, with `or registered * 0` standing in
-for the gauge on a controller image older than 2.4.0, so the rule keeps
-firing there rather than matching nothing. `KconmonExternalAgentDown` reads
-Prometheus' own `up` for the external-agent job and carries the SD labels
-(`node`, `zone`, `instance`) into its annotations; a custom
-`scrapeConfig.externalAgents.jobName` without `agent-external` in it is not
-matched, which the values comment says next to the knob.
+`KconmonAgentsMissing` subtracts `kconmon_ng_controller_external_agents`
+from `registered`: `registered` counts external agents while `expected`
+(schedulable nodes) does not, so without it one bare host would mask one
+missing cluster node. `or registered * 0` stands in for that gauge on a
+controller image older than 2.4.0, so the rule keeps firing there rather than
+matching nothing. `KconmonExternalAgentDown` reads Prometheus' own `up` for
+the external-agent job and carries the SD labels (`node`, `zone`, `instance`)
+into its annotations. It also matches a custom
+`scrapeConfig.externalAgents.jobName` that lacks `agent-external`; a
+hand-written plain-Prometheus job still needs `agent-external` in its name.
 
 **`PairWentSilent` is the only one that fires on an absence, and it exists
 because the ratio rules cannot.** A rule like `TCPChecksFailing` divides a
@@ -647,12 +852,21 @@ series that is no longer scraped does not go to zero, it ceases to exist, and
 minus everything still being probed. The grouping is just `(source_node,
 destination_node)` on purpose: matching on the four peer labels would read a
 zone relabel as one pair disappearing and another appearing, and fire on a
-rename. The 1h lookback is also the alert's lifetime: once the silence is an
-hour old the offset window empties, the pair leaves the left-hand side and
-the alert resolves, so a cluster scaled down on purpose gets one bounded
-warning while a node that is gone for good belongs to `KconmonAgentsMissing`.
-The full reasoning, including why a rollout does not page anyone, is in the
-chart README's "Alerting rules" section.
+rename.
+
+The join on `kconmon_ng_probe_intended` (since 2.3.0) keeps the rule to
+pairs the plan still assigns. A pair the plan drops, because a node left or
+a sparse plan reshuffled, loses its `probe_intended` series at once while its
+counters linger for up to 10 minutes and its rate for an hour; without the
+join it would page for that hour. The second half covers a source that
+exports no plan at all: an agent older than 2.3.0, or an agent that stopped
+being scraped, whose `probe_intended` goes stale with it. The 1h lookback is
+also the alert's lifetime: once the silence is an hour old the offset window
+empties, the pair leaves the left-hand side and the alert resolves, so a node
+removed on purpose gets one bounded warning for its own outbound pairs, while
+a node that is gone for good belongs to `KconmonAgentsMissing`. The full
+reasoning, including why a rollout does not page anyone, is in the chart
+README's "Alerting rules" section.
 
 ### One alert per node instead of one per pair
 
@@ -675,10 +889,15 @@ inhibit_rules:
 The chart does not configure Alertmanager; paste this into your Alertmanager
 configuration (with kube-prometheus-stack: `alertmanager.config.inhibit_rules`).
 
-A node that stops altogether is a different signal. Its agent stops
-heartbeating, the controller drops it after `config.controllerAgentTtl` (30s) and
-the peers stop probing it, so its pair counters freeze and neither node-level
-rule gets its five minutes. It pages as `KconmonAgentsMissing`.
+A node that stops altogether is a different signal, and `NodeUnreachable`
+does not page for it. Its agent stops heartbeating, the controller drops it
+after `controller.agentTtl` (Helm: `config.controllerAgentTtl`, 30s) and the
+peers stop probing it. Their counters towards it freeze after a few failed
+probes, so the pair failure ratio sits above 0.5 for about a minute, short of
+the rule's five, and then the pairs have no rate at all. The dead node pages as `KconmonAgentsMissing`
+after its 10 minutes, and its own outbound pairs as `PairWentSilent`.
+`NodeUnreachable` is for the node that stays registered while traffic to it
+fails.
 
 ## Scaling and cardinality
 
@@ -693,20 +912,21 @@ Every directed pair keeps these peer-labelled families
 
 | Families | Kind | Series per directed pair |
 | --- | --- | --- |
-| `tcp_connect_duration_seconds`, `tcp_total_duration_seconds`, `udp_rtt_seconds`, `icmp_rtt_seconds` | 4 histograms | 64 — each is 13 buckets + `+Inf` + `_sum` + `_count` = 16 |
+| `tcp_connect_duration_seconds`, `tcp_total_duration_seconds`, `udp_rtt_seconds`, `icmp_rtt_seconds` | 4 histograms | 64: each is 13 buckets + `+Inf` + `_sum` + `_count` = 16 |
 | `udp_jitter_seconds`, `udp_packet_loss_ratio`, `icmp_packet_loss_ratio` | 3 gauges | 3 |
-| `pmtu_bytes` | 1 gauge | 1 |
+| `pmtu_bytes`, `pmtu_probe_bytes` | 2 gauges | 2 |
+| `probe_intended` | 1 gauge | 1 |
 | `tcp_results_total`, `udp_results_total`, `icmp_results_total`, `pmtu_results_total` | 4 counters | 8, two per family by `result` |
 
-Call it **~75 active series per directed pair** with the default checkers on.
-Pairs are ordered (node A probes B *and* B probes A), so N nodes make N×(N−1)
-directed pairs:
+That is **78 active series per directed pair** with the default checkers on.
+Pairs are ordered
+(node A probes B *and* B probes A), so N nodes make N×(N−1) directed pairs:
 
-| Nodes | Directed pairs | Active series at ~75/pair |
+| Nodes | Directed pairs | Active series at 78/pair |
 | --- | --- | --- |
-| 10 | 90 | ~6.8k |
-| 50 | 2,450 | ~185k |
-| 100 | 9,900 | ~740k |
+| 10 | 90 | ~7.0k |
+| 50 | 2,450 | ~191k |
+| 100 | 9,900 | ~772k |
 
 The MTR families (`mtr_triggered_total`, `mtr_hops`, `mtr_hop_rtt_seconds`)
 appear for a pair only after a failed probe triggered a trace. DNS and HTTP
@@ -716,9 +936,9 @@ and are negligible next to the mesh.
 ### The proven envelope
 
 **50–100 nodes is the production-proven envelope at full detail.** At 100
-nodes, budget ~0.75M active series for kconmon-ng alone and size Prometheus
+nodes, budget ~0.77M active series for kconmon-ng alone and size Prometheus
 accordingly. Above that the quadratic growth is unforgiving: 300 nodes is
-~6.7M series. The valve below cuts what Prometheus keeps by an order of
+~7.0M series. The valve below cuts what Prometheus keeps by an order of
 magnitude by configuration alone; what it cannot change is that the agents
 still *probe* the full N×N mesh, which is what `topology.mode: sparse`
 (since v2.3.0) trims. Do not plan a 1000-node deployment on these defaults.
@@ -727,17 +947,21 @@ still *probe* the full N×N mesh, which is what `topology.mode: sparse`
 
 - **The zone plane and the valve** (`agent.metrics.detail`). Every peer probe
   is also recorded into the [zone family](#agent-zone-aggregates), which
-  grows as Z² zone pairs instead of N² node pairs, and the valve decides at
+  grows as N×Z (one set per agent and destination zone) instead of N² node
+  pairs, and the valve decides at
   scrape time how much of the per-pair detail Prometheus keeps:
 
   | `agent.metrics.detail` | Per directed pair | What remains |
   | --- | --- | --- |
-  | `full` (default) | ~75 series | everything |
-  | `counters-only` | ~12 series | drops the four per-pair histograms; gauges and result counters stay, every pair alert keeps firing |
-  | `zone-only` | ~0 series | drops every series naming a `destination_node`; the zone family (~74×Z² series) and the linear DNS/HTTP/external families stay |
+  | `full` (default) | 78 series | everything |
+  | `counters-only` | 14 series | drops the four per-pair histograms; gauges and result counters stay, every pair alert keeps firing |
+  | `zone-only` | 0 series | drops every series naming a `destination_node`; the zone family (76 series per agent and destination zone), the per-agent `agent_pmtu_probe_bytes` gauge and the linear DNS/HTTP/external families stay |
 
-  At 100 nodes: ~0.75M series at `full`, ~0.12M at `counters-only`, and
-  practically N-independent at `zone-only`. The valve renders as
+  At 100 nodes: ~0.77M series at `full`, ~0.14M at `counters-only`, and at
+  `zone-only` about 30k for the zone family in four zones, linear in N. Each
+  agent exports its own view of the zone family (64 histogram series, 8
+  result counters, 4 packet counters per destination zone), and Prometheus
+  keeps one set per scraped agent. The valve renders as
   `metricRelabelings` on the agent `ServiceMonitor` and, since 2.4.0, on the
   external-agent `ScrapeConfig` as well (one shared template, so a bare host
   never returns detail the valve dropped for the pods); it needs
@@ -761,9 +985,15 @@ still *probe* the full N×N mesh, which is what `topology.mode: sparse`
   Remember the version floor from the warning above: flip `zone-only` on a
   fleet of agents older than v2.3.0 and the per-pair series are dropped with
   nothing replacing them.
+
+  Under `zone-only` the per-pair panels of the bundled dashboards go empty.
+  The Overview dashboard's *Black-hole pairs (15m)* tile then counts zone
+  pairs with a failed probe, from `zone_pmtu_results_total`, instead of
+  reading 0.
 - **Disable checkers you do not need** (`config.checkers.<type>.enabled`).
-  Each protocol takes its whole per-pair family with it: TCP off saves ~33
-  series/pair (it owns two of the four histograms), UDP off ~19, ICMP off ~18.
+  Each protocol takes its whole per-pair family with it once the agents
+  restart, which a `helm upgrade` does: TCP off saves 34 series/pair (it
+  owns two of the four histograms), UDP off 20, ICMP off 19, path MTU off 4.
 - **Drop only what you never query.** `counters-only` is the broad version of
   this; for something narrower (one histogram, one protocol) write your own
   `metric_relabel_configs` as above, or bring your own `ServiceMonitor` in

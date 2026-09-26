@@ -6,9 +6,9 @@ Get paged when the network between nodes degrades, and when the monitor
 itself goes quiet, without writing PromQL from scratch. kconmon-ng gives you
 two independent layers:
 
-1. **Chart-shipped rules** (`prometheusRule.enabled`): thirteen built-in alerts,
-   twelve on by default, rendered as one static `PrometheusRule` and versioned
-   in Git with your values.
+1. **Chart-shipped rules** (`prometheusRule.enabled`): fourteen built-in
+   alerts, thirteen on by default, rendered as one static `PrometheusRule` and
+   versioned in Git with your values.
 2. **Console-managed rules** (`console.alerting.enabled`): rules built in the
    UI from typed templates or raw PromQL, stored in PostgreSQL and reconciled
    into a *separate*, console-owned `PrometheusRule` object.
@@ -22,15 +22,25 @@ One flag (it needs the Prometheus Operator's `PrometheusRule` CRD):
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --reuse-values --set prometheusRule.enabled=true
+  --reset-then-reuse-values --set prometheusRule.enabled=true
 ```
 
-That ships thirteen rules: `UDPLossHigh`, `TCPChecksFailing`,
-`PathMTUBlackHole`, `NodeUnreachable`, `NodeIsolated`, `PairWentSilent`,
-`DNSChecksFailing`, `ExternalChecksFailing`, `ZoneChecksFailing`,
-`ZoneLossHigh`, plus three that watch the monitor itself:
-`KconmonAgentsMissing`, `KconmonControllerDown` and
-`KconmonExternalAgentDown`. The last one ships disabled
+`--reset-then-reuse-values` (Helm 3.14+) starts from the new chart's
+defaults and applies the values you set on earlier releases on top. Plain
+`--reuse-values` renders the new templates over the old release's complete
+values, so a default added since then never arrives, and an upgrade from a
+2.0.x release stops with a message naming this flag. If you keep your values
+in a file, pass it with `-f` instead.
+
+That ships fourteen rules: `UDPLossHigh`, `TCPChecksFailing`,
+`PathMTUBlackHole`, `ZonePathMTUBlackHole`, `NodeUnreachable`,
+`NodeIsolated`, `PairWentSilent`, `DNSChecksFailing`,
+`ExternalChecksFailing`, `ZoneChecksFailing`, `ZoneLossHigh`, plus three that
+watch the monitor itself: `KconmonAgentsMissing`, `KconmonControllerDown` and
+`KconmonExternalAgentDown`. `ZonePathMTUBlackHole` stays silent wherever
+Prometheus holds per-pair path MTU series, so in practice it fires only
+under `agent.metrics.detail: zone-only` or a relabeling of your own that
+drops those series. `KconmonExternalAgentDown` ships disabled
 (`prometheusRule.externalAgentDown.enabled: false`): its `up{job}` series only
 exists once you [scrape external agents](../external-agents.md#scraping-external-agents),
 so switch it on together with that job. Every expression, and the reasoning
@@ -47,7 +57,7 @@ database:
 console:
   enabled: true
   alerting:
-    enabled: true # renders a namespaced Role for prometheusrules
+    enabled: true # renders a namespaced Role: list prometheusrules, get/create/patch/delete on bundleName only
 ```
 
 Then build rules on the [Alerting](../console/alerting.md) page. Creating and
@@ -69,8 +79,8 @@ against your Prometheus *right now* and reports how many series it matches,
 zero named as an answer rather than a failure.
 
 <figure markdown>
-  ![New rule form filled in: Name PairUDPLossDemo, Kind pair-loss, Protocol udp, Loss threshold 50, Source node kconmon-stand-worker2, Destination node kconmon-stand-worker6, Severity warning, For at its 5m placeholder, Add label, Add annotation, Enabled ticked](../img/set-up-alerting-rule-builder.png){ loading=lazy }
-  <figcaption>Alerting → New rule, filled in: the pair-loss template on UDP, the threshold in percent, scoped to worker2 → worker6, severity warning, <code>for</code> left at its 5m placeholder.</figcaption>
+  ![New rule form filled in: Name acc-pair-udp-loss-demo, Kind pair-loss, Protocol udp, Loss threshold 50, Source node kc-accept-worker3, Destination node kc-accept-worker5, Severity warning, For at its 5m placeholder, Add label, Add annotation, Enabled ticked](../img/set-up-alerting-rule-builder.png){ loading=lazy }
+  <figcaption>Alerting → New rule, filled in: the pair-loss template on UDP, the threshold in percent, scoped to worker3 → worker5, severity warning, <code>for</code> left at its 5m placeholder.</figcaption>
 </figure>
 
 One caveat that looks like a bug and is not: your Prometheus must *select*
@@ -98,8 +108,9 @@ Disabling one removes exactly that rule and nothing else. Before retuning,
 know what the defaults already protect you from. The failure-ratio rules
 compare `rate(fail)/rate(all)`, at 5% in-cluster and 10% for external
 targets, rather than `rate(fail) > 0`, so one flaky probe in a healthy stream does not
-page anyone. `PairWentSilent` fires on ~15 minutes of *absence*: silence has
-to outlast a rollout or a drain. Console-managed rules are tuned in the UI
+page anyone. `PairWentSilent` fires on *absence* that lasts 5 minutes plus
+its `prometheusRule.pairWentSilent.for` (10m by default, so about 15 minutes):
+silence has to outlast a rollout or a drain. Console-managed rules are tuned in the UI
 instead; each rule's threshold, hold and severity are fields on the rule.
 
 ## Route notifications
@@ -113,7 +124,9 @@ works out of the box.
 **The Console delivers webhooks itself**, off Prometheus's alert state, with
 no Alertmanager involved. Configure an encryption key first. It seals the
 per-endpoint signing secrets at rest (AES-256-GCM), and without it endpoint
-creation and testing answer `503`:
+creation and testing answer `503`, naming `webhooks.encryptionKeyFile` (console
+config) and `console.webhooks.existingSecret` (Helm, base64 of 32 random
+bytes):
 
 ```yaml
 console:
@@ -121,11 +134,22 @@ console:
     existingSecret: kconmon-webhook-key # key: console-webhooks-encryption-key
 ```
 
+With `networkPolicy.enabled`, a receiver running as a pod in the cluster also
+needs a selector peer on its pod port (the Service's `targetPort`) in
+`console.networkPolicy.webhookEgress`, on every CNI; the default rule is an
+`ipBlock` meant for receivers outside the cluster. On Calico and Antrea that
+`ipBlock` also matches every pod on 80 and 443 unless
+`networkPolicy.clusterCIDRs` carves the cluster out. See
+[NetworkPolicy on Cilium, Calico and Antrea](../configuration.md#networkpolicy-and-cilium).
+
 Then add endpoints under Settings → Webhooks (this needs `webhooks:manage`,
 which only the `admin` role holds: an endpoint URL plus a signing secret is
 credential material). Each endpoint subscribes to events from a closed
 vocabulary: `alert.fired`, `alert.resolved`, `incident.created`,
-`incident.resolved`, `incident.reopened`.
+`incident.resolved`, `incident.reopened`. An open maintenance window holds
+back `alert.fired` and `alert.resolved` for every alert its scope covers
+([how the hold works](../console/alerting.md#webhooks)); it does not touch
+what Alertmanager delivers for the chart's rules.
 
 ### Will I get paged twice?
 
@@ -138,9 +162,9 @@ managed rule carries two reserved labels, `severity` and
 `kconmon_ng_rule_id` in Alertmanager when the console webhook should own
 delivery, or simply do not subscribe an endpoint to the alert events when
 Alertmanager should. The reverse overlap does not exist: the watcher fires
-only for alerts carrying `kconmon_ng_rule_id`, so the chart's ten bundled
-rules never arrive through console webhooks; an unmanaged firing alert
-belongs to whoever owns that rule.
+only for alerts carrying `kconmon_ng_rule_id`, so the chart's bundled rules
+never arrive through console webhooks; an unmanaged firing alert belongs to
+whoever owns that rule.
 
 ## The payload on the wire
 
@@ -149,14 +173,14 @@ Alert-family deliveries (`alert.fired` / `alert.resolved`) carry this body:
 | Field | Meaning |
 | --- | --- |
 | `event` | `alert.fired` or `alert.resolved` |
-| `sentAt` | when this delivery was built; marshalled once, so stable across retries — but not across replicas |
+| `sentAt` | when this delivery was built; marshalled once, so stable across retries, but not across replicas |
 | `alert.ruleId` | the console rule's id, off the `kconmon_ng_rule_id` label; never empty |
 | `alert.ruleName` | the alert's name as *Prometheus* knows it (the sanitized alertname) |
 | `alert.severity` | the rule's severity |
 | `alert.expr` | the rendered PromQL; `""` if the row could not be resolved |
-| `alert.labels` | Prometheus's label set for this alert instance, verbatim — includes `alertname`, `severity`, `kconmon_ng_rule_id`; never null |
+| `alert.labels` | Prometheus's label set for this alert instance, verbatim; includes `alertname`, `severity`, `kconmon_ng_rule_id`; never null |
 | `alert.annotations` | the alert's annotations, verbatim; never null |
-| `alert.firedAt` | Prometheus's `activeAt` — when the expression started matching, not when the console noticed; stable across replicas |
+| `alert.firedAt` | Prometheus's `activeAt`: when the expression started matching, not when the console noticed; stable across replicas |
 | `alert.resolvedAt` | null on `alert.fired`, set on `alert.resolved` |
 
 Shaped like this (values illustrative):
@@ -228,7 +252,7 @@ probe-shaped payload described above and records the outcome verbatim on the
 row.
 
 <figure markdown>
-  ![Settings scrolled to Webhooks: the hooks-sink endpoint at http://hooks-sink.kconmon-ng.svc:8080/kconmon subscribed to incident.created, incident.resolved, incident.reopened, alert.fired and alert.resolved, badged enabled, signed and ok with its timestamp, the Test, Edit and Delete actions and the line Test queued; the outcome lands on this row; Configuration export / import below](../img/set-up-alerting-webhook-test.png){ loading=lazy }
+  ![Settings scrolled to Webhooks, below the Users card: the acc-hooks-sink endpoint with its URL on webhook-receiver.kconmon.svc.cluster.local cut short in the row, subscribed to incident.created, incident.resolved, incident.reopened, alert.fired and alert.resolved, badged enabled, signed and ok with the timestamp 9/26/2026, 06:02:27, the Test, Edit and Delete actions and the line Test queued; the outcome lands on this row; Configuration export / import below](../img/set-up-alerting-webhook-test.png){ loading=lazy }
   <figcaption>Settings → Webhooks right after <em>Test</em>: one endpoint subscribed to five event types, its row carrying <em>enabled</em>, <em>signed</em> and the last recorded outcome, <em>ok</em>, with the confirmation that the test was queued and its outcome lands on this row.</figcaption>
 </figure>
 
