@@ -329,14 +329,14 @@ def alerting_role():
 GEOIP = {"console": {"enabled": True, "mtr": {"enrichment": {"enabled": True, "geoip": {
     "mode": "auto", "secret": {"create": True, "licenseKey": "abcdef"}}}}}}
 # accountId as written in a values file (-f), and the string the Secret must carry.
-SECRET_NUMBERS = [(123456, "123456"), (1000000, "1000000"), (1234567, "1234567"),
+ACCOUNT_ID_RENDERS = [(123456, "123456"), (1000000, "1000000"), (1234567, "1234567"),
                   ("0012345", "0012345"), ("${MAXMIND_ACCOUNT_ID}", "${MAXMIND_ACCOUNT_ID}")]
 
 
-def secret_numbers():
+def account_id_digits():
     bad = []
     # Messages name the case, never the rendered Secret value.
-    for case, (account, want) in enumerate(SECRET_NUMBERS, 1):
+    for case, (account, want) in enumerate(ACCOUNT_ID_RENDERS, 1):
         values = json.loads(json.dumps(GEOIP))
         values["console"]["mtr"]["enrichment"]["geoip"]["secret"]["accountId"] = account
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
@@ -504,14 +504,14 @@ def main():
     bad += duplicate_names()
     bad += alerting_role()
     bad += leader_election_role()
-    bad += secret_numbers()
+    bad += account_id_digits()
     bad += notes()
     bad += helm_test_log()
     for b in bad:
         print("  " + b)
     print(f"{len(REFUSE)} refusals, {len(ACCEPT)} accepts, {len(MODES)} auth modes, "
           f"{len(CLIENT_ADDRESS_RENDERS)} clientAddress renders, {len(WEBSOCKET)} websocket renders, "
-          f"{len(SECRET_NUMBERS)} secret numbers, {len(NOTES)} NOTES renders: "
+          f"{len(ACCOUNT_ID_RENDERS)} accountId renders, {len(NOTES)} NOTES renders: "
           + ("PASS" if not bad else "FAIL"))
     return 1 if bad else 0
 
