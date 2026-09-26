@@ -6,7 +6,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 )
 
-func TestIsSafeReturnTo(t *testing.T) {
+func TestIsLocalURL(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
 		"/":                       true,
@@ -24,8 +24,8 @@ func TestIsSafeReturnTo(t *testing.T) {
 		"/a\\b":                   false,
 	}
 	for in, want := range cases {
-		if got := authn.IsSafeReturnTo(in); got != want {
-			t.Errorf("IsSafeReturnTo(%q) = %v, want %v", in, got, want)
+		if got := authn.IsLocalURL(in); got != want {
+			t.Errorf("IsLocalURL(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
