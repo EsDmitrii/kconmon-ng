@@ -610,14 +610,6 @@ func IsSafeReturnTo(returnTo string) bool {
 	return u.Scheme == "" && u.Host == ""
 }
 
-// SafeReturnTo returns returnTo when IsSafeReturnTo accepts it, and fallback otherwise.
-func SafeReturnTo(returnTo, fallback string) string {
-	if IsSafeReturnTo(returnTo) {
-		return returnTo
-	}
-	return fallback
-}
-
 // claimString returns claims[key] as a string, or "" when the key is absent
 // or not a string.
 func claimString(claims map[string]any, key string) string {

@@ -29,13 +29,3 @@ func TestIsSafeReturnTo(t *testing.T) {
 		}
 	}
 }
-
-func TestSafeReturnToFallsBackForAnUnsafeTarget(t *testing.T) {
-	t.Parallel()
-	if got := authn.SafeReturnTo("/matrix", "/"); got != "/matrix" {
-		t.Errorf("SafeReturnTo(/matrix) = %q, want /matrix", got)
-	}
-	if got := authn.SafeReturnTo("//evil.example", "/"); got != "/" {
-		t.Errorf("SafeReturnTo(//evil.example) = %q, want the fallback /", got)
-	}
-}
