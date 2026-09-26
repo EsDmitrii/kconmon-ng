@@ -438,13 +438,12 @@ describe("pluralKey", () => {
   });
 
   /**
-   * FOREIGN ROOTS — dict/alerting.ts, dict/cards.ts and dict/targets.ts each
-   * keep their own locale-blind copy, and their call sites (pages/alerting.tsx,
-   * pages/node-card.tsx, pages/targets.tsx) pass no locale. Fixing the helper
-   * changes those pages' code, which belongs to whoever owns them; this is the
-   * reproduction, left skipped so the report has an exact failing case.
+   * dict/alerting.ts, dict/cards.ts and dict/targets.ts each keep their own
+   * pluralKey copy. Called WITHOUT a locale they fall back to DEFAULT_LOCALE
+   * ('en'), so English must say «21 rules», not the Russian ladder's «21 rule».
+   * The case below passes the locale explicitly; this one guards the default.
    */
-  it.skip("FOREIGN: alerting/cards/targets still say «21 rule», «21 pair», «21 agent» in English", () => {
+  it("alerting/cards/targets say «21 rules», «21 pairs», «21 agents» in English when no locale is passed", () => {
     expect(translate(alertingDict, "en", alertingPluralKey(21, "count.rules.one", "count.rules.few", "count.rules.many"))).toBe(
       "rules",
     );
@@ -486,7 +485,9 @@ describe("formatDurationNs / formatCadenceNs at the boundaries", () => {
     [999_999_999, "1s", "1 с"],
     [59_000_000_000, "59s", "59 с"],
     [60_000_000_000, "1m", "1 мин"],
-    [3_599_000_000_000, "60m", "60 мин"],
+    [3_569_000_000_000, "59m", "59 мин"],
+    // Rounds to 60 minutes, which is an hour: never "60m".
+    [3_599_000_000_000, "1h", "1 ч"],
     [3_600_000_000_000, "1h", "1 ч"],
     [86_400_000_000_000, "24h", "24 ч"],
   ])("renders %d ns as %s / %s", (ns, en, ru) => {

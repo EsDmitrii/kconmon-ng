@@ -1,6 +1,6 @@
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
@@ -94,6 +94,59 @@ describe("a signed-out visitor (401)", () => {
     expect(screen.getByTestId("auth-gate-splash")).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Main" })).not.toBeInTheDocument();
     expect(calls.filter((c) => !c.includes("/api/v1/auth/me"))).toEqual([]);
+  });
+});
+
+/* The console's session store blinked (a Postgres restart): the credential is not known to be bad,
+   so the server answers 503 "authentication unavailable" instead of 401. That is not a sign-out:
+   the browser stays here, says so, and asks again until the store answers. */
+describe("the session store is down (503 authentication unavailable)", () => {
+  const unavailable = () =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify({
+          type: "about:blank",
+          title: "authentication unavailable",
+          status: 503,
+          detail: "the session or user store did not answer; retry shortly, the session is still valid",
+        }),
+        { status: 503, headers: { "Content-Type": "application/problem+json", "Retry-After": "1" } },
+      ),
+    );
+  const signedIn = () =>
+    Promise.resolve(
+      json({
+        subject: { kind: "user", id: "user:ada", displayName: "Ada", groups: [], roles: ["admin"] },
+        permissions: [],
+      }),
+    );
+
+  it("stays signed in and says it will retry, without leaving for /login", async () => {
+    const gone: string[] = [];
+    setNavigateForTest((p) => gone.push(p));
+    const { calls } = renderAt("/", unavailable);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Cannot check your sign-in right now");
+    expect(alert).toHaveTextContent(/not been signed out/);
+    expect(screen.getByRole("button", { name: "Retry now" })).toBeInTheDocument();
+    expect(gone).toEqual([]);
+    expect(screen.queryByRole("navigation", { name: "Main" })).not.toBeInTheDocument();
+    expect(calls.filter((c) => !c.includes("/api/v1/auth/me"))).toEqual([]);
+  });
+
+  it("opens the console once the store answers again, on its own", async () => {
+    let n = 0;
+    renderAt("/", () => (n++ === 0 ? unavailable() : signedIn()));
+    await screen.findByRole("alert");
+    expect(await screen.findByRole("navigation", { name: "Main" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.queryByText("Cannot check your sign-in right now")).not.toBeInTheDocument();
+  });
+
+  it("asks again at once on Retry now", async () => {
+    let n = 0;
+    renderAt("/", () => (n++ === 0 ? unavailable() : signedIn()));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry now" }));
+    expect(await screen.findByRole("navigation", { name: "Main" }, { timeout: 500 })).toBeInTheDocument();
   });
 });
 

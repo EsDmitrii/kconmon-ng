@@ -104,18 +104,25 @@ function DirectionStat({ label, cell }: { label: string; cell?: MatrixCell }) {
 }
 
 /* The PMTU reading's badge wording; the tier colour comes from cellTier like every other chip. */
-const PMTU_READING_KEY = { blackhole: "pair.pmtu.blackhole", reduced: "pair.pmtu.reduced", full: "pair.pmtu.full" } as const;
+const PMTU_READING_KEY = {
+  blackhole: "pair.pmtu.blackhole",
+  reduced: "pair.pmtu.reduced",
+  recovering: "pair.pmtu.recovering",
+  full: "pair.pmtu.full",
+} as const;
 
 /**
  * PathMtuCard says what the PMTU matrix cell said, in both directions: the card header's chips are
  * the TCP plane, and a black hole passes every TCP probe, so without this the card opened from a red
  * PMTU cell read as healthy.
  */
-function PathMtuCard({ forward, reverse, source, destination }: {
+function PathMtuCard({ forward, reverse, source, destination, pending, error }: {
   forward?: MatrixCell;
   reverse?: MatrixCell;
   source: string;
   destination: string;
+  pending?: boolean;
+  error?: Error | null;
 }) {
   const t = useT(cardsDict);
   const rows = [
@@ -126,14 +133,20 @@ function PathMtuCard({ forward, reverse, source, destination }: {
     <Card asChild className="p-4">
       <section aria-label={t("pair.pmtu.title")}>
         <h2 className="text-sm font-semibold">{t("pair.pmtu.title")}</h2>
-        {rows.length === 0 ? (
+        {rows.length === 0 && error ? (
+          <p role="alert" className="mt-2 text-xs leading-relaxed text-health-bad">
+            {t("pair.pmtu.failed", { error: error.message })}
+          </p>
+        ) : rows.length === 0 && pending ? (
+          <Skeleton className="mt-3 h-10 w-full" />
+        ) : rows.length === 0 ? (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("pair.pmtu.none")}</p>
         ) : (
           <dl className="mt-3 flex flex-col gap-2.5 text-xs">
             {rows.map(({ label, cell }) => {
               const reading = pmtuReading(cell) ?? "full";
               const figure =
-                reading === "full" || cell?.probeMtuBytes === undefined
+                reading === "full" || reading === "recovering" || cell?.probeMtuBytes === undefined
                   ? t("pair.pmtu.bytes", { mtu: String(cell?.mtuBytes) })
                   : t("pair.pmtu.bytesOf", { mtu: String(cell?.mtuBytes), probe: String(cell.probeMtuBytes) });
               return (
@@ -191,7 +204,7 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
    */
   const scope = pairScope(source, destination);
   /* ONE hour, resolved once, for the chart and for BOTH bars under it — the same shared anchor the
-     target card takes (QA scope 2, finding #20). It is declared before its consumers because all
+     target card takes. It is declared before its consumers because all
      three of them take it: a bar left to compute its own `now` on a 60s poll drifts away from a
      chart that resolved its window once at mount. */
   const range = useWindowAnchor(PAIR_RANGE_SECONDS);
@@ -409,11 +422,11 @@ function PairDiagnosticsTab({
 
         {last ? (
           /* The run id is a 36-character UUID and the other three values are a
-             word, a duration and a stamp, so the id's track is twice theirs
-             and the id truncates inside it with the whole string on title —
-             the node card's own rule for its agent id. Below sm it takes a
-             row to itself rather than wrapping a UUID onto three lines. */
-          <dl className="nums mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-[minmax(0,2fr)_1fr_1fr_1fr]">
+             word, a duration and a stamp, so those three take their own width
+             and the id takes the rest, truncating inside it with the whole
+             string on title — the node card's own rule for its agent id. Below
+             sm it takes a row to itself rather than wrapping a UUID onto three lines. */
+          <dl className="nums mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:gap-x-6">
             <div className="col-span-2 min-w-0 sm:col-span-1">
               <dt className="text-xs text-muted-foreground">{t("pair.run")}</dt>
               <dd className="mt-0.5">
@@ -438,7 +451,7 @@ function PairDiagnosticsTab({
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("pair.recorded")}</dt>
-              <dd className="mt-0.5">{fmtTime(last.result.recordedAt, locale)}</dd>
+              <dd className="mt-0.5 sm:whitespace-nowrap">{fmtTime(last.result.recordedAt, locale)}</dd>
             </div>
           </dl>
         ) : null}
@@ -497,7 +510,7 @@ export function knownNodes(topo?: Topology, matrix?: Matrix): Set<string> | null
  * unknownPairEndpoints names the halves of the URL the fleet does not report.
  * Empty while the inventory is unknown, so validation only ever fires on
  * evidence — /pairs/node-a/there-is-no-such-node used to render a WORKING card,
- * annotate and maintenance writes included (QA scope 2, finding #7).
+ * annotate and maintenance writes included.
  */
 export function unknownPairEndpoints(
   known: Set<string> | null,
@@ -508,19 +521,14 @@ export function unknownPairEndpoints(
   return [source, destination].filter((n) => !known.has(n));
 }
 
-/** The targets card's own not-found treatment, for the same kind of fact. */
-function UnknownEndpoints({ unknown }: { unknown: string[] }) {
+/**
+ * NotInFleet is the card for a URL naming a node the fleet does not report, the targets card's own
+ * not-found treatment for the same kind of fact. The node card shows it too.
+ */
+export function NotInFleet({ title, description, body }: { title: string; description: string; body?: string }) {
   const t = useT(cardsDict);
   return (
-    <PageShell
-      timeMachine
-      title={t("pair.notFound.unknownEndpoints")}
-      description={
-        unknown.length === 1
-          ? t("pair.notFound.oneUnknown", { name: unknown[0] })
-          : t("pair.notFound.bothUnknown", { a: unknown[0], b: unknown[1] })
-      }
-    >
+    <PageShell timeMachine title={title} description={description}>
       <Card role="status" className="flex flex-col items-center gap-3 px-8 py-16 text-center">
         <span
           aria-hidden="true"
@@ -528,12 +536,28 @@ function UnknownEndpoints({ unknown }: { unknown: string[] }) {
         >
           <SearchX className="size-5" />
         </span>
-        <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("pair.notFound.unknownBody")}</p>
+        {body ? <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{body}</p> : null}
         <a href={withAtParam("/matrix")} className="text-xs font-medium text-primary hover:underline">
           {t("pair.notFound.back")}
         </a>
       </Card>
     </PageShell>
+  );
+}
+
+function UnknownEndpoints({ unknown }: { unknown: string[] }) {
+  const t = useT(cardsDict);
+  const one = unknown.length === 1;
+  return (
+    <NotInFleet
+      title={t("pair.notFound.unknownEndpoints")}
+      description={
+        one
+          ? t("pair.notFound.oneUnknown", { name: unknown[0] })
+          : t("pair.notFound.bothUnknown", { a: unknown[0], b: unknown[1] })
+      }
+      body={t(one ? "pair.notFound.oneUnknownBody" : "pair.notFound.unknownBody")}
+    />
   );
 }
 
@@ -608,7 +632,14 @@ export function PairCardPage() {
           )}
         </div>
         <div className="flex flex-col gap-5">
-          <PathMtuCard forward={pmtuForward} reverse={pmtuReverse} source={source} destination={destination} />
+          <PathMtuCard
+            forward={pmtuForward}
+            reverse={pmtuReverse}
+            source={source}
+            destination={destination}
+            pending={pmtu.isPending}
+            error={pmtu.error}
+          />
           <RelatedIncidents scope={investigationScope} />
           <RecentChanges scope={scope} />
         </div>

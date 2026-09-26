@@ -340,6 +340,21 @@ describe("MaintenanceBar affordances", () => {
 });
 
 describe("create flow", () => {
+  /* Investigate on a zone pair and Metrics both create a GLOBAL window, and an open window holds
+     back the alert webhooks its scope covers. */
+  it("says the window holds alert webhooks, cluster-wide for the global scope", async () => {
+    stubFetch();
+    await openForm("");
+    const form = screen.getByRole("form", { name: "New maintenance window" });
+    expect(form).toHaveTextContent(/every console alert webhook/i);
+    cleanup();
+    stubFetch();
+    await openForm("node-a");
+    const scoped = screen.getByRole("form", { name: "New maintenance window" });
+    expect(scoped).toHaveTextContent(/alert webhooks for node-a/i);
+    expect(scoped).not.toHaveTextContent(/every console alert webhook/i);
+  });
+
   it("POSTs startAt + endAt + the surface's fixed scope + reason, in RFC3339", async () => {
     const { createBodies } = stubFetch();
     await openForm("node-a");

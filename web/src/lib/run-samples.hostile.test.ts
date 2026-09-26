@@ -13,7 +13,6 @@ import {
   plannedCadenceFromSpec,
   runCadence,
   runDurationNs,
-  snapshotForSample,
 } from "./run-samples";
 
 /**
@@ -331,7 +330,7 @@ describe("groupSamplesByPair keeps pairs apart", () => {
   });
 });
 
-/* ── percentiles and snapshots ────────────────────────────────────────────── */
+/* ── percentiles ──────────────────────────────────────────────────────────── */
 
 describe("percentileNs at the edges", () => {
   it("answers a measured value at p0 and p100 rather than reaching past the array", () => {
@@ -343,41 +342,5 @@ describe("percentileNs at the edges", () => {
 
   it("has nothing to answer for an empty distribution", () => {
     expect(percentileNs([], 95)).toBeUndefined();
-  });
-});
-
-describe("snapshotForSample refuses to guess", () => {
-  const snaps = [{ id: "s1", firstSeen: "2026-07-28T10:00:00Z", lastSeen: "2026-07-28T10:05:00Z" }];
-
-  it("covers both ends of the window", () => {
-    expect(snapshotForSample(snaps, "2026-07-28T10:00:00Z")?.id).toBe("s1");
-    expect(snapshotForSample(snaps, "2026-07-28T10:05:00Z")?.id).toBe("s1");
-  });
-
-  it("answers nothing for an instant nothing covers, rather than the nearest route", () => {
-    expect(snapshotForSample(snaps, "2026-07-28T09:50:00Z")).toBeUndefined();
-  });
-
-  /* The trace that CREATED a route is recorded a few hundred microseconds BEFORE the route row is
-     stamped (the result write lands first), so on routes stored before that was fixed the creating
-     probe sat just outside its own route's window — and the tick that made the route was the one
-     tick told no route covered it. A five-second grace on the leading edge covers that skew and
-     nothing else: ten seconds early is still nothing. */
-  it("still covers the probe that created the route, stamped microseconds before it", () => {
-    expect(snapshotForSample(snaps, "2026-07-28T09:59:59.9Z")?.id).toBe("s1");
-    expect(snapshotForSample(snaps, "2026-07-28T09:59:56Z")?.id).toBe("s1");
-    expect(snapshotForSample(snaps, "2026-07-28T09:59:50Z")).toBeUndefined();
-  });
-
-  it("answers nothing for a timestamp that is not one", () => {
-    for (const ts of ["", "not-a-time", "0000", "%%%"]) {
-      expect(snapshotForSample(snaps, ts), ts).toBeUndefined();
-    }
-    expect(snapshotForSample(snaps, undefined)).toBeUndefined();
-  });
-
-  it("skips a stored window whose own bounds are unparseable", () => {
-    const broken = [{ id: "bad", firstSeen: "nope", lastSeen: "nope" }, ...snaps];
-    expect(snapshotForSample(broken, "2026-07-28T10:01:00Z")?.id).toBe("s1");
   });
 });

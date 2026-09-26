@@ -12,7 +12,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
-import { ApiError, createCheck, createRun, getRuns, goTo, listAllTargets } from "@/lib/api";
+import { ApiError, createCheck, createRun, getRuns, goTo, listAllTargets, queryErrorMessage } from "@/lib/api";
 import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, diagnosticsDict, type DiagnosticsKey } from "@/lib/i18n/dict/diagnostics";
 /* The ad-hoc address refusal is lib/utils.ts's, shared with the definition
@@ -37,7 +37,7 @@ import {
 import { CHECKBOX_CLASS, cn, isValidAdhocAddress, runsAtOrBefore } from "@/lib/utils";
 // The 422-detail -> form-field heuristic and its phrase table live with the form that first needed
 // them (pages/targets.tsx).
-import { DEFINITION_FIELD_PHRASES, fieldForDetail } from "./targets";
+import { DEFINITION_FIELD_PHRASES, fieldForDetail, probesNodesOnly } from "./targets";
 
 // MAX_PAIRS mirrors checks.maxPairs (internal/console/checks/checks.go); the server remains the
 // only real enforcement point.
@@ -108,16 +108,29 @@ const DESTINATION_KIND_KEYS: Record<DestinationKind, DiagnosticsKey> = {
   adhoc: "destination.kind.adhoc",
 };
 
+/* The store's status words, translated; a status this build has never heard renders verbatim. */
+const RUN_STATUS_KEYS: Record<string, DiagnosticsKey> = {
+  pending: "status.pending",
+  running: "status.running",
+  succeeded: "status.succeeded",
+  partial: "status.partial",
+  failed: "status.failed",
+  cancelled: "status.cancelled",
+  timeout: "status.timeout",
+};
+
 function StatusBadge({ status }: { status: string }) {
+  const t = useT(diagnosticsDict);
+  const key = RUN_STATUS_KEYS[status];
   return (
     <Badge variant={STATUS_VARIANT[status] ?? "unknown"} dot>
-      {status}
+      {key ? t(key) : status}
     </Badge>
   );
 }
 
 /* NodeSelector, toggleName, FieldLabel and CONTROL_CLASS below are EXPORTED,
-   not because this page needs them to be, but because M5 Task 8's MTR Runner
+   not because this page needs them to be, but because the MTR Runner
    builds the same body against the same endpoint from pages/mtr.tsx.
    Exporting the pieces rather than copying them is the same call this file
    already made when it imported targets.tsx's 422-detail table: one run form's
@@ -139,8 +152,8 @@ export function NodeSelector({
   selected: string[];
   onToggle: (name: string) => void;
 }) {
-  /* EXPLICIT htmlFor/id association, not a wrapping <label> (QA round 4,
-     finding #16). The nesting was doing the job in the DOM, but it made every
+  /* EXPLICIT htmlFor/id association, not a wrapping <label>. The nesting was
+     doing the job in the DOM, but it made every
      checkbox's name a property of where it sits rather than of what it is: the
      `truncate` span it depended on is a presentational choice, and a control
      whose accessible name can be lost by a styling edit has no name. Two
@@ -290,27 +303,30 @@ export function sampleIntervalOptionsFor(durationNs: number): typeof RUN_SAMPLE_
 
 /* ── the external destination, per check type ────────────────────────────────
    One field served every check type with one label, one placeholder and no
-   hint (QA scope 4, finding #10) — so it named the wrong thing for most of
+   hint — so it named the wrong thing for most of
    them, and a value typed for one type survived a switch to another without a
-   word. These four shapes are the AGENT's own behaviour, read off
+   word. These shapes are the AGENT's own behaviour, read off
    internal/agent/tasks.go:
 
      tcp   externalCapableChecks + externalPort defaults the port to 80
-     udp   externalCapableChecks, no default port: 0 is what gets dialled
      icmp  externalCapableChecks, ICMP has no ports and one is ignored
      mtr   same as icmp
-     dns   NOT in externalCapableChecks — "external destinations support only
-     http  tcp, udp, icmp and mtr checks", refused before any checker runs
-     pmtu  same as dns: it speaks the kconmon echo protocol, which no external
+     dns   NOT in externalCapableChecks — "external destinations support tcp,
+     http  icmp and mtr checks only", refused before any checker runs
+     udp   same as dns: the probe counts a reply only when the far end echoes
+           its sequence number back, which only another agent does
+     pmtu  same as udp: it speaks the kconmon echo protocol, which no external
            host answers
 
-   The console does not enforce; it says what the agent will do, and refuses to
-   send a body whose refusal is already certain. */
-export type AdhocShape = "hostPort" | "hostPortRequired" | "hostOnly" | "unsupported";
+   The controller (internal/controller/diagnostics.go) answers the last four
+   with 400 and POST /api/v1/runs with 422 (resolveRunDestination); this table
+   enforces nothing, it only keeps the form from sending a body whose refusal
+   is already certain. */
+export type AdhocShape = "hostPort" | "hostOnly" | "unsupported";
 
 export const ADHOC_SHAPE: Record<CheckType, AdhocShape> = {
   tcp: "hostPort",
-  udp: "hostPortRequired",
+  udp: "unsupported",
   icmp: "hostOnly",
   mtr: "hostOnly",
   dns: "unsupported",
@@ -323,7 +339,6 @@ export const ADHOC_SHAPE: Record<CheckType, AdhocShape> = {
    interface. The examples stay here, the joining word comes from the caller. */
 export const ADHOC_PLACEHOLDER: Record<AdhocShape, readonly string[]> = {
   hostPort: ["example.test", "10.0.0.1:8443"],
-  hostPortRequired: ["10.0.0.1:53"],
   hostOnly: ["example.test", "10.0.0.1"],
   unsupported: [],
 };
@@ -338,7 +353,7 @@ export function adhocPlaceholder(shape: AdhocShape, or: string): string {
  * a type switch RE-JUDGES the value the operator already typed instead of leaving it standing.
  * `null` is "nothing the console can know is wrong"; the server is still the arbiter.
  */
-export type AdhocIssue = "unsupported" | "shape" | "url" | "port";
+export type AdhocIssue = "unsupported" | "shape" | "url";
 
 export function adhocAddressIssue(checkType: CheckType, raw: string): AdhocIssue | null {
   // The whole check type is refused for an external destination, whatever the
@@ -352,18 +367,7 @@ export function adhocAddressIssue(checkType: CheckType, raw: string): AdhocIssue
   // resolves; a URL is only ever dialled by the http checker, which cannot
   // take an external destination at all.
   if (/^https?:\/\//i.test(value)) return "url";
-  // udp has no default port (externalPort returns 0 for everything but tcp),
-  // so an address without one names a port nothing listens on.
-  if (ADHOC_SHAPE[checkType] === "hostPortRequired" && !hasExplicitPort(value)) return "port";
   return null;
-}
-
-/** hasExplicitPort mirrors isValidAdhocAddress's own port split: the LAST colon, with a bracketed
- *  IPv6 host kept whole. */
-function hasExplicitPort(value: string): boolean {
-  const colon = value.lastIndexOf(":");
-  if (colon <= 0) return false;
-  return value.startsWith("[") ? value.includes("]:") && value.indexOf("]:") + 1 === colon : value.indexOf(":") === colon;
 }
 
 export function buildRunRequest(input: {
@@ -418,13 +422,14 @@ export function buildRunRequest(input: {
  * it, so the two surfaces cannot drift again.
  *
  * `prefix` rather than a shared key union, for lib/i18n/README.md's reason: two
- * surfaces, two dictionaries. The keys under each prefix are the same four.
+ * surfaces, two dictionaries. The keys under each prefix are the same four;
+ * this form's prefix also has interval.pmtu, a type the Runner never plans.
  *
  * Order is deliberate. When the plan is not what was PICKED, the adjustment
  * leads: an operator who has just clicked "1s" needs to learn it will not be 1s
  * before they are told what it will be. With nothing picked there is nothing to
- * contradict, and the "mtr" sentence already explains its own stretch by naming
- * the trace budget — so the note is suppressed rather than made to say the run
+ * contradict, and the "mtr" and "pmtu" sentences already explain their own
+ * stretch by naming the per-pair budget — so the note is suppressed rather than made to say the run
  * betrayed a request nobody made.
  */
 export function cadenceCaption<K extends string>(
@@ -443,7 +448,7 @@ export function cadenceCaption<K extends string>(
     samples: plan.samplesPerPair,
     budget: formatCadenceProse(budgetNs, locale),
   };
-  const base = t(`${prefix}.interval${budgetNs > 0 ? ".mtr" : ""}` as K, vars);
+  const base = t(`${prefix}.interval${budgetNs > 0 ? `.${checkType}` : ""}` as K, vars);
   if (plan.adjusted === "" || plan.requestedNs <= 0) return base;
   return `${t(`${prefix}.adjusted.${plan.adjusted}` as K, vars)} ${base}`;
 }
@@ -486,13 +491,13 @@ function RunForm({
   /* "auto" is today's behaviour exactly: nothing is posted, and the console
      derives the cadence as it always did. */
   const [sampleInterval, setSampleInterval] = useState("auto");
-  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+  /* The in-flight guard, not just a disabled look:
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
   const [submitError, setSubmitError] = useState<string>();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     useWriteGuard. Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
@@ -523,7 +528,7 @@ function RunForm({
   /* A run's fan-out is sources x destinations, and with the destination side
      unresolved there is no second factor. The preview used to print one pair
      per source anyway -- "~10 pairs" for a form with no target picked and no
-     address typed (QA scope 4, finding #9), a number for a run the server
+     address typed, a number for a run the server
      would refuse outright. Zero is the true estimate, and pairsReason below
      says which side is missing. */
   // An external run has exactly ONE destination (the target row, or the typed
@@ -545,7 +550,7 @@ function RunForm({
   const overLimit = rawPairCount > MAX_PAIRS;
   const noPairs = pairCount === 0;
   /* The reason a zero estimate is zero. A dead button owes an explanation and
-     "~0 pairs" alone is not one (QA scope 4, finding #8) -- /mtr's Runner has
+     "~0 pairs" alone is not one -- /mtr's Runner has
      said this since it shipped, and this is the same sentence. Sources first:
      with nothing to probe FROM, which destination is missing does not matter
      yet. */
@@ -572,7 +577,10 @@ function RunForm({
      already typed rather than leave a stale caption or a stale error. */
   const adhocShape = ADHOC_SHAPE[type];
   const adhocLabelKey = `adhoc.label.${adhocShape}` as DiagnosticsKey;
-  const adhocHintKey = `adhoc.hint.${adhocShape}` as DiagnosticsKey;
+  /* udp and pmtu need an agent at the far end as a saved definition too (the store refuses pmtu,
+     the reconciler skips udp), so they cannot share dns/http's "save it" advice. */
+  const meshOnly = probesNodesOnly(type);
+  const adhocHintKey = (meshOnly ? `adhoc.hint.${type}` : `adhoc.hint.${adhocShape}`) as DiagnosticsKey;
   const adhocIssue = external ? adhocAddressIssue(type, destinationKind === "adhoc" ? destinationAddress : "") : null;
 
   const durationNs = durationNsFor(duration);
@@ -597,7 +605,7 @@ function RunForm({
      keep, and whether that is what was asked for. */
   const plan = planCadenceFor(durationNs, type, pairCount, resolvedSources.length, requestedIntervalNs);
 
-  /* ONE clearing point for the whole form (QA round 4, finding #10). A 422
+  /* ONE clearing point for the whole form. A 422
      from a rejected submit stayed on screen while the operator edited the very
      field it was complaining about, and survived a switch to a different
      destination MODE entirely — so a banner about an ad-hoc address was still
@@ -621,7 +629,7 @@ function RunForm({
     } catch (err) {
       // problem+json is the SERVER's refusal, verbatim; only the network-level
       // fallback is the console's own sentence.
-      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("form.submitFailed"));
+      setSubmitError(queryErrorMessage(err, t("form.submitFailed")));
       end();
     }
   }
@@ -633,11 +641,11 @@ function RunForm({
       <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-5">
         <div>
           <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.checkType")}</span>
-          {/* flex-wrap (QA round 4, finding #17): six options is the widest
+          {/* flex-wrap: six options is the widest
               segmented control in the console, and under ~700px the track ran
               off the card rather than wrapping — the last two check types were
-              simply unreachable. Round 3's finding #20 gave the track shrink-0
-              so it wraps AS A WHOLE inside a flex row; that is the right answer
+              simply unreachable. shrink-0 would make the track wrap AS A WHOLE
+              inside a flex row; that is the right answer
               for a track sitting beside other controls and the wrong one here,
               where the track is alone in its own block and has nothing to wrap
               against. So this one wraps INTERNALLY, and ui/segmented.tsx's
@@ -704,7 +712,7 @@ function RunForm({
               option is not a choice: a disabled <select> still LOOKS like a
               control, so it reads as something the operator failed to use.
               A chip states the fact instead — the treatment pages/matrix.tsx
-              already gives the same value (QA scope 4, finding #17). The
+              already gives the same value. The
               run body's `plane` comes from a constant either way, never from
               this element. */}
           <span className="flex h-9 items-center">
@@ -770,17 +778,16 @@ function RunForm({
           ) : null}
           {destinationKind === "adhoc" ? (
             /* The label, the placeholder and the hint all follow the CHECK
-               TYPE (QA scope 4, finding #10): tcp defaults a missing port to
-               80, udp has no default at all, icmp and mtr ignore one, and dns
-               and http cannot take an external destination in the first
-               place. One field with one caption named the wrong thing for
-               four of the six. */
+               TYPE: tcp defaults a missing port to
+               80, icmp and mtr ignore one, and udp, dns, http and pmtu cannot
+               take an external destination in the first place. One field with
+               one caption named the wrong thing for most of them. */
             <FieldLabel label={t(adhocLabelKey)}>
               {(id) => (
                 <>
                   <input
                     id={id}
-                    /* Belt and braces on the name (QA round 4, finding #16): the
+                    /* Belt and braces on the name: the
                        visible <label> is the association, and this survives a
                        future refactor that moves the field out of FieldLabel. */
                     aria-label={t(adhocLabelKey)}
@@ -801,13 +808,15 @@ function RunForm({
             than surviving the switch in silence. */}
         {adhocIssue ? (
           <p role="alert" className="text-sm text-health-bad">
-            {adhocIssue === "shape" ? tv("adhoc.address") : t(`adhoc.mismatch.${adhocIssue}` as DiagnosticsKey)}
+            {adhocIssue === "shape"
+              ? tv("adhoc.address")
+              : t((meshOnly && adhocIssue === "unsupported" ? `adhoc.mismatch.${type}` : `adhoc.mismatch.${adhocIssue}`) as DiagnosticsKey)}
           </p>
         ) : null}
 
         <div className="flex flex-wrap items-center gap-3">
           {destinationKind === "node" ? (
-            /* A RESET, and now it says so (QA round 4, finding #15). The glyph
+            /* A RESET, and now it says so. The glyph
                alone read as "swap the two columns" or "run every pair", and
                pressing it when both pickers were already at All did nothing
                visible — which is fine for a reset and baffling for either of
@@ -924,7 +933,7 @@ function SaveAsDefinition({
   const t = useT(diagnosticsDict);
   const tv = useT(validationDict);
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     useWriteGuard. Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
@@ -954,8 +963,8 @@ function SaveAsDefinition({
       setErrors({ name: t("definition.nameRequired") });
       return;
     }
-    /* The client mirror of store.validateAdhocAddress (QA round 4, finding
-       #13). Saving a definition PERSISTS the address, and until the store
+    /* The client mirror of store.validateAdhocAddress. Saving a definition
+       PERSISTS the address, and until the store
        learned to check it "sdfsdfsdf !!" was stored happily and then failed as
        a resolver error on every agent, every interval, forever. The server is
        still the arbiter — this only means the refusal arrives at the field the
@@ -975,7 +984,7 @@ function SaveAsDefinition({
       if (!(err instanceof ApiError)) {
         setErrors({ form: t("definition.saveFailed") });
       } else {
-        const detail = err.problem.detail ?? err.problem.title;
+        const detail = queryErrorMessage(err, t("definition.saveFailed"));
         // The same phrase table the Definitions tab uses, collapsed onto the
         // two fields THIS form actually has: anything else (the projection
         // 422 included) still renders in full, one level up, rather than
@@ -1156,14 +1165,13 @@ export function DiagnosticsPage() {
   const { locale } = useLocale();
   const { can } = useAuth();
   const topo = useTopology();
-  const { available: dbConfigured, resolved: dbResolved } = useDatabaseAvailable();
+  const { available: dbConfigured, resolved: dbResolved, error: dbConfigError } = useDatabaseAvailable();
   const { at } = useTimeContext();
 
   const canCreate = can("runs:create");
   /* The UNION of the controller's node list and the node names the AGENTS
-     report (QA round 4, finding #21; round 3's finding #5 solved the same
-     thing for Investigate and this is its helper, imported rather than
-     re-derived). `topology.nodes` is the CONTROLLER's view and is empty on
+     report (Investigate's helper, imported rather than re-derived).
+     `topology.nodes` is the CONTROLLER's view and is empty on
      every console deployed without one — a console that still has agents
      reporting in and every reason to run a diagnostic between them. Reading
      `nodes` alone left both pickers empty there, with no explanation, on the
@@ -1209,7 +1217,10 @@ export function DiagnosticsPage() {
       setHistory({ nextCursor: page.nextCursor, loading: false, error: null });
     } catch (err) {
       if (seq !== requestSeq.current) return;
-      setHistory({ nextCursor: "", loading: false, error: err });
+      // A failed page one leaves no rows: the ones on screen answered the previous filters.
+      if (!cursor) setRuns([]);
+      // The failed cursor stays, so Load older retries the same page (as mtr.tsx does).
+      setHistory({ nextCursor: cursor ?? "", loading: false, error: err });
     }
   }, [typeFilter, statusFilter]);
 
@@ -1217,8 +1228,8 @@ export function DiagnosticsPage() {
     void loadRuns(undefined);
   }, [loadRuns]);
 
-  /* The Time Machine's cut across the history list (QA round 4, finding #4;
-     the same treatment round 3 gave the node and pair cards). GET /api/v1/runs
+  /* The Time Machine's cut across the history list, the same treatment the
+     node and pair cards take. GET /api/v1/runs
      has no `to` parameter — its query is type/status/cursor/limit and nothing
      else — so the newest page it answers is the newest page NOW, and under a
      banner reading "you are viewing 02:14" this list was showing runs that had
@@ -1234,7 +1245,7 @@ export function DiagnosticsPage() {
       help={{ body: t("help.body"), slug: "run-checks" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language and the house clock — lib/i18n's stampFull. Computed here,
-         never formatted by the dictionary (QA scope 2, finding #8). */
+         never formatted by the dictionary. */
       description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
     >
       {canCreate ? (
@@ -1281,13 +1292,17 @@ export function DiagnosticsPage() {
                 <option value="">{t("history.filter.status.all")}</option>
                 {RUN_STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {t(RUN_STATUS_KEYS[s])}
                   </option>
                 ))}
               </select>
             </div>
           </div>
-          {dbResolved && !dbConfigured ? (
+          {dbConfigError !== null ? (
+            <p role="status" className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {t("config.failed", { error: queryErrorMessage(dbConfigError, t("config.failed.generic")) })}
+            </p>
+          ) : dbResolved && !dbConfigured ? (
             <p role="status" className="mt-1 text-xs leading-relaxed text-muted-foreground">
               {t("history.notPersisted")}
             </p>
@@ -1299,34 +1314,49 @@ export function DiagnosticsPage() {
           {history.error ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
               {/* problem+json is the server's own sentence — verbatim. */}
-              {history.error instanceof ApiError
-                ? (history.error.problem.detail ?? history.error.problem.title)
-                : t("history.unavailable")}
+              {queryErrorMessage(history.error, t("history.unavailable"))}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="ml-3 h-7 px-2 align-middle"
+                disabled={history.loading}
+                onClick={() => void loadRuns(history.nextCursor || undefined)}
+              >
+                {t("history.retry")}
+              </Button>
             </p>
           ) : null}
 
-          <HistoryList
-            runs={visibleRuns}
-            engaged={at !== null}
-            filtered={typeFilter !== "" || statusFilter !== ""}
-            onClearFilters={() => {
-              setTypeFilter("");
-              setStatusFilter("");
-            }}
-            scope={`${typeFilter}|${statusFilter}|${at?.toISOString() ?? ""}`}
-          />
+          {/* Page one failed: there is no list to describe, and an empty slate would claim one. */}
+          {history.error && runs.length === 0 ? null : (
+            <HistoryList
+              runs={visibleRuns}
+              engaged={at !== null}
+              filtered={typeFilter !== "" || statusFilter !== ""}
+              onClearFilters={() => {
+                setTypeFilter("");
+                setStatusFilter("");
+              }}
+              scope={`${typeFilter}|${statusFilter}|${at?.toISOString() ?? ""}`}
+            />
+          )}
 
-          {runs.length > 0 ? (
+          {/* Only while there is an older page: once the server answers with no cursor the list is
+              complete, and a disabled button that cannot say why is a dead end. */}
+          {runs.length > 0 && history.nextCursor !== "" ? (
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
                 size="sm"
-                disabled={history.nextCursor === "" || history.loading}
+                disabled={history.loading}
                 onClick={() => loadRuns(history.nextCursor)}
               >
                 {history.loading ? t("history.loadingOlder") : t("history.loadOlder")}
               </Button>
             </div>
+          ) : runs.length > 0 && !history.loading && !history.error ? (
+            <p className="mt-4 text-center text-xs text-muted-foreground">{t("history.exhausted")}</p>
           ) : null}
         </section>
       </Card>

@@ -1,5 +1,5 @@
 import type * as echarts from "echarts";
-import { CHART_FALLBACK, chartColors, seriesColor, type ChartColors } from "./chart-theme";
+import { chartColors, seriesColor, type ChartColors } from "./chart-theme";
 import { NO_VALUE } from "./chart-tooltip";
 import { stampClock, stampShort, type Locale } from "./i18n";
 import { sharedNamePrefix } from "./matrix-zoom";
@@ -185,13 +185,15 @@ export function valueAxis(unit: CuratedChart["unit"], colors: ChartColors): echa
  * timeAxisLabel is what a tick on a time axis reads: the house clock as HH:mm,
  * and on the tick where the day turns a second line with the day itself
  * ("Sep 6"). ECharts' own level labels printed a bare "6" or "7" there. Both
- * halves come from lib/i18n's stamps; this only trims the seconds off the one
- * and the clock off the other, so the console keeps one clock.
+ * halves come from lib/i18n's stamps, so the console keeps one clock. A tick
+ * between whole minutes keeps its seconds: a window of a minute or two is
+ * ticked every few seconds, and HH:mm alone would repeat along the axis.
  */
 export function timeAxisLabel(value: number, locale: Locale): string {
   const d = new Date(value);
   if (!Number.isFinite(d.getTime())) return "";
-  const clock = stampClock(d, locale).replace(/:\d{2}$/, "");
+  const stamp = stampClock(d, locale);
+  const clock = d.getSeconds() === 0 ? stamp.replace(/:\d{2}$/, "") : stamp;
   /* Sub-day ticks sit on the unit grid (lib ECharts rounds them to the primary unit), so a day
      turning inside the window always lands on a 00:00 tick. */
   const dayTurns = d.getHours() === 0 && d.getMinutes() === 0;
@@ -216,10 +218,6 @@ export const GRID_RIGHT = 40;
  * legend's entries.
  */
 export const GRID_BOTTOM = 58;
-
-// Chart colour now comes from the design-system tokens via lib/chart-theme.ts.
-export const AXIS_COLOR = { dark: CHART_FALLBACK.dark.axis, light: CHART_FALLBACK.light.axis };
-export const SPLIT_COLOR = { dark: CHART_FALLBACK.dark.grid, light: CHART_FALLBACK.light.grid };
 
 /* ── legend elision (M3-6) ──────────────────────────────────────────────── */
 

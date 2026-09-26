@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, LogOut, KeyRound, Lock } from "lucide-react";
-import { ChangePasswordDialog } from "@/components/change-password";
-import { getConfig, logout } from "@/lib/api";
+import { useShowPasswordDialog } from "@/components/change-password";
+import { useConsoleConfig } from "@/hooks/use-capabilities";
+import { logout } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { withAtParam } from "@/lib/timemachine";
 import { userMenuDict } from "@/lib/i18n/dict/user-menu";
@@ -15,18 +16,18 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  /* The trigger, so closing can hand focus BACK to it. Without this the menu unmounted with focus
-     inside it, document.activeElement fell back to <body>, and the next Tab restarted at the skip
-     link: a keyboard user at the bottom of the sidebar was thrown to the top of the document.
-     nav-drawer.tsx already closes this way. */
+  /* The trigger, so closing hands focus back to it: a menu unmounting with focus inside drops it on
+     <body>, and the next Tab restarts at the skip link. */
   const triggerRef = useRef<HTMLButtonElement>(null);
   const queryClient = useQueryClient();
   const t = useT(userMenuDict);
+  const groupId = useId();
   /* The same ["config"] entry AppShell already holds, so this is no extra round trip. A password is
      the console's to change only where it is its own identity provider. */
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
-  const canChangePassword = config?.auth?.mode === "local" && me.subject.kind === "user";
-  const [passwordOpen, setPasswordOpen] = useState(false);
+  const { data: config } = useConsoleConfig();
+  /* AppShell hosts the dialog so it outlives this menu. */
+  const showPassword = useShowPasswordDialog();
+  const canChangePassword = config?.auth?.mode === "local" && me.subject.kind === "user" && showPassword !== null;
 
   /** Closes and puts focus back where it came from. */
   const closeAndRefocus = useCallback(() => {
@@ -75,7 +76,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        aria-haspopup="true"
+        aria-controls={open ? groupId : undefined}
         className={cn(
           "flex w-full items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left text-[11px] text-muted-foreground",
           "transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent/60 hover:text-foreground",
@@ -88,12 +89,12 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
           className={cn("size-3.5 shrink-0 transition-transform duration-(--dur-fast)", open ? "" : "rotate-180")}
         />
       </button>
-      {/* NOT role="menu". That role puts assistive tech into application mode and promises
-          arrow-key roving between menuitems, which this never implemented, so the promise was itself
-          the defect. A labelled group of ordinary controls is what this actually is, and Tab already
-          walks it. */}
+      {/* NOT role="menu", and no aria-haspopup on the trigger: a menu puts assistive tech into
+          application mode and promises arrow-key roving between menuitems, which this does not
+          have. A labelled group of ordinary controls is what this is, and Tab already walks it. */}
       {open ? (
         <div
+          id={groupId}
           role="group"
           aria-label={me.subject.displayName}
           className="absolute bottom-full left-0 mb-1.5 w-full min-w-56 rounded-md border border-border bg-popover p-1.5 shadow-card"
@@ -108,8 +109,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
           </div>
           {can("tokens:manage") ? (
             <a
-              // The anchor is pages/settings.tsx's TOKENS_ANCHOR: this link
-              // used to land on a page with no tokens section on it at all.
+              // The anchor is pages/settings.tsx's TOKENS_ANCHOR.
               href={withAtParam("/settings#tokens")}
               className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-foreground hover:bg-accent/60"
             >
@@ -124,7 +124,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
                 /* Focus goes back to the trigger FIRST: the dialog returns focus to whatever held it
                    when it opened, and this button is about to unmount with the menu. */
                 closeAndRefocus();
-                setPasswordOpen(true);
+                showPassword?.();
               }}
               className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-accent/60"
             >
@@ -143,7 +143,6 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
           </button>
         </div>
       ) : null}
-      {canChangePassword ? <ChangePasswordDialog open={passwordOpen} onClose={() => setPasswordOpen(false)} /> : null}
     </div>
   );
 }

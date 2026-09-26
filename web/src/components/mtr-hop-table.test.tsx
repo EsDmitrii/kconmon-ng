@@ -346,6 +346,18 @@ describe("TraceDetail — enrichment row", () => {
 
     expect(screen.queryByRole("button", { name: /hop 1/i })).not.toBeInTheDocument();
   });
+
+  /* The tracer counts every probe to a silent hop as lost, so its ratio is always 1: that is the
+     star, not a failure, and it must not paint the one red cell on a healthy path. */
+  it("prints no loss for a hop that never answered, the same as its RTT", () => {
+    renderDetail(snapshot({ hops: [hop({ number: 1, ip: "*", hostname: undefined, lossRatio: 1 }), hop({ number: 2 })] }));
+    const [, silent] = within(screen.getByRole("table", { name: "Hops" })).getAllByRole("row");
+    const cells = within(silent).getAllByRole("cell");
+    const loss = cells[cells.length - 1];
+    expect(loss).toHaveTextContent(/^—$/);
+    expect(loss).not.toHaveClass("text-health-bad");
+    expect(loss).toHaveClass("text-muted-foreground");
+  });
 });
 
 /* QA scope 4, finding #6: a long rDNS name pushed RTT and Loss off the right

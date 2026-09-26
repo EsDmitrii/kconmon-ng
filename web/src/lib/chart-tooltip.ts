@@ -1,4 +1,5 @@
 import type * as echarts from "echarts";
+import type { TooltipColors } from "./chart-theme";
 import { stampClock, type Locale } from "./i18n";
 
 /**
@@ -404,6 +405,8 @@ export function sharedTooltipOption(
     cap?: number;
     /** The interface language for the x pill's clock; "en" is the viewer's own locale, 24-hour. */
     locale?: Locale;
+    /** The theme's popover colours; without them ECharts paints its own white box on a dark page. */
+    tooltipColors?: TooltipColors;
   },
 ): echarts.EChartsOption {
   const tooltip = option.tooltip;
@@ -422,11 +425,19 @@ export function sharedTooltipOption(
       ? (value, row) => (seriesValueFormatter(option, row?.seriesIndex) ?? chartFormatter ?? String)(value)
       : undefined;
 
+  const colors = opts.tooltipColors;
   const withCross: echarts.EChartsOption = {
     ...option,
     ...withPointerLabel(option, opts.locale ?? "en"),
     tooltip: {
       ...tooltip,
+      ...(colors
+        ? {
+            backgroundColor: tooltip.backgroundColor ?? colors.background,
+            borderColor: tooltip.borderColor ?? colors.border,
+            textStyle: { ...tooltip.textStyle, color: tooltip.textStyle?.color ?? colors.text },
+          }
+        : {}),
       /* A cross draws with crossStyle, not lineStyle, so each surface's own grid
          colour is carried across rather than dropped for a default. The cast is
          the seam: `pointer` came in as an index signature because the surfaces

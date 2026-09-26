@@ -110,6 +110,13 @@ describe("an address with no page still gets a page", () => {
     expect(shown).toHaveTextContent("/setttings?tab=tokens");
   });
 
+  /* The router re-serialises the query it parsed (":" comes back as "%3A"); the page quotes the
+     address as it was asked for. */
+  it("quotes the query as it was typed, not as the router re-encodes it", async () => {
+    renderRoute("/nope?at=2026-09-25T23:15:00Z");
+    expect(await screen.findByTestId("not-found-path")).toHaveTextContent(/^\/nope\?at=2026-09-25T23:15:00Z$/);
+  });
+
   it("clips an address long enough to be a payload rather than a path", async () => {
     renderRoute(`/${"a".repeat(3_000)}`);
     const shown = await screen.findByTestId("not-found-path");

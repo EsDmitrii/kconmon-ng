@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PasswordDialogHost } from "./change-password";
 import { UserMenu } from "./user-menu";
 import { TOKENS_ANCHOR } from "@/pages/settings";
 import type { Me } from "@/lib/types";
@@ -14,7 +15,16 @@ function renderMenu(canManageTokens: boolean, authMode?: "local" | "oidc") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (authMode) qc.setQueryData(["config"], { auth: { mode: authMode } });
   const can = (p: string) => (canManageTokens ? p === "tokens:manage" : false);
-  return { qc, ...render(<QueryClientProvider client={qc}><UserMenu me={me} can={can} /></QueryClientProvider>) };
+  return {
+    qc,
+    ...render(
+      <QueryClientProvider client={qc}>
+        <PasswordDialogHost>
+          <UserMenu me={me} can={can} />
+        </PasswordDialogHost>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 afterEach(() => {
@@ -27,6 +37,16 @@ describe("UserMenu", () => {
     renderMenu(false);
     expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  /* The popup is a plain group of controls, not a menu: announcing a menu button promised arrow-key
+     roving it does not have. */
+  it("does not announce a menu, and points at the group it opens", () => {
+    renderMenu(false);
+    const trigger = screen.getByRole("button", { name: /ada lovelace/i });
+    expect(trigger).not.toHaveAttribute("aria-haspopup");
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-controls", screen.getByRole("group").id);
   });
 
   it("opening it shows roles and a sign-out action", () => {

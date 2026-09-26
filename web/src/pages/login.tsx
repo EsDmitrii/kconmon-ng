@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, getConfig, goTo, login } from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { useConsoleConfig } from "@/hooks/use-capabilities";
+import { ApiError, goTo, login } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n";
 import { loginDict } from "@/lib/i18n/dict/login";
@@ -64,7 +65,7 @@ function currentReturnTo(): string {
  * not shown the console's feature map (owner report).
  */
 export function LoginPage() {
-  const { data: config, isPending } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data: config, isPending } = useConsoleConfig();
   const queryClient = useQueryClient();
   // Before every early return below — this page has three of them (pending,
   // redirect-home, and the whole OIDC card), and a hook after one of those is
@@ -110,9 +111,17 @@ export function LoginPage() {
     );
   }
 
-  async function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(undefined);
+    /* `required` makes the browser ask for an empty field in its own words; this catches a submit
+       that skips the browser's check, so the page never shows the API's "body must be JSON"
+       contract message to someone signing in. Empty only, as the server judges: whitespace is sent. */
+    const empty = username === "" ? "username" : password === "" ? "password" : null;
+    if (empty) {
+      e.currentTarget.querySelector<HTMLInputElement>(`input[name="${empty}"]`)?.focus();
+      return;
+    }
     setSubmitting(true);
     try {
       await login(username, password);
@@ -145,10 +154,12 @@ export function LoginPage() {
           <span className="text-muted-foreground">{t("field.username")}</span>
           <input
             className="h-9 rounded-md border border-border-strong bg-transparent px-3 text-[13px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            name="username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
             autoFocus
+            required
           />
         </label>
         <label className="flex flex-col gap-1 text-[13px]">
@@ -157,8 +168,10 @@ export function LoginPage() {
             type="password"
             className="h-9 rounded-md border border-border-strong bg-transparent px-3 text-[13px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
             value={password}
+            name="password"
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
+            required
           />
         </label>
       </div>

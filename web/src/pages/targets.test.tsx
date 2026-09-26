@@ -11,6 +11,8 @@ import {
   parseLabels,
   scheduleRequestFrom,
 } from "./targets";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -106,6 +108,8 @@ function renderPage(
   opts: {
     permissions?: string[];
     databaseConfigured?: boolean;
+    /** Replaces the 200 GET /api/v1/config would answer with. */
+    configResponse?: () => Response;
     /** Defaults ON in the harness: most tests exercise an install where schedules work. */
     schedulerEnabled?: boolean;
     targets?: unknown[];
@@ -115,11 +119,14 @@ function renderPage(
     onPostTarget?: (body: unknown) => Response;
     onPostCheck?: (body: unknown) => Response;
     onWriteSchedule?: (body: unknown) => Response;
+    /** Mounts a <LocaleProvider> with this language stored; absent, English. */
+    locale?: Locale;
   } = {},
 ) {
   const {
     permissions = OPERATOR,
     databaseConfigured = true,
+    configResponse,
     schedulerEnabled = true,
     targets = [],
     definitions = [],
@@ -128,6 +135,7 @@ function renderPage(
     onPostTarget,
     onPostCheck,
     onWriteSchedule,
+    locale,
   } = opts;
   // Stateful, so "create then refetch" is observable as a real change in the
   // list body rather than as a bare call count.
@@ -143,6 +151,7 @@ function renderPage(
 
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/config")) {
+      if (configResponse) return Promise.resolve(configResponse());
       return Promise.resolve(json(configBody(databaseConfigured, schedulerEnabled)));
     }
     // Before the bare /api/v1/checks branch: the projection endpoint is a
@@ -201,10 +210,11 @@ function renderPage(
   });
   vi.stubGlobal("fetch", fetchMock);
 
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <TargetsPage />
+      {locale === undefined ? <TargetsPage /> : <LocaleProvider><TargetsPage /></LocaleProvider>}
     </QueryClientProvider>,
   );
 
@@ -221,6 +231,52 @@ afterEach(() => {
   // file — without this reset a test that opened Schedules would hand the next
   // one a page already on the Schedules tab.
   window.history.replaceState({}, "", "/targets");
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
+});
+
+/* A once schedule that has fired keeps enabled=true with no next fire: it will never fire
+   again, and the row said "enabled" as if it would. */
+describe("TargetsPage — a once schedule that already fired", () => {
+  it("says done instead of enabled", async () => {
+    renderPage({
+      definitions: [definitionRow()],
+      schedules: [
+        scheduleRow({ kind: "once", intervalNs: 0, runAt: "2026-01-01T05:15:00Z", nextFireAt: null, lastFiredAt: "2026-01-01T05:15:01Z" }),
+      ],
+    });
+    await openTab(/schedules/i);
+    expect(await screen.findByText("done")).toBeInTheDocument();
+    expect(screen.queryByText("enabled")).toBeNull();
+  });
+});
+
+/* Every kind a row or a picker shows was the stored English word on a Russian page. */
+describe("TargetsPage — kinds in Russian", () => {
+  it("translates target, source, destination and schedule kinds in rows and pickers", async () => {
+    renderPage({
+      locale: "ru",
+      targets: [targetRow()],
+      definitions: [definitionRow()],
+      schedules: [scheduleRow(), scheduleRow({ id: "s-2", kind: "once", intervalNs: 0, runAt: "2026-01-01T05:15:00Z", nextFireAt: null, lastFiredAt: "2026-01-01T05:15:01Z" })],
+    });
+    expect(await screen.findByText("хост")).toBeInTheDocument();
+    expect(screen.queryByText("host")).toBeNull();
+
+    await openTab(/Определения/);
+    expect(await screen.findByText(/по одному на зону →/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Новое определение" }));
+    const labels = (name: string) =>
+      within(screen.getByLabelText(name)).getAllByRole("option").map((o) => o.textContent);
+    expect(labels("Выбор источников")).toEqual(["все", "по зонам", "по одному на зону"]);
+    expect(labels("Вид назначения")).toEqual(["узлы", "цель", "произвольный адрес"]);
+
+    await openTab(/Расписания/);
+    expect(await screen.findByText("интервальное")).toBeInTheDocument();
+    expect(screen.getByText("разовое")).toBeInTheDocument();
+    expect(screen.getByText("выполнено")).toBeInTheDocument();
+    expect(screen.queryByText("interval")).toBeNull();
+    expect(screen.queryByText("once")).toBeNull();
+  });
 });
 
 async function openTab(name: RegExp) {
@@ -280,14 +336,22 @@ describe("parseLabels", () => {
   });
 });
 
-describe("TargetsPage — database.mode=disabled", () => {
-  it("names console.database.mode and issues zero targets/checks/schedules requests", async () => {
+describe("TargetsPage — no database configured", () => {
+  it("names database.dsnFile and issues zero targets/checks/schedules requests", async () => {
     const { resourceCalls } = renderPage({ databaseConfigured: false });
 
-    expect(await screen.findByText(/console\.database\.mode/)).toBeInTheDocument();
+    expect(await screen.findByText(/database\.dsnFile \(Helm: database\.existingSecret\)/)).toBeInTheDocument();
     // Not "five requests to collect five 503s" — none at all.
     expect(resourceCalls()).toEqual([]);
     expect(screen.queryByRole("radio", { name: /targets/i })).not.toBeInTheDocument();
+  });
+
+  it("says the configuration could not be read instead of asking for database.dsnFile", async () => {
+    const { resourceCalls } = renderPage({ configResponse: () => problem(502, "Bad Gateway", "ingress upstream gone") });
+
+    expect(await screen.findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/database\.dsnFile/);
+    expect(resourceCalls()).toEqual([]);
   });
 });
 
@@ -329,29 +393,35 @@ describe("TargetsPage — no targets:write", () => {
 });
 
 describe("TargetsPage — teaching empty states", () => {
-  // The three-part shape dict/mtr.ts destinations.empty.* set: what the object
-  // IS, what appears once one exists, and a CTA naming the button that creates
-  // one. The CTA only renders beside the button it points at.
-  it("teaches what a target is and points at the New target button", async () => {
+  // The EmptyState slate every other list uses: a title, a body that says what the object IS and
+  // what appears once one exists, and the create button itself, not a sentence pointing at it.
+  it("titles the empty targets list and carries the New target button inside the slate", async () => {
     renderPage({ targets: [] });
 
-    expect(await screen.findByText(/a target names a host or url outside the fleet/i)).toBeInTheDocument();
-    expect(screen.getByText(/new target button above/i)).toBeInTheDocument();
+    const title = await screen.findByText("No targets yet");
+    const slate = title.parentElement as HTMLElement;
+    expect(within(slate).getByText(/^a target names a host or url outside the fleet/i)).toBeInTheDocument();
+    expect(within(slate).getByRole("button", { name: "New target" })).toBeInTheDocument();
+    // One create control on the page, not a second one above the slate.
+    expect(screen.getAllByRole("button", { name: "New target" })).toHaveLength(1);
+    expect(screen.queryByText(/button above/i)).not.toBeInTheDocument();
   });
 
-  it("omits the CTA for a reader who does not see the button it names", async () => {
+  it("omits the button for a reader who cannot create a target", async () => {
     renderPage({ permissions: ["targets:read", "checks:read"], targets: [] });
 
-    expect(await screen.findByText(/a target names a host or url outside the fleet/i)).toBeInTheDocument();
-    expect(screen.queryByText(/new target button above/i)).not.toBeInTheDocument();
+    await screen.findByText("No targets yet");
+    expect(screen.queryByRole("button", { name: "New target" })).not.toBeInTheDocument();
   });
 
-  it("teaches what a definition is on the definitions tab", async () => {
+  it("titles the empty definitions list and carries its create button", async () => {
     renderPage({ definitions: [] });
 
     await openTab(/definitions/i);
-    expect(await screen.findByText(/a definition says what the fleet probes/i)).toBeInTheDocument();
-    expect(screen.getByText(/new definition button above/i)).toBeInTheDocument();
+    const slate = (await screen.findByText("No check definitions yet")).parentElement as HTMLElement;
+    expect(within(slate).getByText(/^a definition says what the fleet probes/i)).toBeInTheDocument();
+    expect(within(slate).getByRole("button", { name: "New definition" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New definition" })).toHaveLength(1);
   });
 
   // The claim is the scheduler's own contract: the loop fires only enabled
@@ -361,8 +431,53 @@ describe("TargetsPage — teaching empty states", () => {
     renderPage({ schedules: [] });
 
     await openTab(/schedules/i);
-    expect(await screen.findByText(/never fires on its own/i)).toBeInTheDocument();
-    expect(screen.getByText(/new schedule button above/i)).toBeInTheDocument();
+    const slate = (await screen.findByText("No schedules yet")).parentElement as HTMLElement;
+    expect(within(slate).getByText(/never fires on its own/i)).toBeInTheDocument();
+    expect(within(slate).getByRole("button", { name: "New schedule" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New schedule" })).toHaveLength(1);
+  });
+
+  it("keeps the create button above the list once a row exists", async () => {
+    renderPage({ targets: [targetRow()] });
+
+    await screen.findByRole("button", { name: /edit api-gw/i });
+    expect(screen.getAllByRole("button", { name: "New target" })).toHaveLength(1);
+    expect(screen.queryByText("No targets yet")).not.toBeInTheDocument();
+  });
+});
+
+describe("TargetsPage — required fields are refused in the page's own words", () => {
+  it("refuses a target with no name without a request", async () => {
+    const { calls } = renderPage({ targets: [] });
+    fireEvent.click(await screen.findByRole("button", { name: "New target" }));
+    fireEvent.change(screen.getByLabelText("Address"), { target: { value: "10.0.0.9" } });
+    fireEvent.click(screen.getByRole("button", { name: /create target/i }));
+
+    expect(await screen.findByText("A name is required.")).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/targets")).toEqual([]);
+  });
+
+  it("refuses a definition with a blank name without a request", async () => {
+    const { calls } = renderPage({ definitions: [] });
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: "New definition" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: /create definition/i }));
+
+    expect(await screen.findByText("A name is required.")).toBeInTheDocument();
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/checks")).toEqual([]);
+  });
+
+  it("refuses a schedule with no definition picked without a request", async () => {
+    const { calls } = renderPage({ definitions: [definitionRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Definition"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+
+    expect(await screen.findByText("Pick a definition to schedule.")).toBeInTheDocument();
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/schedules")).toEqual([]);
   });
 });
 
@@ -406,6 +521,29 @@ describe("TargetsPage — targets CRUD", () => {
     expect(document.getElementById(describedBy!)).toHaveTextContent(detail);
     // The address field is untouched — the error landed on ONE field.
     expect(screen.getByLabelText("Address")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("hands focus to the refused field, not to <body>, after the submit button re-enables", async () => {
+    const detail = 'target: name "edge-gw" is already taken; target names are unique';
+    renderPage({ onPostTarget: () => problem(422, "invalid target", detail) });
+
+    fireEvent.click(await screen.findByRole("button", { name: /new target/i }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "edge-gw" } });
+    fireEvent.change(screen.getByLabelText("Address"), { target: { value: "10.0.0.9" } });
+    const submit = screen.getByRole("button", { name: /create target/i });
+    submit.focus();
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+  });
+
+  it("hands focus to the definition form's refused field", async () => {
+    renderPage({ onPostCheck: () => problem(422, "invalid check definition", "definition: name must not be empty") });
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new definition/i }));
+    fireEvent.click(screen.getByRole("button", { name: /create definition/i }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
   });
 
   it("deletes a target behind an inline confirm, then refetches", async () => {
@@ -488,6 +626,25 @@ describe("TargetsPage — definitions tab and the projection", () => {
         enabled: true,
       });
     });
+  });
+
+  /* The endpoint validates the body first, so a draft without its destination was a
+     guaranteed 422 in the browser console on every keystroke. */
+  it("asks for no projection until the destination is filled in", async () => {
+    const { calls } = renderPage({});
+
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new definition/i }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "gw-tcp" } });
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/v1/checks/projection")).toBe(true));
+    const before = calls.filter((c) => c.url === "/api/v1/checks/projection").length;
+
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "target" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "gw-tcp-2" } });
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "adhoc" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "gw-tcp-3" } });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(calls.filter((c) => c.url === "/api/v1/checks/projection")).toHaveLength(before);
   });
 
   it("never asks for a projection without checks:write — the endpoint is gated on it", async () => {
@@ -609,6 +766,23 @@ describe("TargetsPage — schedules tab", () => {
     expect(rows[1]).toHaveTextContent("continuous");
   });
 
+  it("names no next fire time for a schedule that will not fire, and titles the cadence", async () => {
+    renderPage({
+      definitions: [definitionRow(), definitionRow({ id: "d-2", name: "gw-off", enabled: false })],
+      schedules: [
+        scheduleRow({ id: "s-1", enabled: false, nextFireAt: "2026-01-02T00:00:00Z" }),
+        scheduleRow({ id: "s-2", definitionId: "d-2", nextFireAt: "2026-01-02T00:00:00Z" }),
+      ],
+    });
+
+    await openTab(/schedules/i);
+    const rows = within(await screen.findByRole("list", { name: /schedules/i })).getAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("next —");
+    expect(rows[1]).toHaveTextContent("next —");
+    const cadence = within(rows[0]).getByText("every 30s");
+    expect(cadence).toHaveAttribute("title", "every 30s");
+  });
+
   it("offers only once, interval and continuous — cron is absent from the picker entirely", async () => {
     renderPage({ definitions: [definitionRow()] });
 
@@ -717,7 +891,7 @@ describe("TargetsPage — schedules tab", () => {
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
     fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
 
-    expect(await screen.findByText("kind once requires a run at time")).toBeInTheDocument();
+    expect(await screen.findByText("Pick when the run happens.")).toBeInTheDocument();
     expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/schedules")).toEqual([]);
   });
 
@@ -1316,5 +1490,128 @@ describe("the schedules tab warns when the scheduler loop is off (M3-13)", () =>
     await openTab(/schedules/i);
     await screen.findByRole("list", { name: /schedules/i });
     expect(screen.queryByText(/scheduler loop is disabled/i)).toBeNull();
+  });
+});
+
+/*
+ * The server refuses udp and pmtu toward anything but a node, a continuous schedule of a type the
+ * agents cannot run continuously toward a target (mtr), and a once or interval one of a type they
+ * cannot run toward one (dns, http): httpapi's scheduleCannotRun and errUDPNodesOnly.
+ */
+describe("the forms offer only what the server runs", () => {
+  const option = (select: string, name: string) =>
+    within(screen.getByLabelText(select)).getByRole("option", { name }) as HTMLOptionElement;
+
+  it("offers udp and pmtu only toward nodes, and nodes only to them", async () => {
+    renderPage({});
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new definition/i }));
+
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "target" } });
+    expect(option("Check type", "udp").disabled).toBe(true);
+    expect(option("Check type", "pmtu").disabled).toBe(true);
+    expect(option("Check type", "http").disabled).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "node" } });
+    fireEvent.change(screen.getByLabelText("Check type"), { target: { value: "udp" } });
+    expect(option("Destination kind", "target").disabled).toBe(true);
+    expect(option("Destination kind", "adhoc").disabled).toBe(true);
+    expect(screen.getByText("udp probes kconmon nodes only: only a kconmon agent answers it.")).toBeInTheDocument();
+  });
+
+  it("still pauses a stored udp definition toward a target, as the server allows", async () => {
+    const { calls } = renderPage({ definitions: [definitionRow({ checkType: "udp" })] });
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit gw-tcp" }));
+    fireEvent.click(screen.getByLabelText("Enabled"));
+
+    const save = screen.getByRole("button", { name: /save definition/i });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PUT" && c.url === "/api/v1/checks/d-1")?.body).toMatchObject({
+        checkType: "udp",
+        enabled: false,
+      }),
+    );
+  });
+
+  it("schedules http toward a target only continuously, and says why", async () => {
+    const { calls } = renderPage({ definitions: [definitionRow({ checkType: "http" })], schedules: [] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+
+    expect(option("Kind", "once").disabled).toBe(true);
+    expect(option("Kind", "interval").disabled).toBe(true);
+    expect(screen.getByLabelText("Kind")).toHaveValue("continuous");
+    expect(
+      screen.getByText(
+        "http runs toward a target or an ad-hoc address only continuously: one-off and repeating runs go there for tcp, icmp and mtr only.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "POST" && c.url === "/api/v1/schedules")?.body).toEqual({
+        definitionId: "d-1",
+        kind: "continuous",
+        enabled: true,
+      }),
+    );
+  });
+
+  it("does not schedule mtr toward an ad-hoc address continuously", async () => {
+    renderPage({
+      definitions: [definitionRow({ checkType: "mtr", destinationKind: "adhoc", destinationAddress: "example.test" })],
+      schedules: [],
+    });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+
+    expect(option("Kind", "continuous").disabled).toBe(true);
+    expect(option("Kind", "interval").disabled).toBe(false);
+    expect(screen.getByLabelText("Kind")).toHaveValue("interval");
+  });
+
+  it("offers every kind toward nodes", async () => {
+    renderPage({ definitions: [definitionRow({ checkType: "udp", destinationKind: "node" })], schedules: [] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+
+    for (const kind of ["once", "interval", "continuous"]) expect(option("Kind", kind).disabled).toBe(false);
+  });
+
+  it("refuses to schedule a stored udp definition toward a target at all", async () => {
+    renderPage({ definitions: [definitionRow({ checkType: "udp" })], schedules: [] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+
+    expect(screen.getByLabelText("Kind")).toBeDisabled();
+    expect(screen.getByRole("button", { name: /create schedule/i })).toBeDisabled();
+    expect(
+      screen.getByText("udp probes kconmon nodes only, so no schedule of this definition could run. Point it at nodes first."),
+    ).toBeInTheDocument();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("TargetsPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage({ targets: [targetRow()] });
+    await screen.findByRole("list", { name: /targets/i });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage({ targets: [targetRow()] });
+    await screen.findByRole("list", { name: /targets/i });
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

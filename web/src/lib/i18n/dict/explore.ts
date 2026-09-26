@@ -32,6 +32,11 @@ const en = {
     "Every query goes through the console's guarded Prometheus proxy; for an exact ad-hoc query there is the PromQL page. " +
     "With the Time Machine engaged, the window ends at the viewed instant.",
   "range.aria": "Time range",
+  /* The permission string is interpolated, never translated: it is what authz/roles.go spells. */
+  "permission.requires": "Requires the {permission} permission",
+  "permission.body":
+    "Every chart here is a PromQL query through the console's guarded Prometheus proxy, and the proxy needs " +
+    "promql:query. A role without it sees this instead of charts that fire queries it may not run.",
 
   /* ── a curated card ────────────────────────────────────────────────────── */
   "chart.loading": "Loading chart…",
@@ -123,6 +128,10 @@ export const exploreDict: Dictionary<ExploreKey> = defineDict(en, {
     "Все запросы идут через защищённый прокси консоли к Prometheus; для точного произвольного запроса есть страница PromQL. " +
     "С включённой Машиной времени окно заканчивается на выбранном моменте.",
   "range.aria": "Диапазон времени",
+  "permission.requires": "Нужно право {permission}",
+  "permission.body":
+    "Каждый график здесь строится запросом PromQL через защищённый прокси консоли к Prometheus, а прокси нужно право " +
+    "promql:query. Роль без него видит эту карточку вместо графиков, которые шлют запросы, запрещённые ей.",
 
   "chart.loading": "Загрузка графика…",
   "chart.empty": "На этом диапазоне серий нет, возьмите интервал подлиннее.",

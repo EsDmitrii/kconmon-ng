@@ -46,6 +46,8 @@ const en = {
      (lib/i18n's stampFull, the house clock) — interpolated, never translated. */
   "upTo": "up to {at}",
   "db.note": "History requires a database — showing live events only.",
+  "config.failed": "Could not read the console configuration, so no history was requested: {error}. Showing live events only.",
+  "config.failed.generic": "the request failed",
   "error.fallback": "Event history is unavailable",
   "loading": "Loading recent changes…",
   /* The empty slate: `empty` is its title (pinned by four tests, so it stays
@@ -62,6 +64,8 @@ export const recentChangesDict: Dictionary<RecentChangesKey> = defineDict(en, {
   "list.aria": "Список недавних изменений",
   "upTo": "до {at}",
   "db.note": "Истории нужна база, поэтому показываем только онлайн-события.",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому история не запрашивалась: {error}. Показываем только онлайн-события.",
+  "config.failed.generic": "запрос не выполнен",
   "error.fallback": "История событий недоступна",
   "loading": "Загружаем недавние изменения…",
   "empty": "Недавних изменений нет.",

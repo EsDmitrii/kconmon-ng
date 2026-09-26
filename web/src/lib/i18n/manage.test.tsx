@@ -125,8 +125,7 @@ describe("/targets in Russian", () => {
     renderRu(<TargetsPage />);
     expect(await screen.findByRole("heading", { name: targetsDict.ru["targets.heading"] })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(targetsDict.ru["targets.empty"])).toBeInTheDocument());
-    // The teaching empty state's CTA is its own node, beside the body.
-    expect(screen.getByText(targetsDict.ru["targets.empty.cta"])).toBeInTheDocument();
+    expect(screen.getByText(targetsDict.ru["targets.empty.title"])).toBeInTheDocument();
   });
 
   it("translates the create button", async () => {

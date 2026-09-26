@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import {
   AlertingPage,
@@ -12,6 +13,7 @@ import {
   relativeTime,
   reservedLabelMessage,
 } from "./alerting";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 /**
  * The Alerting page is one read floor (alerts:read) over one write permission (alerts:manage) over
@@ -45,8 +47,8 @@ const ALERTING_DISABLED_DETAIL =
   "(Helm: console.alerting.enabled) on a console running in-cluster with the PrometheusRule CRD present";
 
 const NO_DATABASE_DETAIL =
-  "alert rules are persisted configuration with no in-memory fallback: set console.database.mode in the " +
-  "console config (Helm: console.database.mode) to enable /api/v1/alert-rules";
+  "alert rules are persisted configuration with no in-memory fallback: set database.dsnFile in the " +
+  "console config (Helm: database.existingSecret) to enable /api/v1/alert-rules";
 
 function meBody(permissions: string[], roles: string[] = ["admin"]) {
   return { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles }, permissions };
@@ -82,10 +84,16 @@ function ruleRow(over: Record<string, unknown> = {}) {
 }
 
 function foreignRow(over: Record<string, unknown> = {}) {
-  return { name: "kube-prometheus-rules", groups: 2, rules: 7, managedBy: "prometheus-operator", ...over };
+  return { name: "kube-prometheus-rules", groups: 2, rules: 7, alertRules: 5, managedBy: "prometheus-operator", ...over };
 }
 
 const EMPTY_REPORT = { created: [], skipped: [], notes: [] };
+
+/** Import is two presses, like a delete: the first arms the row, the second sends. */
+async function importForeign(name = "kube-prometheus-rules") {
+  fireEvent.click(await screen.findByRole("button", { name: `Import ${name}` }));
+  fireEvent.click(await screen.findByRole("button", { name: `Confirm import of ${name}` }));
+}
 
 interface Call {
   method: string;
@@ -114,6 +122,8 @@ function renderPage(
     maintenance?: unknown[];
     /** Replaces the 200 the maintenance list would otherwise answer with. */
     maintenanceResponse?: () => Response;
+    /** Wraps the page, e.g. in a <LocaleProvider>. */
+    wrap?: (ui: React.ReactElement) => React.ReactElement;
   } = {},
 ) {
   const {
@@ -130,6 +140,7 @@ function renderPage(
     targets = [],
     maintenance = [],
     maintenanceResponse,
+    wrap = (ui) => ui,
   } = opts;
   const rows = [...rules];
   const windows = [...maintenance] as Record<string, unknown>[];
@@ -211,9 +222,7 @@ function renderPage(
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <TimeMachineProvider>
-        <AlertingPage />
-      </TimeMachineProvider>
+      <TimeMachineProvider>{wrap(<AlertingPage />)}</TimeMachineProvider>
     </QueryClientProvider>,
   );
 
@@ -654,6 +663,18 @@ describe("AlertingPage builder", () => {
     expect(screen.queryByTestId("no-params")).toBeNull();
   });
 
+  it("refuses a rule with no name in the page's own words, without a request", async () => {
+    const { resourceCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+
+    expect(await screen.findByText("A name is required.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+    expect(resourceCalls().some((c) => c.method === "POST" && !c.url.includes("preview"))).toBe(false);
+  });
+
   it("refuses a reserved label CLIENT-side, in the server's words, without a request", async () => {
     const { resourceCalls } = renderPage();
     await openBuilder();
@@ -805,6 +826,8 @@ describe("AlertingPage builder", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
     const field = await screen.findByTestId("field-error-thresholdPercent");
     expect(field.textContent).toBe(detail);
+    // The submit button disabled itself in flight; focus goes to the refused field, not to <body>.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Loss threshold (%)")));
   });
 
   it("banners a 422 it cannot place on a field", async () => {
@@ -849,7 +872,7 @@ describe("AlertingPage foreign rules", () => {
         ],
       },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    await importForeign();
 
     const report = await screen.findByTestId("import-report");
     // Each array lands in its OWN block. A note names a rule that was created,
@@ -878,7 +901,7 @@ describe("AlertingPage foreign rules", () => {
 
   it("an import that adopted nothing still shows all three headings", async () => {
     renderPage({ foreign: [foreignRow()], importReport: EMPTY_REPORT });
-    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    await importForeign();
     const report = await screen.findByTestId("import-report");
     for (const heading of ["Created", "Skipped", "Notes"]) {
       expect(within(report).getByText(heading)).toBeTruthy();
@@ -888,14 +911,54 @@ describe("AlertingPage foreign rules", () => {
   /* Polite, not assertive — the import succeeded; its refusal is the role="alert" line beside it. */
   it("announces the report politely instead of landing silently", async () => {
     renderPage({ foreign: [foreignRow()], importReport: EMPTY_REPORT });
-    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    await importForeign();
     const report = await screen.findByTestId("import-report");
     expect(report).toHaveAttribute("role", "status");
   });
 
-  it("sends the object NAME and nothing else", async () => {
+  it("arms a confirm step that says what the import creates before sending anything", async () => {
     const { resourceCalls } = renderPage({ foreign: [foreignRow()] });
     fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+
+    const confirm = await screen.findByRole("button", { name: "Confirm import of kube-prometheus-rules" });
+    expect(document.activeElement).toBe(confirm);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "This creates 5 enabled console rules, one per alerting rule; recording rules are skipped.",
+    );
+    expect(resourceCalls().some((c) => c.url.includes("/import"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: "Import kube-prometheus-rules" })).toBe(document.activeElement);
+    expect(resourceCalls().some((c) => c.url.includes("/import"))).toBe(false);
+  });
+
+  /* `rules` counts recording entries too, and the import skips those: the note counts
+     `alertRules`, the entries an import copies, and one rule is not "1 rules". */
+  it("counts the alerting rules, not every entry, and says 1 rule in the singular", async () => {
+    renderPage({ foreign: [foreignRow({ groups: 1, rules: 3, alertRules: 1 })] });
+    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    await screen.findByRole("button", { name: "Confirm import of kube-prometheus-rules" });
+    const note = screen.getByRole("status");
+    expect(note).toHaveTextContent("This creates 1 enabled console rule, one per alerting rule");
+    expect(note.textContent).not.toMatch(/creates 3/);
+    expect(note.textContent).not.toMatch(/\b1 rules\b/);
+  });
+
+  it("agrees the Russian noun with the count of alerting rules", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    try {
+      renderPage({ foreign: [foreignRow({ rules: 9, alertRules: 2 })], wrap: (ui) => <LocaleProvider>{ui}</LocaleProvider> });
+      fireEvent.click(await screen.findByRole("button", { name: "Импортировать kube-prometheus-rules" }));
+      await screen.findByRole("button", { name: "Подтвердить импорт kube-prometheus-rules" });
+      expect(screen.getByRole("status")).toHaveTextContent("Импорт создаст 2 правила консоли");
+    } finally {
+      localStorage.removeItem(LOCALE_STORAGE_KEY);
+    }
+  });
+
+  it("sends the object NAME and nothing else", async () => {
+    const { resourceCalls } = renderPage({ foreign: [foreignRow()] });
+    await importForeign();
     await waitFor(() => expect(resourceCalls().some((c) => c.url.includes("/import"))).toBe(true));
     expect(resourceCalls().find((c) => c.url.includes("/import"))?.body).toEqual({ name: "kube-prometheus-rules" });
   });
@@ -1443,5 +1506,29 @@ describe("maintenance windows section", () => {
     renderPage({ permissions: MAINTAINER, maintenance: many });
     const list = await screen.findByRole("list", { name: "All maintenance windows" });
     expect(within(list).getAllByRole("listitem").length).toBeLessThan(100);
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("AlertingPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage({ permissions: ALERT_EDITOR, rules: [ruleRow()], foreign: [foreignRow()] });
+    await screen.findByRole("button", { name: "New rule" });
+    await screen.findAllByText("PairLossHigh");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage({ permissions: ALERT_EDITOR, rules: [ruleRow()], foreign: [foreignRow()] });
+    await screen.findByRole("button", { name: "New rule" });
+    await screen.findAllByText("PairLossHigh");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

@@ -57,6 +57,12 @@ const en = {
      link, and an unnamed landmark in a page with several is one an operator has
      to enter to identify. */
   "shell.nav.aria": "Main",
+  /* AuthGate's answer to a 503 "authentication unavailable" on /auth/me: the session store did not
+     answer, which is not a sign-out. */
+  "authGate.unavailable.title": "Cannot check your sign-in right now",
+  "authGate.unavailable.body":
+    "The console's session store did not answer. You have not been signed out; the check repeats every few seconds.",
+  "authGate.unavailable.retry": "Retry now",
 
   /* ── the narrow-viewport drawer ────────────────────────────────────────── */
   /* Below 768px the sidebar is a drawer rather than a column. The trigger says
@@ -129,6 +135,10 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
   "shell.skipToContent": "Перейти к основному содержимому",
   "shell.pageLoading": "Загрузка страницы…",
   "shell.nav.aria": "Основная навигация",
+  "authGate.unavailable.title": "Сейчас не удаётся проверить вход",
+  "authGate.unavailable.body":
+    "Хранилище сессий консоли не ответило. Выхода из системы не было, проверка повторяется каждые несколько секунд.",
+  "authGate.unavailable.retry": "Повторить сейчас",
 
   "shell.menu.open": "Открыть навигацию",
   "shell.menu.close": "Закрыть навигацию",

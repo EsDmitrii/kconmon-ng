@@ -354,3 +354,19 @@ describe("the target card in Russian", () => {
     expect(screen.getByText(/GET \/api\/v1\/runs/)).toBeInTheDocument();
   });
 });
+
+/* The pair card's not-found body sits under a description that already names one unknown node or
+   two; a plural body under one name read as if the valid node had left the fleet too. */
+describe("the pair card's not-found body agrees with how many names are unknown", () => {
+  it("has a one-name body that speaks of one node", () => {
+    expect(cardsDict.en["pair.notFound.oneUnknownBody"]).toMatch(/That name may be a typo, or the node may have left/);
+    expect(cardsDict.en["pair.notFound.oneUnknownBody"]).not.toMatch(/The names|the nodes may|neither answers to them/);
+    expect(cardsDict.ru["pair.notFound.oneUnknownBody"]).toContain("в имени опечатка");
+    expect(cardsDict.ru["pair.notFound.oneUnknownBody"]).not.toMatch(/в именах|узлы успели|их не знают/);
+  });
+
+  it("keeps the two-name body plural", () => {
+    expect(cardsDict.en["pair.notFound.unknownBody"]).toMatch(/The names may be a typo/);
+    expect(cardsDict.ru["pair.notFound.unknownBody"]).toContain("в именах опечатка");
+  });
+});

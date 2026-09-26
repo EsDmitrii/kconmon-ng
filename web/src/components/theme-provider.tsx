@@ -10,8 +10,16 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 const STORAGE_KEY = "kconmon-console-theme";
 
+function readStoredTheme(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 function resolveInitial(): Theme {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = readStoredTheme();
   if (stored === "dark" || stored === "light") return stored;
   // Dark is the product default; only honor an explicit light OS preference.
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
@@ -24,7 +32,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const root = document.documentElement;
     root.classList.remove("dark", "light");
     root.classList.add(theme);
-    localStorage.setItem(STORAGE_KEY, theme);
+    try {
+      localStorage.setItem(STORAGE_KEY, theme);
+    } catch {
+      // Blocked or full storage: the theme still applies, it just is not remembered.
+    }
   }, [theme]);
 
   return (
@@ -32,6 +44,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       {children}
     </ThemeContext.Provider>
   );
+}
+
+/** The theme when a ThemeProvider is mounted, else null; for components that also render outside one. */
+export function useThemeIfAny(): Theme | null {
+  return useContext(ThemeContext)?.theme ?? null;
 }
 
 export function useTheme() {

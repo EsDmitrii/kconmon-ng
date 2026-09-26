@@ -52,7 +52,7 @@ export interface paths {
          * Live cluster topology from the controller, or a reconstruction as of an instant.
          * @description Without `at`, the controller's snapshot verbatim: a non-leader reply is retried with backoff, and if every attempt still fails the console answers 502. With `at`, the topology is instead REBUILT from persisted history: the newest `topology_baseline` row at or before that instant (the console stores the controller's whole topology each time its event stream connects, and hourly after that), then the `topology_changed` events after it, and the body carries `historical: true` plus the fold's own counters. History recorded before 2.4.0 has no baseline and folds from the events alone, so it misses agents that never changed.
          *
-         *     A reconstruction is bounded by what those rows record, which since M7 is `{reason, nodeName, agentId, zone}` (plus the agent's `labels` since 2.4.0) -- the controller attributes every emission site, one event per affected agent, and a stated `zone` wins while an omitted one never erases a known one. `podIP` is still never recorded and comes back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness, except for a node no event touched after the baseline, which keeps the readiness the baseline recorded. A bare host -- an agent whose folded labels carry `kconmon-ng.io/external: "true"` -- has no Kubernetes node and is served under `agents` only, exactly as the live snapshot does; it never appears in `nodes` with that presence-derived `ready`. Events written by pre-M7 controllers carry the reason alone: that stretch of history folds to an empty `nodes` array with every such event counted in `unfoldableEvents` -- the counter, not the empty array, is the honest signal, and it shrinks as those rows age out of retention.
+         *     A reconstruction is bounded by what those rows record, which is `{reason, nodeName, agentId, zone}` from a controller 1.9.0 or newer (plus the agent's `labels` from 2.4.0) -- the controller attributes every emission site, one event per affected agent, and a stated `zone` wins while an omitted one never erases a known one. `podIP` is never recorded and comes back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness, except for a node no event touched after the baseline, which keeps the readiness the baseline recorded. A bare host -- an agent whose folded labels carry `kconmon-ng.io/external: "true"` -- has no Kubernetes node and is served under `agents` only, exactly as the live snapshot does; it never appears in `nodes` with that presence-derived `ready`. Events written by controllers older than 1.9.0 carry the reason alone: that stretch of history folds to an empty `nodes` array with every such event counted in `unfoldableEvents` -- the counter, not the empty array, is the honest signal, and it shrinks as those rows age out of retention.
          */
         get: operations["getTopology"];
         put?: never;
@@ -71,8 +71,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Node-to-node connectivity matrix, recomputed from Prometheus per request.
-         * @description Fail ratio and RTT p95 come from 5m-rate-window queries; loss ratio (udp/icmp only) is an instant average. A pair with no matching series gets a null field rather than a zero. rttP95 is nanoseconds.
+         * Node-to-node connectivity matrix from Prometheus, one computation per protocol shared by concurrent callers and served for up to 5s.
+         * @description Fail ratio and RTT p95 come from 5m-rate-window queries; loss ratio (udp/icmp only) is an instant average. A pair with no matching series gets a null field rather than a zero. rttP95 is nanoseconds. Concurrent callers share one computation per protocol, and the result is served for up to 5 seconds after it is computed; a Prometheus failure is not cached.
          */
         get: operations["getMatrix"];
         put?: never;
@@ -114,7 +114,9 @@ export interface paths {
         put?: never;
         /**
          * Guarded passthrough to Prometheus /api/v1/query.
-         * @description The response envelope -- success or Prometheus's own error body -- is forwarded byte-for-byte, never re-shaped.
+         * @description The response envelope -- success or Prometheus's own error body -- is forwarded byte-for-byte, never re-shaped. Prometheus's own error envelope keeps its status (400, 422, 500 or 503, as application/json); any other upstream answer, such as an auth proxy's 401, is 502 so it is never read as the console's own. With a custom metricsPrefix, metric names that start with kconmon_ng_ are renamed to the configured prefix before the query is forwarded; string literals, label matchers and grouping label lists are left as written.
+         *
+         *     The body is decoded strictly: an unknown field is 400 with a detail that names it (`unknown field "tme" -- check the field name against the API schema`), and so is a body that carries a second JSON value or other data after the first.
          */
         post: operations["promqlQuery"];
         delete?: never;
@@ -134,7 +136,7 @@ export interface paths {
         put?: never;
         /**
          * Guarded passthrough to Prometheus /api/v1/query_range.
-         * @description `step` is nanoseconds in this request (the client converts to Prometheus's seconds). A range wider than prometheus.maxRange, or a result over prometheus.maxResponseBytes, is 422.
+         * @description `step` is nanoseconds in this request (the client converts to Prometheus's seconds). A range wider than prometheus.maxRange, or a result over prometheus.maxResponseBytes, is 422. Upstream errors, a custom metricsPrefix and the strict body are handled as on /api/v1/promql/query.
          */
         post: operations["promqlQueryRange"];
         delete?: never;
@@ -155,7 +157,9 @@ export interface paths {
         put?: never;
         /**
          * Start a diagnostics run (asynchronous).
-         * @description Fan-out over sources x destinations -- full mesh, or one-sided when either is empty, resolved against live topology -- bounded to 400 pairs after self-pair exclusion. A malformed body or unknown type is 400; a well-formed spec refused for what it would produce (too many pairs, no pairs, no nodes) is 422.
+         * @description Fan-out over sources x destinations -- full mesh, or one-sided when either is empty, resolved against live topology -- bounded to 400 pairs after self-pair exclusion. A malformed body, or a type the console does not know toward nodes, is 400; a well-formed spec refused for what it would produce (too many pairs, no pairs, no nodes) is 422.
+         *
+         *     `plane` must be `pod` or empty, which means pod: agents probe the pod network only, and any other value is 400 `invalid plane`. A source or destination node name over 253 bytes is 400 `invalid sources/destinations`, and an ad-hoc destinationAddress over 2048 bytes is 400 `invalid destination`. Toward destinationKind target or adhoc only tcp, icmp and mtr run: any other type there, one the console does not know included, is 422 `invalid destination`, since the agents would fail every pair. The detail says why: pmtu and udp need a kconmon agent at the far end, so their destination must be a node (for udp the same sentence the definition and schedule routes refuse with), dns and http go to an external resolver or URL only as a continuous check, and any other type reads `check type "X" cannot run toward one`.
          */
         post: operations["createRun"];
         delete?: never;
@@ -242,7 +246,7 @@ export interface paths {
         put?: never;
         /**
          * Create one target.
-         * @description A duplicate name is 422, not 409: it is a rejected field value in an otherwise well-formed body. So is an `address` that provably resolves outside `config.checkers.external.allowedCidrs` -- no agent in the fleet could ever probe it, so it is refused at the moment it is created rather than left to time out on every check.
+         * @description A duplicate name is 422, not 409: it is a rejected field value in an otherwise well-formed body. So is an `address` that provably resolves outside `config.checkers.external.allowedCidrs` -- no agent in the fleet could ever probe it, so it is refused at the moment it is created rather than left to time out on every check. An address over 2048 bytes is 422 as well (`target: address is N bytes, limit is 2048`).
          */
         post: operations["createTarget"];
         delete?: never;
@@ -263,10 +267,16 @@ export interface paths {
         };
         /** One target. An unknown id and a malformed one are both 404. */
         get: operations["getTarget"];
-        /** Replace one target in full (an omitted field means empty, never "leave as-is"). */
+        /**
+         * Replace one target in full (an omitted field means empty, never "leave as-is").
+         * @description 422 also answers an edit that would leave a check definition on this target unrunnable, for example a url target turned into host:port with http checks on it. The detail names up to ten such definitions, the rest by count (`and N more`, or `and at least N more` when the walk over the definitions was cut short), and gives the parser's reason. Definitions that could not run before the edit do not block it.
+         */
         put: operations["updateTarget"];
         post?: never;
-        /** Delete one target; 409 while any check definition still references it. */
+        /**
+         * Delete one target; 409 while any check definition still references it.
+         * @description The 409 detail names the target and up to ten of the definitions that reference it, the rest by count, and ends `delete or re-point it first` for one definition and `delete or re-point them first` for several.
+         */
         delete: operations["deleteTarget"];
         options?: never;
         head?: never;
@@ -286,6 +296,10 @@ export interface paths {
         /**
          * Create one check definition.
          * @description The projection guard runs before the write and only for a definition arriving enabled: over the 400-series limit it is 422, while the same definition saved with "enabled": false is accepted.
+         *
+         *     A definition no agent could run as written is 422 `check definition cannot run`, enabled or not: an http check on a `host` target, a dns check without params.query, or a udp check toward destinationKind target or adhoc (the udp probe needs the far end to echo its sequence number, which only a kconmon agent does).
+         *
+         *     `plane` must be `pod`, or the answer is 422 `invalid check definition` (`definition: plane must be "pod": ...`), `params` is at most 4096 bytes (`definition: params is N bytes, limit is 4096`), and an ad-hoc destinationAddress at most 2048 bytes (`definition: destination address is N bytes, limit is 2048`).
          */
         post: operations["createCheckDefinition"];
         delete?: never;
@@ -326,7 +340,10 @@ export interface paths {
         };
         /** One check definition. An unknown id and a malformed one are both 404. */
         get: operations["getCheckDefinition"];
-        /** Replace one check definition in full. */
+        /**
+         * Replace one check definition in full.
+         * @description Held to the same 422 `check definition cannot run` as POST /api/v1/checks, except with "enabled": false: a disabled definition runs nothing, so one the guard would refuse (saved before 2.5.0, or imported) can be paused instead of deleted. Enabling it again is judged. An edit of checkType or destinationKind that would leave one of the definition's own schedules unable to run it is 422 `check definition cannot run` too, enabled or not, naming that schedule's kind; change or delete the schedule first. Schedules that could not run the stored definition either do not block the edit.
+         */
         put: operations["updateCheckDefinition"];
         post?: never;
         /** Delete one check definition; its schedules cascade with it. */
@@ -348,7 +365,9 @@ export interface paths {
         put?: never;
         /**
          * Create one schedule.
-         * @description kind "cron" is refused with a 422 naming the milestone it lands in, rather than degrading into a generic enum error. An interval below 10s is clamped up, and the response is the stored row, so a client that asked for 1s is told it got 10s.
+         * @description kind "cron" is refused with its own 422 (`cron schedules land in a later milestone`) that names the interval and once kinds to use instead, rather than a generic enum error. An interval below 10s is clamped up, and the response is the stored row, so a client that asked for 1s is told it got 10s.
+         *
+         *     Toward destinationKind target or adhoc the kind must be able to run the definition's checkType, or the answer is 422 `invalid schedule`: a continuous schedule runs tcp, icmp, dns and http there, a once or interval schedule tcp, icmp and mtr, and udp runs in neither. A definition toward nodes is not judged.
          */
         post: operations["createSchedule"];
         delete?: never;
@@ -371,7 +390,7 @@ export interface paths {
         get: operations["getSchedule"];
         /**
          * Replace one schedule's cadence in full.
-         * @description definitionId is not updatable: a body naming a different definition is refused with 422 rather than silently ignored.
+         * @description definitionId is not updatable: a body naming a different definition is refused with 422 rather than silently ignored. A kind that cannot run the definition's checkType toward its destination is 422 `invalid schedule`, as on POST /api/v1/schedules, unless the body has "enabled": false: a disabled schedule never fires, so one saved before 2.5.0 can be paused instead of deleted. Enabling it again is judged.
          */
         put: operations["updateSchedule"];
         post?: never;
@@ -487,7 +506,7 @@ export interface paths {
         put?: never;
         /**
          * Pin one mark. There is no update -- a mark is not a document.
-         * @description createdBy is the SERVER's view of the authenticated subject ("user:<id>", "token:<id>"), never a body field. The audit row for this route records the scope ONLY: the text is free-form operator prose and never enters the audit log.
+         * @description createdBy is the SERVER's view of the authenticated subject ("user:<id>", "token:<id>"), never a body field. It is held to the rule a maintenance window's is: a subject with a control character is 422 `invalid annotation`. The audit row for this route records the scope ONLY: the text is free-form operator prose and never enters the audit log.
          */
         post: operations["createAnnotation"];
         delete?: never;
@@ -531,7 +550,7 @@ export interface paths {
         put?: never;
         /**
          * Open one investigation. Always created OPEN.
-         * @description createdBy is the SERVER's view of the authenticated subject, never a body field, and there is no status/resolvedAt in the request: an incident is always created open, and resolving it is PATCH -- the path that stamps resolvedAt from the server's own clock. The audit row records title, scope and status ONLY: notes and pinned are free-form and never enter the audit log.
+         * @description createdBy is the SERVER's view of the authenticated subject, never a body field, and there is no status/resolvedAt in the request: an incident is always created open, and resolving it is PATCH -- the path that stamps resolvedAt from the server's own clock. The audit row records title and scope ONLY: notes and pinned are free-form and never enter the audit log.
          */
         post: operations["createIncident"];
         delete?: never;
@@ -574,7 +593,7 @@ export interface paths {
         };
         /**
          * One page of declared maintenance windows, newest-starting first.
-         * @description from/to bound the range a window must OVERLAP, not contain: one that opened before the range and is still running inside it is exactly the one that explains what the operator is looking at. Windows are DATA and RENDERING: they mark charts and timeline rows and they SUPPRESS NOTHING. Alert rules ARE evaluated (the console syncs them into a PrometheusRule and pages webhooks on every firing edge) and no code path consults these windows, so declaring one does not silence a page. Correlate them in Alertmanager or in your receiver.
+         * @description from/to bound the range a window must OVERLAP, not contain: one that opened before the range and is still running inside it is exactly the one that explains what the operator is looking at. Windows mark charts and timeline rows, and since 2.5.0 an open window also HOLDS BACK the console's own alert webhooks (`alert.fired` / `alert.resolved`) for every alert whose labels its scope covers; a global window holds all of them. An alert still firing when the window closes is delivered then, with its original `firedAt`. Alert rules are still evaluated, and the PrometheusRule the console syncs still routes through Alertmanager, which a window does not silence: silence those in Alertmanager.
          */
         get: operations["listMaintenanceWindows"];
         put?: never;
@@ -624,7 +643,7 @@ export interface paths {
         put?: never;
         /**
          * Declare one endpoint. The secret is REQUIRED and write-only.
-         * @description Every delivery is signed, so an endpoint without a secret could never deliver and `secret` is required here. The console encrypts it at rest with console.webhooks.encryptionKey; that key is OPTIONAL at boot, so a console without one answers 503 NAMING the key rather than failing to start. The audit row records name and events ONLY -- never the secret, and never the url (a hook URL routinely embeds a token in its own path).
+         * @description Every delivery is signed, so an endpoint without a secret could never deliver and `secret` is required here. The console encrypts it at rest with the key in webhooks.encryptionKeyFile (Helm: console.webhooks.existingSecret, base64 of 32 random bytes); that key is OPTIONAL at boot, so a console without one answers 503 NAMING the key rather than failing to start. The audit row records name and events ONLY -- never the secret, and never the url (a hook URL routinely embeds a token in its own path).
          */
         post: operations["createWebhook"];
         delete?: never;
@@ -672,7 +691,7 @@ export interface paths {
         put?: never;
         /**
          * Enqueue one signed ping so an operator can verify an endpoint.
-         * @description 202, not 200: delivery is asynchronous with a retry ladder, so the only honest thing this can report is that the work was accepted. The OUTCOME arrives on the endpoint row -- read it back from GET /api/v1/webhooks/{id} as lastStatus/lastAttempt/failures. Signing the ping needs the secret unsealed, so a console with no console.webhooks.encryptionKey answers 503 naming the key.
+         * @description 202, not 200: delivery is asynchronous with a retry ladder, so the only honest thing this can report is that the work was accepted. The OUTCOME arrives on the endpoint row -- read it back from GET /api/v1/webhooks/{id} as lastStatus/lastAttempt/failures. Signing the ping needs the secret unsealed, so a console with no encryption key (webhooks.encryptionKeyFile; Helm: console.webhooks.existingSecret) answers 503 naming the key.
          *
          *     The ping is a WebhookPayload with `event: "test"` and a synthetic incident -- the SAME envelope a real notification uses, so a receiver needs one parser rather than two. Unlike a real notification it ignores both the enabled flag and the event filter: an operator tests an endpoint precisely when they are about to enable it. ONE attempt, no retry ladder.
          */
@@ -752,7 +771,7 @@ export interface paths {
          *
          *     Every adopted rule arrives as kind `raw`, carrying the foreign expression verbatim in `params.expr`, enabled, with `severity` lifted off labels.severity, `for` parsed from the Prometheus duration string (composites like "1h30m" included), and labels/annotations copied verbatim minus the two names the renderer owns (`severity`, which becomes the column, and `kconmon_ng_rule_id`, which the console stamps itself).
          *
-         *     PER-ITEM and NON-TRANSACTIONAL, the POST /api/v1/import precedent: one entry the store refuses does not roll back the entries before it, and the response says which is which. `skipped` is what did NOT become a rule (recording rules, names this store's charset rejects, names already taken, an unreadable `for`); `notes` is what DID become a rule about which the console had to choose something. Zero created with a non-empty `skipped` is still a 200 -- the report IS the result, and no status code could carry it.
+         *     PER-ITEM and NON-TRANSACTIONAL, the POST /api/v1/import precedent: one entry the store refuses does not roll back the entries before it, and the response says which is which. `skipped` is what did NOT become a rule (recording rules, names this store's charset rejects, names already taken, names that become a Prometheus alert name another rule already has, an unreadable `for`); `notes` is what DID become a rule about which the console had to choose something. Zero created with a non-empty `skipped` is still a 200 -- the report IS the result, and no status code could carry it.
          *
          *     Names are used AS IS or not at all: adoption never sanitizes or renames, because a rule stored under a name its author never wrote is a rule they cannot find.
          */
@@ -778,7 +797,7 @@ export interface paths {
          *
          *     The two halves fail independently and are reported differently. A RENDER failure is a 422 -- there is no expression, so there is nothing partial to be honest about. A QUERY failure, or a console with no Prometheus configured at all, is a 200 carrying the rendered expression and an `error` string: the render succeeded, which is the half the builder form is asking about, and refusing the whole request would hide a correct expression behind an unrelated outage.
          *
-         *     Gated on alerts:READ, not alerts:manage -- the mirror image of POST /api/v1/checks/projection's write row. It persists nothing AND asks nothing a reader could not ask directly. It is still a POST and is therefore still audited, with an empty {} detail: its body is a draft that routinely carries a raw expression.
+         *     Gated on alerts:READ, not alerts:manage -- the mirror image of POST /api/v1/checks/projection's write row. It persists nothing, and a templated kind asks nothing a reader could not ask directly. A `raw` kind carries the caller's own PromQL and runs it, so it ALSO needs promql:query, the permission POST /api/v1/promql/query asks: without it the answer is 403 `permission denied` naming promql:query, counted in the authz-denied metric like any other denial. Every built-in role holding alerts:read holds promql:query too. It is still a POST and is therefore still audited, with an empty {} detail: its body is a draft that routinely carries a raw expression.
          */
         post: operations["previewAlertRule"];
         delete?: never;
@@ -895,7 +914,11 @@ export interface paths {
         };
         /**
          * Audit log, newest first.
-         * @description `detail` is whatever the per-route allow-list let through -- {} for almost everything (SECURITY.md, "The audit log's documented lossiness").
+         * @description `detail` is whatever the per-route allow-list let through -- {} for almost everything (SECURITY.md, "The audit log's documented lossiness"). A body the allow-list would describe is recorded as {"truncated": true} instead when it is over 256 KiB, or over the 8 KiB cap of a route that needs no credentials. Text PostgreSQL cannot store (a NUL, invalid UTF-8, an unpaired UTF-16 surrogate escape) is stored as U+FFFD, in the detail and in the text columns. A number PostgreSQL's numeric cannot hold (such as 1e200000) is stored as its literal, a string, and the rest of the detail is kept. A detail that is not JSON at all is stored as {"unstorable": true}, so such a request still leaves its row.
+         *
+         *     OIDC sign-ins are recorded on GET /api/v1/auth/oidc/callback: an allowed row as the identity that signed in (subjectKind user, subjectId oidc:<sub>, with its display name), and an error row with an empty subject for each refused callback.
+         *
+         *     A failed request that carries no credential (a 401 on a protected route, a refused OIDC callback, a failed or rate-limited sign-in) is recorded at most 120 times per minute per client address, an IPv6 client per /64. That is above the default per-address sign-in budget, so every attempt the rate limiter admits is recorded; rows past it are counted in kconmon_ng_console_audit_dropped_total and not stored.
          */
         get: operations["listAuditEntries"];
         put?: never;
@@ -917,13 +940,13 @@ export interface paths {
          * The whole declarative configuration as one versioned bundle. ADMIN only.
          * @description Targets, check definitions, check schedules, alert rules, webhooks (WITHOUT secrets) and maintenance windows, in dependency order. DATA IS NOT INCLUDED: no runs, no results, no events, no incidents, no annotations, no MTR snapshots, no k8s events, no audit rows. A bundle is what an operator DECLARED, so it can be declared again somewhere else.
          *
-         *     NO SECRET EVER LEAVES THROUGH THIS ROUTE. A webhook exports its name, url, events and enabled flag plus a `hasSecret` boolean; the sealed signing key appears in no field, and there is no query parameter, header or role that changes that.
+         *     NO SIGNING SECRET EVER LEAVES THROUGH THIS ROUTE. A webhook exports its name, url, events and enabled flag plus a `hasSecret` boolean; the sealed signing key appears in no field, and there is no query parameter, header or role that changes that. A webhook URL can itself be a credential (a token in its path or query), so the webhooks section goes only to a caller holding `webhooks:manage`.
          *
-         *     ACCESS CONTROL is carried too, but only for a caller who also holds `rbac:manage`: the `rbac` section lists custom roles and every binding (who holds what, and since when). It is OMITTED rather than emptied for a caller with `settings:write` alone, so "absent" and "none defined" stay different facts. Bindings export and never import -- see POST /api/v1/import.
+         *     ACCESS CONTROL is carried too, but only for a caller who also holds `rbac:manage`: the `rbac` section lists custom roles and every binding (who holds what, and since when). Bindings export and never import -- see POST /api/v1/import.
          *
          *     Observation fields are stripped per collection: a schedule loses lastFiredAt/nextFireAt and lastError/lastErrorAt (scheduler bookkeeping and a failure this console saw), an alert rule loses syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster the destination has never talked to) and a webhook loses lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows that have already ENDED are omitted -- a closed window is history.
          *
-         *     Gated on `settings:write`, held by admin alone. One permission for both routes and no read/write split, the `webhooks:manage` posture: an export is every probe address, every webhook URL and every alert expression this console holds, in one file, so there is no audience that should read it without being trusted to write it.
+         *     The route needs `settings:write`, which among the built-in roles only admin holds. Each section also needs the permission its own read route requires: `targets:read` for targets, `checks:read` for check definitions and schedules, `alerts:read` for alert rules, `webhooks:manage` for webhooks, `maintenance:read` for maintenance windows and `rbac:manage` for rbac. A section the caller may not read is OMITTED rather than emptied, so "absent" and "none defined" stay different facts, and the top-level `omitted` array names the withheld sections in bundle order. It is absent when nothing was withheld, as for an admin.
          */
         get: operations["exportConfiguration"];
         put?: never;
@@ -951,11 +974,19 @@ export interface paths {
          *
          *     NOT ONE TRANSACTION. Every item is its own statement and an item that fails is reported and stepped past, so a bundle of 40 definitions with one bad row imports 39 and names the fortieth. The cost is stated plainly: a failed import leaves a partially-merged console, which is what `dryRun` exists for.
          *
+         *     EACH SECTION NEEDS ITS OWN ROUTES' WRITE PERMISSION on top of the route's `settings:write`: `targets:write`, `checks:write`, `schedules:write`, `alerts:manage`, `webhooks:manage`, `maintenance:write`, and `rbac:manage` for custom roles. A non-empty section the caller may not write is skipped and counted, with one warning: `skipped: importing this section requires <permission>, which this caller does not hold; apply it through the section's own routes, or have the permission granted`. The rows this console already holds are read on every path, skipped and absent sections included, so a failed read of the existing targets or definitions answers 502.
+         *
+         *     EACH ITEM MEETS ITS OWN ROUTE'S RULES and fails with that route's reason: a check definition no agent could run, a schedule whose kind cannot run its definition's check, a definition edit that would leave one of its schedules unable to run it (as on PUT /api/v1/checks/{id}), a target edit that would leave a definition on it unable to run, field bounds such as a plane other than `pod`, params over 4096 bytes or an address over 2048 bytes, and an alert rule whose Prometheus alert name another rule already has. As on the PUT routes, a create is always judged for runnability and an update only when it leaves the definition or schedule enabled. A target edit that a bundled rewrite of the affected definition would excuse is still refused when that rewrite is refused itself, by its own rules or by its schedules. A dry run judges all of this against what the bundle would write.
+         *
          *     WEBHOOKS ARE THE ONE ASYMMETRY. A bundle never carries a secret and the store refuses a secret-less endpoint (every delivery is signed), so an endpoint this console does not already have is SKIPPED with a warning naming the remedy -- never created, and never given a fabricated key. An endpoint that DOES exist is updated with its stored ciphertext carried through untouched.
          *
-         *     MAINTENANCE WINDOWS ARE NEVER UPDATED. The store has no update for them by design (a window is two timestamps and a reason; delete-and-recreate is the correction path), so an identical window is skipped.
+         *     MAINTENANCE WINDOWS ARE NEVER UPDATED. The store has no update for them by design (a window is two timestamps and a reason; delete-and-recreate is the correction path), so an identical window is `unchanged`, and one with the same scope and span but another reason is skipped with a warning.
          *
-         *     Audited as ONE row carrying the dryRun flag and the per-collection COUNTS. No item names reach the audit log, and the bundle never does.
+         *     A row that already matches the bundle is counted `unchanged` and not written, on a dry run and on a real import alike.
+         *
+         *     A section absent from the bundle imports as nothing, and `omitted` is ignored, so a partial export re-imports as it stands.
+         *
+         *     Audited as ONE row carrying the dryRun flag and the per-collection COUNTS; a request body over 256 KiB adds `truncated: true`. No item names reach the audit log, and the bundle never does.
          */
         post: operations["importConfiguration"];
         delete?: never;
@@ -996,7 +1027,7 @@ export interface paths {
         put?: never;
         /**
          * Create or replace one custom role.
-         * @description 422 for a name colliding with a built-in (viewer, operator, alert-editor, admin) or for a permission outside the compiled-in list.
+         * @description 400 for a body without a non-empty name or a permissions array. 422 `invalid role` for a name that is blank or whitespace (`role: name must not be empty`), carries a control character or invalid UTF-8, contains "/" (the name is the DELETE route's path segment) or is over 63 bytes; 422 for a name colliding with a built-in (viewer, operator, alert-editor, admin) or for a permission outside the compiled-in list. POST /api/v1/import refuses a bundled role with the same details. 409 in auth.mode=local when dropping users:manage from the role would leave no enabled user who can manage users.
          */
         post: operations["upsertRole"];
         delete?: never;
@@ -1018,7 +1049,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete one custom role; 409 while any binding still references it. */
+        /**
+         * Delete one custom role; 409 while any binding still references it.
+         * @description Also 409 in auth.mode=local when the role is auth.defaultRole and deleting it would leave no enabled user who can manage users.
+         */
         delete: operations["deleteRole"];
         options?: never;
         head?: never;
@@ -1037,7 +1071,7 @@ export interface paths {
         put?: never;
         /**
          * Bind a subject to a role.
-         * @description 422 for a subjectKind outside user/group (token bindings are declared in the schema but resolved by nothing, so storing one would silently grant nothing) or for an unknown role name; 409 on a duplicate.
+         * @description 422 for a subjectKind outside user/group (`subjectKind must be "user" or "group"`: token bindings are declared in the schema but resolved by nothing, so storing one would silently grant nothing) or for an unknown role name, and 502 `failed to read roles` when the role list cannot be read to check it; 409 on a duplicate, and in local mode 409 "last administrator" for a binding that would drop users:manage from its last holder (a user who held it only through auth.defaultRole, which a binding replaces).
          */
         post: operations["createBinding"];
         delete?: never;
@@ -1059,7 +1093,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete one role binding. */
+        /**
+         * Delete one role binding.
+         * @description 409 in auth.mode=local when the binding is what gives the last enabled user who can manage users that permission.
+         */
         delete: operations["deleteBinding"];
         options?: never;
         head?: never;
@@ -1147,12 +1184,16 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a local user; their sessions and API tokens stop working.
+         * @description Removes the user and the role bindings that name them directly, so the username can be used again. Every API token they own, including tokens minted by those tokens, is revoked BEFORE the user is removed; when the token store cannot be written that is 502 `tokens unavailable` and the user is not deleted. Their sessions end at once: a session is checked against the user on every request, and a new account reusing the username does not inherit it. 409 when the user is the last enabled user who can manage users. auth.mode=local only (404 otherwise).
+         */
+        delete: operations["deleteUser"];
         options?: never;
         head?: never;
         /**
          * Disable or enable a user, change their role, or both.
-         * @description 409 when the change would leave no enabled user who can manage users, whether by disabling that user or by a role without users:manage.
+         * @description 409 when the change would leave no enabled user who can manage users, whether by disabling that user or by a role without users:manage. Disabling a user also revokes every API token they own, including tokens minted by those tokens. Re-enabling a disabled user revokes any still-active token first, so tokens must be minted again; when the token store cannot be written that is 502 `tokens unavailable` and the user stays disabled.
          */
         patch: operations["updateUser"];
         trace?: never;
@@ -1208,7 +1249,7 @@ export interface paths {
         put?: never;
         /**
          * Password login; auth.mode=local only.
-         * @description 404 in every other mode, so the UI feature-detects the login affordance instead of hardcoding auth.mode's cases. Unknown user, disabled account and wrong password are indistinguishable by status, body AND timing. On success sets the session and CSRF cookies.
+         * @description 404 in every other mode, so the UI feature-detects the login affordance instead of hardcoding auth.mode's cases. Unknown user, disabled account and wrong password are indistinguishable by status, body AND timing; a username with a control character or invalid UTF-8 is an unknown user. On success sets the session and CSRF cookies. 429 when either sign-in budget is spent; the detail names both without saying which tripped (`limit: console.rateLimit.loginPerMinute per username, and loginPerMinute x 20 per source address, per minute`).
          */
         post: operations["login"];
         delete?: never;
@@ -1266,7 +1307,7 @@ export interface paths {
         };
         /**
          * Redirect to the IdP authorization endpoint; auth.mode=oidc only.
-         * @description Full-page navigation, not fetch. 404 in every other mode.
+         * @description Full-page navigation, not fetch. 404 in every other mode. 429 once one client address spends its sign-in budget (console.rateLimit.loginPerMinute x 20 per minute); behind an Ingress or a NAT that address is the proxy's unless clientAddress.trustedProxyCIDRs (or, while that is empty, auth.header.trustedProxyCIDRs) lists it.
          */
         get: operations["oidcStart"];
         put?: never;
@@ -1286,7 +1327,9 @@ export interface paths {
         };
         /**
          * Consume the IdP redirect, mint a session, redirect to returnTo.
-         * @description Browser-facing, not a JSON endpoint. auth.mode=oidc only; 404 otherwise. returnTo is re-validated after its round trip through the state store, so a corrupted stash can never become an open redirect.
+         * @description Browser-facing, not a JSON endpoint. auth.mode=oidc only; 404 otherwise. The PKCE verifier, returnTo and a 5-minute expiry travel sealed inside `state` (AES-GCM, with a key derived from the OIDC client secret), so the console stores nothing per sign-in until the code exchange succeeds; an expired or already used state is refused before the IdP is asked. returnTo is re-validated after that round trip, so a corrupted state can never become an open redirect. A callback writes an audit row: allowed as the identity that signed in, or error with an empty subject when the callback is refused, at most 120 such rows per client address per minute (see GET /api/v1/audit).
+         *
+         *     429 once one client address spends its callback budget (console.rateLimit.loginPerMinute x 20 per minute, counted apart from /oidc/start's), with the detail `too many sign-in callbacks from this address; retry shortly`; behind an Ingress or a NAT that address is the proxy's unless clientAddress.trustedProxyCIDRs lists it, as on /oidc/start.
          */
         get: operations["oidcCallback"];
         put?: never;
@@ -1301,7 +1344,7 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description RFC 7807 error body. `type` is always "about:blank" so far. */
+        /** @description RFC 7807 error body. `type` is always "about:blank". */
         Problem: {
             type: string;
             title: string;
@@ -1347,7 +1390,7 @@ export interface components {
             prometheus: components["schemas"]["ConfiguredFlag"];
             database: {
                 configured: boolean;
-                /** @description console.database.retentionDays -- how many days of history the pruner keeps; 0 disables pruning. Meaningful only while `configured` is true. */
+                /** @description database.retentionDays -- how many days of history the pruner keeps; 0 disables pruning. Meaningful only while `configured` is true. */
                 retentionDays: number;
             };
             scheduler: {
@@ -1372,7 +1415,7 @@ export interface components {
             labels?: {
                 [key: string]: string;
             };
-            /** @description The feature flags the agent advertised at registration, verbatim. `plane:<protocol>` entries (plane:tcp, plane:udp, plane:icmp, plane:dns, plane:http, plane:mtr) name the probe planes it runs. An agent with NO `plane:` entry at all (older than 2.4.0) must be read as running every plane, never as running none. Live responses only: no event records capabilities, so a historical (`?at=`) response never carries them. */
+            /** @description The feature flags the agent advertised at registration, verbatim. `plane:<protocol>` entries (plane:tcp, plane:udp, plane:icmp, plane:pmtu, plane:dns, plane:http, plane:mtr) name the probe planes it runs. An agent with NO `plane:` entry at all (older than 2.4.0) must be read as running every plane, never as running none. Live responses only: no event records capabilities, so a historical (`?at=`) response never carries them. */
             capabilities?: string[];
         };
         Topology: {
@@ -1421,9 +1464,11 @@ export interface components {
             mtuBytes?: number;
             /**
              * Format: int64
-             * @description pmtu only. The size the source probes at; mtuBytes below it with failRatio 0 is a reduced path.
+             * @description pmtu only. The size the source probes this destination at, from its route to the peer; mtuBytes below it with failRatio 0 is a reduced path.
              */
             probeMtuBytes?: number;
+            /** @description pmtu only. Fail ratio over the last 3m, omitted when no probe landed in that window. 0 while failRatio is above 0 means the recent probes crossed clean (recovering); above 0 on a full-size path is a black hole. */
+            recentFailRatio?: number;
         };
         Matrix: {
             protocol: components["schemas"]["Protocol"];
@@ -1513,7 +1558,7 @@ export interface components {
             destinations: components["schemas"]["MTRDestination"][];
             /** @description Opaque keyset cursor for the following page; absent on the last one. Pass it back as `?cursor=` to continue the walk. The cursor is the PAIR, not `lastSeen`: every repeat trace bumps `lastSeen`, so a cursor over it would let a pair jump above the cursor and be skipped from a page it was never on. Pages therefore arrive ordered by (sourceNode, destination) and the client sorts the assembled set for display. */
             nextCursor?: string;
-            /** @description More pairs exist than this body carries — the same fact `nextCursor` carries, kept for a client that does not page. Pairs are sources x destinations, so a large fleet exceeds any single page. */
+            /** @description More pairs exist than this body carries -- the same fact `nextCursor` carries, kept for a client that does not page. Pairs are sources x destinations, so a large fleet exceeds any single page. */
             truncated?: boolean;
         };
         /** @description One hop of a stored trace. Only `ip` takes part in the dedupe hash; the rest is the payload of the FIRST trace that took this path. */
@@ -1541,7 +1586,10 @@ export interface components {
             geo?: {
                 [key: string]: unknown;
             };
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description The cache clock: the row expires at resolvedAt + mtr.enrichment.ttl. A row whose reverse-DNS lookup failed is stored backdated so it expires 5 minutes after the lookup, so this is not always when the lookup ran.
+             */
             resolvedAt: string;
         };
         /** @description ONE recorded trace of a route: its own clock, its own outcome and its own per-hop readings. */
@@ -1696,7 +1744,7 @@ export interface components {
             incidents: components["schemas"]["Incident"][];
             nextCursor: string;
         };
-        /** @description One declared change window. DATA and RENDERING, never suppression: alert rules are evaluated and paged on, and nothing consults these windows. Declaring one marks the charts and the timeline; it does not silence an alert. */
+        /** @description One declared change window. It marks the charts and the timeline, and while open it holds back the console's alert webhooks in its scope (see GET /api/v1/maintenance). It does not silence Alertmanager. */
         MaintenanceWindow: {
             /** Format: uuid */
             id: string;
@@ -1885,13 +1933,15 @@ export interface components {
             /** @enum {string} */
             status: "kicked";
         };
-        /** @description One PrometheusRule in the console's namespace that the console does not own, projected down to four facts. The raw object is never served. */
+        /** @description One PrometheusRule in the console's namespace that the console does not own, projected down to five facts. The raw object is never served. */
         ForeignRule: {
             name: string;
             /** @description How many entries spec.groups holds. */
             groups: number;
             /** @description Total rule entries across all groups -- alerting and recording alike, because a recording rule is still something an import would have to carry. */
             rules: number;
+            /** @description How many of `rules` are alerting rules: the ones an import copies. Recording rules are skipped by an import, so this, not `rules`, is the number of console rules an import can create. */
+            alertRules: number;
             /** @description app.kubernetes.io/managed-by, or "" when the object carries no such label. */
             managedBy: string;
         };
@@ -2053,7 +2103,7 @@ export interface components {
         K8sEventKind: "Node" | "Pod";
         /** @enum {string} */
         K8sEventType: "Normal" | "Warning";
-        /** @description One captured cluster event, one of the Investigate timeline's sources. */
+        /** @description One captured cluster event, one of the Incidents timeline's sources. */
         K8sEvent: {
             /** @description The row's bigint key rendered as a STRING, because a pinned ref spells every id that way -- pinned is one heterogeneous list across six tables and one spelling beats a per-source type. */
             id: string;
@@ -2082,6 +2132,7 @@ export interface components {
             sources?: string[];
             destinations?: string[];
             type: components["schemas"]["CheckType"];
+            /** @description `pod` or empty, which means pod: agents probe the pod network only. Any other value is 400 `invalid plane`. */
             plane?: string;
             /**
              * Format: int64
@@ -2089,7 +2140,7 @@ export interface components {
              */
             timeoutNs?: number;
             /**
-             * @description node (default) keeps destinations as node names, the pre-M4 contract. target resolves a saved target row (destinationTargetId); adhoc probes destinationAddress. Both external kinds require destinations to be empty.
+             * @description node (default) keeps destinations as node names. target resolves a saved target row (destinationTargetId); adhoc probes destinationAddress. Both external kinds require destinations to be empty.
              * @enum {string}
              */
             destinationKind?: "node" | "target" | "adhoc";
@@ -2098,7 +2149,7 @@ export interface components {
              * @description Required when destinationKind is target.
              */
             destinationTargetId?: string;
-            /** @description Required when destinationKind is adhoc. */
+            /** @description Required when destinationKind is adhoc; at most 2048 bytes. */
             destinationAddress?: string;
             /**
              * Format: int64
@@ -2111,7 +2162,7 @@ export interface components {
              * Format: int64
              * @description Optional. The cadence between one pair's probes, in nanoseconds. Absent or 0 keeps the derived behaviour above, byte-identical to every run made before this field existed.
              *     Bounded to 1s..durationNs and refused with 422 naming the bound outside it, the same way an out-of-range durationNs is; naming a cadence without a durationNs is refused for the same reason, since an instant run has no cadence to dial.
-             *     A cadence the fan-out cannot KEEP is a different matter and is never refused. Asking an mtr run for 1s is not a mistake in the request, it is a fact about traceroute - a trace walks up to thirty hops in sequence - so the run is planned around it and the response reports requested and effective separately (see sampleIntervalAdjusted). The 500-samples-per-pair cap is the hard ceiling either way and binds the same way, also reported rather than silently applied.
+             *     A cadence the fan-out cannot KEEP is a different matter and is never refused. Asking an mtr run for 1s is not a mistake in the request, it is a fact about traceroute - a trace walks up to thirty hops in sequence - so the run is planned around it and the response reports requested and effective separately (see sampleIntervalAdjusted). A pmtu run is planned the same way around its per-pair timeout, since over a black hole the search waits out a deadline per lost datagram. The 500-samples-per-pair cap is the hard ceiling either way and binds the same way, also reported rather than silently applied.
              */
             sampleIntervalNs?: number;
         };
@@ -2300,7 +2351,9 @@ export interface components {
             /** @description Required when destinationKind is adhoc, and validated against what an agent can actually dial: a DNS name, an IP literal (bracketed for IPv6), either of those with a `:port` suffix in 1-65535, or an http(s) URL with a host. Anything else is 422 -- the agent resolves and dials this string verbatim, so a value it cannot parse would be stored, pushed to every assigned agent and refused there once per interval, forever. Whether the resolved address is PERMITTED is a separate question, answered per probe by the agent's own allowlist. */
             destinationAddress?: string;
             checkType: components["schemas"]["CheckType"];
+            /** @description Must be `pod`: agents probe the pod network only. Anything else is 422 `invalid check definition`. */
             plane: string;
+            /** @description At most 4096 bytes as sent; more is 422 `invalid check definition`. */
             params?: {
                 [key: string]: unknown;
             };
@@ -2397,7 +2450,7 @@ export interface components {
             /** @enum {string} */
             outcome: "allowed" | "denied" | "error";
             remoteAddr: string;
-            /** @description Whatever the per-route allow-list let through; {} for almost everything. */
+            /** @description Whatever the per-route allow-list let through; {} for almost everything, {"truncated": true} for a body too large to describe, {"unstorable": true} for a detail PostgreSQL could not store. */
             detail: {
                 [key: string]: unknown;
             };
@@ -2579,7 +2632,7 @@ export interface components {
             enabled: boolean;
             renderedExpr: string;
         };
-        /** @description The whole declarative configuration, versioned. Collections are in DEPENDENCY ORDER and the importer walks them in exactly this order. */
+        /** @description The whole declarative configuration, versioned. Collections are in DEPENDENCY ORDER and the importer walks them in exactly this order. A section is present only for a caller holding its read permission (see GET /api/v1/export) and is absent, not [], otherwise. */
         ConfigBundle: {
             /**
              * @description Checked for EQUALITY on import. A bundle from a future console may describe collections this build has never heard of, and importing the recognised subset would be a partial restore presented as a complete one.
@@ -2588,16 +2641,18 @@ export interface components {
             version: 1;
             /** Format: date-time */
             exportedAt: string;
-            targets: components["schemas"]["Target"][];
-            checkDefinitions: components["schemas"]["CheckDefinition"][];
-            checkSchedules: components["schemas"]["ExportedSchedule"][];
-            alertRules: components["schemas"]["ExportedAlertRule"][];
-            webhooks: components["schemas"]["ExportedWebhook"][];
-            maintenanceWindows: components["schemas"]["MaintenanceWindow"][];
+            targets?: components["schemas"]["Target"][];
+            checkDefinitions?: components["schemas"]["CheckDefinition"][];
+            checkSchedules?: components["schemas"]["ExportedSchedule"][];
+            alertRules?: components["schemas"]["ExportedAlertRule"][];
+            webhooks?: components["schemas"]["ExportedWebhook"][];
+            maintenanceWindows?: components["schemas"]["MaintenanceWindow"][];
             rbac?: components["schemas"]["ConfigBundleRBAC"];
+            /** @description Sections withheld from this caller, in bundle order; absent when nothing was withheld. Ignored on import. */
+            omitted?: ("targets" | "checkDefinitions" | "checkSchedules" | "alertRules" | "webhooks" | "maintenanceWindows" | "rbac")[];
         };
         /**
-         * @description The access-control section. PRESENT ONLY when the caller holds `rbac:manage`: everything else in the bundle needs `settings:write`, and a grant list is strictly more sensitive than a target list -- it names people and says what they can do. Absent and empty are therefore different facts, which is why the field is omitted rather than nulled.
+         * @description The access-control section. PRESENT ONLY when the caller holds `rbac:manage`, as every other section needs its own read permission: a grant list names people and says what they can do. Absent and empty are therefore different facts, which is why the field is omitted rather than nulled.
          *
          *     Roles are custom roles ONLY. The built-ins (viewer, operator, alert-editor, admin) are compiled in, identical on every build, and a bundle claiming to define one would be claiming to redefine it.
          *
@@ -2634,10 +2689,12 @@ export interface components {
             name: string;
             reason: string;
         };
-        /** @description One collection's outcome. The three counters are disjoint and every bundle item lands in exactly one of them or in `errors`. An ERROR is an item that did not import and that the operator can fix in the bundle; a WARNING is an item handled correctly whose outcome still needs a human (today: the secret-less webhook). */
+        /** @description One collection's outcome. The four counters are disjoint and every bundle item lands in exactly one of them or in `errors`. An ERROR is an item that did not import and that the operator can fix in the bundle; a WARNING is an item handled correctly whose outcome still needs a human: a secret-less webhook, a section this caller may not write, a built-in role, a maintenance window that exists here with another reason. The role bindings of a bundle are never imported and carry ONE warning for the whole section. */
         ConfigImportCollectionResult: {
             created: number;
             updated: number;
+            /** @description Rows this console already holds exactly as the bundle has them; nothing is written for them. Re-importing the bundle this console just exported reports every row here. */
+            unchanged: number;
             skipped: number;
             errors: components["schemas"]["ConfigImportItemNote"][];
             warnings: components["schemas"]["ConfigImportItemNote"][];
@@ -2663,7 +2720,7 @@ export interface components {
             };
             content?: never;
         };
-        /** @description Malformed request -- unparseable body, bad filter value, or a broken cursor. */
+        /** @description Malformed request -- unparseable body, bad filter value, or a broken cursor. A query parameter with a control character or invalid UTF-8 (%00, %FF) is a 400 with detail "<field> must be valid UTF-8 without control characters", and a request path with either is a 400 "invalid path" before any handler runs. */
         BadRequest: {
             headers: {
                 [name: string]: unknown;
@@ -2683,7 +2740,7 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description Authenticated but missing the permission this route requires, or a cookie-authenticated mutation without a valid CSRF double-submit pair. */
+        /** @description Authenticated but missing the permission this route requires, or a cookie-authenticated mutation without a valid CSRF double-submit pair. The CSRF refusal's detail says what to send: echo the csrf cookie's value in the X-CSRF-Token header; the cookie is set at sign-in, or in header mode on the first authenticated GET. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -2710,7 +2767,7 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description Prometheus rule sync is not running on this console, so the routes that need the CLUSTER refuse. This is a 409 and not a 503 on purpose, and it is the one place in this API where the two come apart: 503 always means "the dependency this route reads from is not configured", and here the database is fine, every rule is right where it was, and the whole CRUD surface keeps working. What is off is the sync loop -- an opt-in feature (console.alerting.enabled, default false). Answering 503 would send an operator looking at their database for a reconciler that was never asked to start. */
+        /** @description Prometheus rule sync is not running on this console, so the routes that need the CLUSTER refuse. This is a 409 and not a 503 on purpose, and it is the one place in this API where the two come apart: 503 always means "the dependency this route reads from is not configured", and here the database is fine, every rule is right where it was, and the whole CRUD surface keeps working. What is off is the sync loop -- an opt-in feature (`alerting.enabled` in the console config, Helm `console.alerting.enabled`, default false), which the detail names. Answering 503 would send an operator looking at their database for a reconciler that was never asked to start. */
         AlertingDisabled: {
             headers: {
                 [name: string]: unknown;
@@ -2755,7 +2812,7 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description The dependency this route needs is not configured. The detail names the config value that enables it. */
+        /** @description The dependency this route needs is not configured. The detail names the config value that enables it. Any route can also answer 503 `authentication unavailable`, with Retry-After, when a credential was presented but the session, user or token store could not be read: the credential is not known to be bad, so this is not a 401 and the caller should retry, not sign in again. */
         Unavailable: {
             headers: {
                 [name: string]: unknown;
@@ -2766,9 +2823,9 @@ export interface components {
         };
     };
     parameters: {
-        /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+        /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
         Limit: number;
-        /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+        /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
         Cursor: string;
         /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
         PathID: string;
@@ -2853,7 +2910,7 @@ export interface operations {
             query?: {
                 /** @description Probe protocol. Anything outside the enum is 400. */
                 protocol?: components["schemas"]["Protocol"];
-                /** @description Only "pod" exists so far; anything else is 400. */
+                /** @description Only "pod" exists: agents probe the pod network only. Anything else is 400 `unsupported plane`, with a detail that states that rule (plane must be "pod"). */
                 plane?: "pod";
             };
             header?: never;
@@ -2890,9 +2947,9 @@ export interface operations {
                 /** @description RFC3339. Must precede `to`. */
                 from?: string;
                 to?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -2944,6 +3001,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
+            429: components["responses"]["TooManyRequests"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -2974,6 +3032,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
+            429: components["responses"]["TooManyRequests"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -2983,9 +3042,9 @@ export interface operations {
             query?: {
                 type?: components["schemas"]["CheckType"];
                 status?: components["schemas"]["RunStatus"];
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3039,6 +3098,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
             429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -3140,9 +3200,9 @@ export interface operations {
         parameters: {
             query?: {
                 kind?: components["schemas"]["TargetKind"];
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3287,11 +3347,11 @@ export interface operations {
             query?: {
                 /** @description Must be a UUID; a typo is 400, never 502. */
                 targetId?: string;
-                /** @description Anything other than "true"/"false" is treated as unset. */
+                /** @description Anything other than "true"/"false" is treated as unset; a control character or invalid UTF-8 is 400. */
                 enabled?: boolean;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3466,9 +3526,9 @@ export interface operations {
             query?: {
                 /** @description Must be a UUID; a typo is 400, never 502. */
                 definitionId?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3610,9 +3670,9 @@ export interface operations {
     listMTRDestinations: {
         parameters: {
             query?: {
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3644,9 +3704,9 @@ export interface operations {
                 source: string;
                 /** @description Destination node or target NAME, never an address; exact match. */
                 destination: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3675,7 +3735,7 @@ export interface operations {
     getPathSnapshot: {
         parameters: {
             query?: {
-                /** @description Only the exact value "true" turns the hop enrichment lookup on. */
+                /** @description Only the exact value "true" turns the hop enrichment lookup on; a control character or invalid UTF-8 is 400. */
                 enrich?: boolean;
             };
             header?: never;
@@ -3706,9 +3766,9 @@ export interface operations {
     listPathTraces: {
         parameters: {
             query?: {
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3729,6 +3789,7 @@ export interface operations {
                     "application/json": components["schemas"]["PathTraceList"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -3745,9 +3806,9 @@ export interface operations {
                 to?: string;
                 /** @description THREE states. Absent means every scope; present-but-empty (`?scope=`) means the GLOBAL ones only, because "" is a real scope value here; any other value is an exact match. */
                 scope?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3835,9 +3896,9 @@ export interface operations {
                 from?: string;
                 /** @description RFC3339, exclusive; absent means unbounded on this side. */
                 to?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -3985,9 +4046,9 @@ export interface operations {
                 from?: string;
                 /** @description RFC3339, exclusive; absent means unbounded on this side. */
                 to?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -4117,7 +4178,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
             502: components["responses"]["BadGateway"];
-            /** @description No database (database.existingSecret) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            /** @description No database (database.existingSecret) or no encryption key (webhooks.encryptionKeyFile in the console config; Helm: console.webhooks.existingSecret). The detail names which. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -4233,7 +4294,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             502: components["responses"]["BadGateway"];
-            /** @description No database (database.existingSecret) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            /** @description No database (database.existingSecret) or no encryption key (webhooks.encryptionKeyFile in the console config; Helm: console.webhooks.existingSecret). The detail names which. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -4295,7 +4356,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. */
+            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. A name that becomes the Prometheus alert name another rule already has ('pair-loss', 'pair.loss' and 'PairLoss' all become PairLoss) is a 422 too, with a detail naming both rules. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4414,6 +4475,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            429: components["responses"]["TooManyRequests"];
         };
     };
     getAlertRule: {
@@ -4473,7 +4535,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. */
+            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. A rename to a name that becomes the Prometheus alert name another rule already has is a 422 too, as on create; an update that keeps the rule's alert name is not checked, so a clash stored by an older version can still be edited, disabled or renamed away. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4575,9 +4637,9 @@ export interface operations {
                 from?: string;
                 /** @description RFC3339, exclusive; absent means unbounded on this side. */
                 to?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -4607,9 +4669,9 @@ export interface operations {
             query?: {
                 subjectKind?: components["schemas"]["SubjectKind"];
                 subjectId?: string;
-                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset; a control character or invalid UTF-8 is 400, as in every other parameter. */
                 limit?: components["parameters"]["Limit"];
-                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400; so is a cursor whose decoded fields carry a NUL or invalid UTF-8 ("invalid cursor"). */
                 cursor?: components["parameters"]["Cursor"];
             };
             header?: never;
@@ -4767,6 +4829,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             422: components["responses"]["UnprocessableEntity"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
@@ -4865,6 +4928,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -5003,6 +5067,27 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     updateUser: {
         parameters: {
             query?: never;
@@ -5108,7 +5193,25 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            /** @description Cross-origin login refused (Sec-Fetch-Site or Origin names another site). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             404: components["responses"]["NotFound"];
+            /** @description A body sent with a Content-Type other than application/json. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
@@ -5160,6 +5263,15 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description The body was not sent as application/json. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
             502: components["responses"]["BadGateway"];
@@ -5189,6 +5301,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -5204,7 +5317,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Session minted; redirect to the stashed returnTo. */
+            /** @description Session minted; redirect to the returnTo sealed in `state`. */
             302: {
                 headers: {
                     /** @description Same-origin relative path. */
@@ -5217,6 +5330,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
         };
     };

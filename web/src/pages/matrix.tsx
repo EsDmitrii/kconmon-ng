@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
-import { externalByNode, runsPlane, unscrapedExternalNodes } from "@/lib/agents";
+import { externalByNode, runsPlane, unscrapedExternalNodes, type Plane } from "@/lib/agents";
 import { stampFull, useLocale, useT } from "@/lib/i18n";
 import { matrixDict, type MatrixKey } from "@/lib/i18n/dict/matrix";
 /* The docs-link wording is components/page-help.tsx's, worded once in dict/shared.ts. */
@@ -29,6 +29,7 @@ import {
   type CellTier,
 } from "@/lib/matrix-cells";
 import { isPlanExcluded, readProbePlan } from "@/lib/matrix-plan";
+import { compareNaturalName } from "@/lib/natural-name";
 import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/lib/protocol-param";
 import {
   MAX_ZOOM,
@@ -36,8 +37,10 @@ import {
   cellDensity,
   elideForHeaders,
   fitScale,
+  headerLabel,
   heightBudget,
   gridMetrics,
+  gridHeight,
   gridWidth,
   sharedNamePrefix,
   zoomStep,
@@ -137,7 +140,7 @@ export function measuredCells(cells: unknown): MatrixCell[] {
   const out: MatrixCell[] = [];
   for (const c of cells) {
     if (!c || typeof c !== "object") continue;
-    const { source, destination, failRatio, rttP95, lossRatio, mtuBytes, probeMtuBytes } = c as Record<string, unknown>;
+    const { source, destination, failRatio, rttP95, lossRatio, mtuBytes, probeMtuBytes, recentFailRatio } = c as Record<string, unknown>;
     if (typeof source !== "string" || typeof destination !== "string") continue;
     out.push({
       source,
@@ -147,6 +150,7 @@ export function measuredCells(cells: unknown): MatrixCell[] {
       lossRatio: measured(lossRatio),
       mtuBytes: measured(mtuBytes),
       probeMtuBytes: measured(probeMtuBytes),
+      recentFailRatio: measured(recentFailRatio),
     });
   }
   return out;
@@ -168,6 +172,25 @@ export function gridNodes(nodes: unknown): string[] {
     out.push(n);
   }
   return out;
+}
+
+/**
+ * fleetWithoutPlane names every agent's node when EVERY agent advertised its planes and left
+ * `plane` out, and is empty otherwise. Matrix nodes come from Prometheus series, so a plane
+ * switched off fleet-wide leaves no nodes at all and would otherwise read as "no data yet".
+ */
+export function fleetWithoutPlane(agents: unknown, plane: Plane): string[] {
+  if (!Array.isArray(agents)) return [];
+  const names = new Set<string>();
+  for (const raw of agents as unknown[]) {
+    if (!raw || typeof raw !== "object") continue;
+    const agent = raw as TopologyAgent;
+    const name: unknown = agent.nodeName;
+    if (typeof name !== "string" || name === "") continue;
+    if (runsPlane(agent, plane)) return [];
+    names.add(name);
+  }
+  return [...names].sort(compareNaturalName);
 }
 
 /* The reading itself lives in lib/matrix-cells.ts, shared with Overview, the object cards and the topology edges. */
@@ -192,15 +215,15 @@ const TIER_RAIL: Record<Tier, string> = {
 
 /* A TILE is a swatch, not a card: at 19px the 3px rail was most of what a cell
    drew, so a zoomed-out grid read as a column of green ticks over grey. The
-   tile takes the tier's soft fill instead, healthy included — the heat map is
-   the one place an all-green grid is meant to look green. rounded-xs, not
+   tile takes the tier's tile fill (index.css --health-*-tile): warn and bad hold
+   3:1 against the page, and a healthy tile stays quiet. rounded-xs, not
    rounded-sm: the theme's sm radius is 8px (index.css), which on a 38×19 box
    is a capsule; xs is the 2px that makes it read as a tile. */
 const TILE_FILL: Record<Tier, string> = {
-  ok: "bg-health-ok-soft",
-  warn: "bg-health-warn-soft",
-  bad: "bg-health-bad-soft",
-  unknown: "bg-health-unknown-soft",
+  ok: "bg-health-ok-tile",
+  warn: "bg-health-warn-tile",
+  bad: "bg-health-bad-tile",
+  unknown: "bg-health-unknown-tile",
 };
 
 /* Tailwind only sees literal class names, so the legend dots use an explicit
@@ -234,8 +257,8 @@ const HEADER_CELL =
 
 /**
  * NodeLabel is a row/column header, and headers were the grid's dead end: every
- * CELL opened its pair card while the two names framing it opened nothing (QA
- * scope 2, finding #14). The link is the whole label, so the target keeps its
+ * CELL opened its pair card while the two names framing it opened nothing. The
+ * link is the whole label, so the target keeps its
  * hit area, and it lands on the same /nodes/{name} route the topology map's own
  * boxes navigate to.
  *
@@ -248,11 +271,16 @@ function NodeLabel({
   name,
   width,
   elide = "",
+  boxWidth,
+  fontSize,
   external = false,
 }: {
   name: string;
   width: "column" | "label";
   elide?: string;
+  /** The header box's width and type size at this zoom (gridMetrics), which decide whether the leading "…" fits. */
+  boxWidth: number;
+  fontSize: number;
   /** A bare-host agent (lib/agents.ts's external label): the tooltip and the aria say so, the link does not change. */
   external?: boolean;
 }) {
@@ -262,10 +290,10 @@ function NodeLabel({
      the live console read "kconmon-pro…", so one of the grid's two axes carried no information at
      all. The shared prefix is dropped here and named once above the grid; the whole name stays in
      the tooltip and in the accessible name, which is where it was read from anyway. */
-  const shown = elide && name.startsWith(elide) && name.length > elide.length ? `…${name.slice(elide.length)}` : name;
-  /* A name that lost its prefix already opens with an ellipsis. If it STILL overflows the box,
-     text-overflow would hang a second one on the end ("…control-pla…"), so that label clips at
-     the edge instead; the whole name is one hover away either way. */
+  const shown = headerLabel(name, elide, boxWidth, fontSize);
+  /* What is left after the prefix differs at its END (worker, worker2), so a label that still
+     overflows clips from its start: the box runs right to left, the <bdi> keeps the text left to
+     right, and the ellipsis lands where the cut is. */
   const elided = shown !== name;
   return (
     <Tooltip
@@ -287,12 +315,12 @@ function NodeLabel({
           /* font-mono, not .mono-data: the data face at the size the zoom engine
              picked — .mono-data pins 13px and would stop labels scaling. */
           "block rounded px-1 font-mono hover:text-foreground hover:underline",
-          elided ? "overflow-hidden whitespace-nowrap" : "truncate",
+          elided ? "overflow-hidden text-ellipsis whitespace-nowrap text-left [direction:rtl]" : "truncate",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           width === "column" ? "max-w-[var(--m-col-w)]" : "max-w-[var(--m-label-w)]",
         )}
       >
-        {shown}
+        {elided ? <bdi>{shown}</bdi> : shown}
       </a>
     </Tooltip>
   );
@@ -338,7 +366,7 @@ function GridCellImpl({
   /* MEASURED, not "has a failure ratio". The fail-ratio series is lazy — a
      pair that has never failed emits no sample at all — so on a healthy fleet
      `fail === null` is the normal state of a cell that is full of latency
-     data. Reading it as absence blanked the whole grid (QA round 2, #1). */
+     data. Reading it as absence blanked the whole grid. */
   const tier = cellTier(cell);
   const measured = isMeasured(cell);
   const fail = cell?.failRatio ?? null;
@@ -365,8 +393,8 @@ function GridCellImpl({
           "group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           "hover:bg-accent hover:text-accent-foreground",
           /* The DRAWN control is a 12px glyph in a 16px box, which is a target
-             a trackpad hits by luck and a touch screen does not hit at all (QA
-             scope 3, finding #19). The pseudo-element takes it to 40×40 without
+             a trackpad hits by luck and a touch screen does not hit at all. The
+             pseudo-element takes it to 40×40 without
              moving a pixel of what is painted: -inset-3 is 12px on each side of
              the 16px box. It is deliberately a pseudo rather than padding —
              padding would push the glyph off the cell's top-right corner, and
@@ -520,15 +548,16 @@ function GridCellImpl({
                     ? t("cell.mtuBlackhole")
                     : pmtuReading(cell) === "reduced"
                       ? t("cell.mtuReduced", { probe: String(cell.probeMtuBytes) })
-                      : t("cell.mtuFull")}
+                      : pmtuReading(cell) === "recovering"
+                        ? t("cell.mtuRecovering")
+                        : t("cell.mtuFull")}
                 </span>
               ) : null}
             </>
           ) : !measured ? (
             /* The em-dash is reserved for a cell nothing measured. A cell with
                a p95 and no failure series shows its p95 as the hero figure —
-               throwing away the one number it has and drawing a dash over it
-               was the whole of finding #1. */
+               a dash would throw away the one number it has. */
             <span className="text-[length:var(--m-font-sub)] text-muted-foreground">—</span>
           ) : fail === null ? (
             <>
@@ -615,7 +644,7 @@ export function MatrixPage() {
     if (fixed) writeProtocol(fixed);
   }, []);
   const { at } = useTimeContext();
-  const { data, isPending, error, live } = useMatrix(protocol);
+  const { data, isPending, error, live, connecting } = useMatrix(protocol);
 
   /* The probe plan rides the topology snapshot, not the matrix payload: null (full mesh, a
      historical instant, an unreadable field, or a topology fetch that failed outright) renders
@@ -625,7 +654,10 @@ export function MatrixPage() {
 
   /* Everything below reads `nodes` and `byPair`, never data.nodes/data.cells:
      the payload is accepted through the two gates above exactly once. */
-  const nodes = useMemo(() => gridNodes(data?.nodes), [data]);
+  const nodes = useMemo(() => {
+    const fromSeries = gridNodes(data?.nodes);
+    return fromSeries.length > 0 || !data ? fromSeries : fleetWithoutPlane(topology.data?.agents, protocol);
+  }, [data, topology.data, protocol]);
   const namePrefix = useMemo(() => sharedNamePrefix(nodes), [nodes]);
   const byPair = useMemo(() => {
     const m = new Map<string, MatrixCell>();
@@ -709,17 +741,23 @@ export function MatrixPage() {
   /* The elision is decided PER AXIS and PER SCALE: the two boxes are different widths and carry
      different type sizes, so a name can fit the row labels and not the column headers. Zooming in
      therefore gives the names back instead of leaving the axis reading "…01". */
+  const metrics = useMemo(() => gridMetrics(scale), [scale]);
   const columnElide = useMemo(
-    () => elideForHeaders(nodes, namePrefix, gridMetrics(scale).columnWidth, gridMetrics(scale).fontLabel),
-    [nodes, namePrefix, scale],
+    () => elideForHeaders(nodes, namePrefix, metrics.columnWidth, metrics.fontLabel),
+    [nodes, namePrefix, metrics],
   );
   const labelElide = useMemo(
-    () => elideForHeaders(nodes, namePrefix, gridMetrics(scale).labelWidth, gridMetrics(scale).fontLabel),
-    [nodes, namePrefix, scale],
+    () => elideForHeaders(nodes, namePrefix, metrics.labelWidth, metrics.fontLabel),
+    [nodes, namePrefix, metrics],
   );
 
   const vars = useMemo(
-    () => ({ ...gridMetrics(scale).vars, "--m-grid-w": `${gridWidth(nodeCount, scale)}px` }) as CSSProperties,
+    () =>
+      ({
+        ...gridMetrics(scale).vars,
+        "--m-grid-w": `${gridWidth(nodeCount, scale)}px`,
+        "--m-grid-h": `${gridHeight(nodeCount, scale)}px`,
+      }) as CSSProperties,
     [scale, nodeCount],
   );
 
@@ -730,8 +768,8 @@ export function MatrixPage() {
     const measure = () => {
       setAvailable(el.clientWidth);
       /* The height BUDGET, not the height the content happens to have made.
-         The viewport is `max-h-[...] min-h-64`, so clientHeight is what the grid already drew,
-         bounded below by the min — and feeding that back into fitScale is circular: a fresh render
+         The viewport is `max-h-[...]` with a 16rem floor, so clientHeight is what the grid already
+         drew, bounded below by the floor — and feeding that back into fitScale is circular: a fresh render
          measures the 256px min, decides a seven-node grid does not fit, drops to 50%, and the
          smaller grid keeps the box at 256px forever. Every fleet opened at half size on a screen
          with room to spare. The resolved max-height is the space actually available; clientHeight
@@ -803,8 +841,9 @@ export function MatrixPage() {
           {/* How fresh the grid actually is — pushed, or up to 15s of polling
               behind. Both states carry a label, never colour alone. Engaged the
               question is moot (the grid is pinned to an instant on purpose) and
-              a "delayed" badge would read as a fault, so it is not shown. */}
-          {at ? null : <RealtimeBadge realtime={live} />}
+              a "delayed" badge would read as a fault, so it is not shown. Nor is
+              a socket still being dialled "delayed": the badge waits for its first answer. */}
+          {at || connecting ? null : <RealtimeBadge realtime={live} />}
         </>
       }
     >
@@ -816,7 +855,7 @@ export function MatrixPage() {
       ) : null}
 
       {/* No Card around the working surface: the tool variant runs the grid
-          edge to edge, and the shell never supplied a box of its own (M4-5). */}
+          edge to edge, and the shell never supplied a box of its own. */}
       <>
         {/* isPending: a paused retry is pending-but-not-fetching, and drawing nothing at all left
             the card as a heading with no skeleton, no error and no empty note. */}
@@ -896,7 +935,7 @@ export function MatrixPage() {
             {/* Only while an axis IS eliding: at a scale where both boxes hold the whole name the
                 note described something the grid was no longer doing. */}
             {columnElide || labelElide ? (
-              <p className="px-1 pb-1 text-xs text-muted-foreground">
+              <p className="pb-1 text-xs text-muted-foreground">
                 {t("grid.prefix", { prefix: columnElide || labelElide })}
               </p>
             ) : null}
@@ -905,7 +944,7 @@ export function MatrixPage() {
                 the grid rather than fifty times in tooltips; gone the moment one of them has a
                 cell of its own, which is the proof the scrape job landed. */}
             {unscrapedList.length > 0 ? (
-              <p data-testid="matrix-unscraped-note" className="max-w-prose px-1 pb-1 text-xs leading-relaxed text-muted-foreground">
+              <p data-testid="matrix-unscraped-note" className="max-w-prose pb-1 text-xs leading-relaxed text-muted-foreground">
                 {t(unscrapedList.length === 1 ? "note.unscraped.one" : "note.unscraped.many", {
                   nodes: unscrapedList.join(", "),
                 })}{" "}
@@ -915,19 +954,22 @@ export function MatrixPage() {
 
             {/* overflow-auto on BOTH axes and a bounded height: that is what
                 makes the sticky headers below stick to something, and what the
-                grid pans inside once it is at the floor and still too wide. */}
+                grid pans inside once it is at the floor and still too wide. The
+                16rem floor keeps a short window usable, but never outgrows the grid. */}
             <div
               ref={viewportRef}
               data-testid="matrix-viewport"
               style={vars}
-              className="max-h-[calc(100dvh-18rem)] min-h-64 overflow-auto rounded-md"
+              className="max-h-[calc(100dvh-18rem)] min-h-[min(16rem,var(--m-grid-h))] overflow-auto rounded-md"
             >
               {/* table-fixed with an explicit width: the browser stops measuring
                   2 500 cells to decide a column, and the width is the same
                   number lib/matrix-zoom.ts fitted against. */}
               <table className="w-[var(--m-grid-w)] table-fixed border-separate border-spacing-0">
                 <caption className="sr-only">
-                  {t("grid.caption", { protocol: protocol.toUpperCase() })}
+                  {protocol === "pmtu"
+                    ? t("grid.caption.pmtu")
+                    : t("grid.caption", { protocol: protocol.toUpperCase() })}
                 </caption>
                 <thead>
                   <tr>
@@ -936,7 +978,14 @@ export function MatrixPage() {
                     </th>
                     {nodes.map((n) => (
                       <th key={n} className={cn(HEADER_CELL, "top-0 w-[var(--m-col-w)]")} scope="col">
-                        <NodeLabel name={n} width="column" elide={columnElide} external={external.has(n)} />
+                        <NodeLabel
+                          name={n}
+                          width="column"
+                          elide={columnElide}
+                          boxWidth={metrics.columnWidth}
+                          fontSize={metrics.fontLabel}
+                          external={external.has(n)}
+                        />
                       </th>
                     ))}
                   </tr>
@@ -948,7 +997,14 @@ export function MatrixPage() {
                         {/* The ROW axis carries the same prefix as the column axis, and at a narrow
                             viewport the label column is 88px — every row read "kconmon-prod-…".
                             Same elision, same note above the grid. */}
-                        <NodeLabel name={src} width="label" elide={labelElide} external={external.has(src)} />
+                        <NodeLabel
+                          name={src}
+                          width="label"
+                          elide={labelElide}
+                          boxWidth={metrics.labelWidth}
+                          fontSize={metrics.fontLabel}
+                          external={external.has(src)}
+                        />
                       </th>
                       {nodes.map((dst) => (
                         <GridCell
@@ -975,7 +1031,7 @@ export function MatrixPage() {
                       aria-hidden="true"
                       className={cn("size-2.5 rounded-full", TIER_DOT[tier])}
                     />
-                    {t(key)}
+                    {t(protocol === "pmtu" && tier !== "unknown" ? (`${key}.pmtu` as MatrixKey) : key)}
                   </span>
                 ))}
                 {/* Only while a sparse plan is in force: in full mode the state cannot occur, and

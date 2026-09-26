@@ -1,9 +1,12 @@
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
 import { TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-control";
 import { useAuth } from "@/hooks/use-auth";
+import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { getIncidents } from "@/lib/api";
 import {
   buildRegistry,
   commandTitle,
@@ -18,9 +21,14 @@ import {
 import { useLocale, useT } from "@/lib/i18n";
 import { paletteDict } from "@/lib/i18n/dict/palette";
 import { useTimeMachine, useWritesDisabled } from "@/lib/timemachine";
+import type { Incident } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** This component owns keys, focus and paint only. */
+
+/* The newest saved incidents the palette searches: one server page, read when the palette opens. */
+const PALETTE_INCIDENTS = 200;
+const NO_INCIDENTS: readonly Incident[] = [];
 
 const LIST_ID = "command-palette-list";
 const optionId = (i: number) => `command-palette-option-${i}`;
@@ -65,13 +73,25 @@ export function CommandPalette() {
     el?.click();
   }, []);
 
+  /* Saved incidents join the results once something is typed. Read only while the palette is open,
+     and only where they exist and may be read. */
+  const { available: dbAvailable } = useDatabaseAvailable();
+  const incidentsQuery = useQuery({
+    queryKey: ["incidents", "palette"],
+    queryFn: () => getIncidents({ limit: PALETTE_INCIDENTS }),
+    enabled: open && dbAvailable && can("incidents:read"),
+    staleTime: 30_000,
+  });
+  const incidents = query.trim() === "" ? NO_INCIDENTS : (incidentsQuery.data?.incidents ?? NO_INCIDENTS);
+
   const ctx = React.useMemo<CommandContext>(
     () => ({
       can,
       writesDisabled,
       // TanStack owns navigation, and `navigate` drops `?at=` exactly the way a <Link> does; the
-      // Time Machine CONTEXT survives the move, so the destination still renders at `t`.
-      navigate: (path: string) => void navigate({ to: path }),
+      // Time Machine CONTEXT survives the move, so the destination still renders at `t`. `href`, not
+      // `to`: an incident's permalink carries its id in the query string.
+      navigate: (path: string) => void navigate({ href: path }),
       theme,
       toggleTheme: toggle,
       isLive,
@@ -86,8 +106,8 @@ export function CommandPalette() {
   );
 
   const results = React.useMemo(
-    () => searchCommands(query, buildRegistry(ctx), locale),
-    [query, ctx, locale],
+    () => searchCommands(query, buildRegistry(ctx, incidents), locale),
+    [query, ctx, locale, incidents],
   );
 
   /* One pass builds both the rendered sections and the FLAT order the arrow
@@ -129,8 +149,8 @@ export function CommandPalette() {
       setActiveIndex(0);
       /* Whether THIS page has a Time Machine trigger to click, asked once at
          open time. The control is opt-in per page (components/page-shell.tsx),
-         so on Targets, Alerting and Settings the picker command had nothing to
-         click and answered a keystroke with nothing at all (owner report). */
+         so on Targets, Alerting and Settings the picker command would have
+         nothing to click and answer a keystroke with nothing at all. */
       setHasPicker(document.querySelector(TIME_MACHINE_TRIGGER_SELECTOR) !== null);
       setOpen(true);
     },

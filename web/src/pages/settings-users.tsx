@@ -1,6 +1,7 @@
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ErrorLine, queryErrorMessage, ROW_ACTION, RowActionLabel, SectionCard } from "@/components/settings-section";
+import { ChangePasswordDialog } from "@/components/change-password";
+import { ErrorLine, ROW_ACTION, RowActionLabel, SectionCard } from "@/components/settings-section";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -12,7 +13,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
-import { createUser, listRoles, listUsers, resetUserPassword, updateUser } from "@/lib/api";
+import { createUser, deleteUser, listRoles, listUsers, queryErrorMessage, resetUserPassword, updateUser } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { usersDict } from "@/lib/i18n/dict/users";
 import { passwordTooShort, USERNAME_PATTERN } from "@/lib/password-policy";
@@ -27,10 +28,13 @@ const BUILTIN_ROLES = ["viewer", "operator", "alert-editor", "admin"];
 
 const USERS_KEY = ["users"] as const;
 
-function useRoleNames(): string[] {
-  const custom = useQuery({ queryKey: ["rbac-roles"], queryFn: listRoles, staleTime: 60_000 });
+/** The server answers the custom-role list to rbac:manage only, which users:manage does not imply. */
+function useRoleNames() {
+  const { me, can } = useAuth();
+  const canRead = can("rbac:manage");
+  const custom = useQuery({ queryKey: ["rbac-roles"], queryFn: listRoles, staleTime: 60_000, enabled: canRead });
   const names = (custom.data ?? []).map((r) => r.name).filter((n) => !BUILTIN_ROLES.includes(n));
-  return [...BUILTIN_ROLES, ...names];
+  return { roles: [...BUILTIN_ROLES, ...names], gated: me !== undefined && !canRead, custom };
 }
 
 function CreateUserForm({ roles, onDone }: { roles: string[]; onDone: () => void }) {
@@ -73,7 +77,7 @@ function CreateUserForm({ roles, onDone }: { roles: string[]; onDone: () => void
 
   return (
     <Card asChild className="p-4 sm:p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 [&>*]:max-w-2xl">
         <h3 className="type-section">{t("form.create")}</h3>
         <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           <div className="flex min-w-0 flex-col gap-1 text-[13px]">
@@ -217,10 +221,15 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
   const qc = useQueryClient();
   const guard = useWriteGuard();
   const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
+  const removal = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [resetting, setResetting] = useState(false);
+  const [changingOwn, setChangingOwn] = useState(false);
+  /* The role picked on your OWN row, held until confirmed: it can take this section away from you. */
+  const [pendingRole, setPendingRole] = useState<string>();
+  const roleRef = useRef<HTMLSelectElement>(null);
 
   async function patch(change: { disabled?: boolean; role?: string }, failed: string) {
     setBusy(true);
@@ -228,12 +237,33 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
     setNotice(undefined);
     try {
       await updateUser(user.id, change);
+      // Your own role gates this page, so /auth/me is re-read before the list a demoted caller can no longer fetch.
+      if (isMe && change.role !== undefined) await qc.invalidateQueries({ queryKey: ["me"] });
       await qc.invalidateQueries({ queryKey: USERS_KEY });
     } catch (err) {
       setError(queryErrorMessage(err, failed));
     }
+    // The server revokes the user's API tokens on either flip, and a failed re-enable may have revoked some.
+    if (change.disabled !== undefined) void qc.invalidateQueries({ queryKey: ["tokens"] });
     setBusy(false);
+    setPendingRole(undefined);
     reset();
+  }
+
+  async function remove() {
+    setBusy(true);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      await deleteUser(user.id);
+      await qc.invalidateQueries({ queryKey: USERS_KEY });
+    } catch (err) {
+      setError(queryErrorMessage(err, t("row.deleteFailed", { user: name })));
+    }
+    // The server revokes the user's tokens before it deletes, so a refused delete may have revoked some.
+    void qc.invalidateQueries({ queryKey: ["tokens"] });
+    setBusy(false);
+    removal.reset();
   }
 
   /* A user bound to several roles shows the first; picking one replaces them all, which is what the
@@ -261,13 +291,23 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
         </Td>
         <Td>
           <Select
+            ref={roleRef}
             aria-label={t("row.role", { user: name })}
-            value={current}
+            value={pendingRole ?? current}
             disabled={busy || guard.disabled}
             title={guard.title}
-            onChange={(e) => void patch({ role: e.target.value }, t("row.roleFailed", { user: name }))}
+            onChange={(e) => {
+              const next = e.target.value;
+              if (isMe) setPendingRole(next === current ? undefined : next);
+              else void patch({ role: next }, t("row.roleFailed", { user: name }));
+            }}
             className="h-8 w-40 max-w-full text-xs"
           >
+            {current === "" ? (
+              <option value="" disabled>
+                —
+              </option>
+            ) : null}
             {options.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -282,20 +322,37 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
         </Td>
         <Td className="whitespace-nowrap text-right">
           <span className="inline-flex items-center justify-end gap-1">
-            <Button
-              size="sm"
-              variant="ghost"
-              className={ROW_ACTION}
-              {...guard}
-              aria-label={t("row.reset", { user: name })}
-              aria-expanded={resetting}
-              onClick={() => {
-                setNotice(undefined);
-                setResetting((v) => !v);
-              }}
-            >
-              <RowActionLabel text={t("row.reset.verb")} title={t("row.reset", { user: name })} />
-            </Button>
+            {isMe ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className={ROW_ACTION}
+                {...guard}
+                aria-label={t("row.changeOwn")}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setNotice(undefined);
+                  setChangingOwn(true);
+                }}
+              >
+                <RowActionLabel text={t("row.changeOwn.verb")} title={t("row.changeOwn")} />
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                className={ROW_ACTION}
+                {...guard}
+                aria-label={t("row.reset", { user: name })}
+                aria-expanded={resetting}
+                onClick={() => {
+                  setNotice(undefined);
+                  setResetting((v) => !v);
+                }}
+              >
+                <RowActionLabel text={t("row.reset.verb")} title={t("row.reset", { user: name })} />
+              </Button>
+            )}
             {user.disabled ? (
               <Button
                 size="sm"
@@ -340,9 +397,72 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
                 <RowActionLabel text={t("row.disable.verb")} title={t("row.disable", { user: name })} />
               </Button>
             )}
+            {removal.confirming ? (
+              <>
+                <Button
+                  ref={removal.confirmRef}
+                  size="sm"
+                  variant="destructive"
+                  className={ROW_ACTION}
+                  loading={busy}
+                  {...guard}
+                  aria-label={t("row.confirmDelete", { user: name })}
+                  onClick={() => void remove()}
+                >
+                  <RowActionLabel text={t("row.confirmDelete.verb")} title={t("row.confirmDelete", { user: name })} />
+                </Button>
+                <Button size="sm" variant="ghost" className={ROW_ACTION} onClick={removal.reset}>
+                  {t("cancel")}
+                </Button>
+              </>
+            ) : (
+              <Button
+                ref={removal.triggerRef}
+                size="sm"
+                variant="ghost"
+                className={ROW_ACTION}
+                {...guard}
+                aria-label={t("row.delete", { user: name })}
+                onClick={removal.ask}
+              >
+                <RowActionLabel text={t("row.delete.verb")} title={t("row.delete", { user: name })} />
+              </Button>
+            )}
           </span>
         </Td>
       </Tr>
+      {pendingRole !== undefined ? (
+        <Tr>
+          <Td colSpan={4}>
+            <div className="flex flex-col gap-2 py-1">
+              <span className="text-xs leading-relaxed text-health-warn">{t("self.roleWarning")}</span>
+              <span className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  autoFocus
+                  loading={busy}
+                  {...guard}
+                  aria-label={t("self.confirmRole", { role: pendingRole })}
+                  onClick={() => void patch({ role: pendingRole }, t("row.roleFailed", { user: name }))}
+                >
+                  {t("self.confirmRole.verb")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setPendingRole(undefined);
+                    roleRef.current?.focus();
+                  }}
+                >
+                  {t("cancel")}
+                </Button>
+              </span>
+            </div>
+          </Td>
+        </Tr>
+      ) : null}
       {resetting ? (
         <Tr>
           <Td colSpan={4}>
@@ -371,6 +491,7 @@ function UserRow({ user, roles, isMe }: { user: ConsoleUser; roles: string[]; is
           </Td>
         </Tr>
       ) : null}
+      {isMe ? <ChangePasswordDialog open={changingOwn} onClose={() => setChangingOwn(false)} /> : null}
     </>
   );
 }
@@ -380,7 +501,7 @@ export function UsersSection() {
   const t = useT(usersDict);
   const guard = useWriteGuard();
   const { me } = useAuth();
-  const roles = useRoleNames();
+  const { roles, gated: rolesGated, custom: customRoles } = useRoleNames();
   const [creating, setCreating] = useState(false);
   // The keyboard across the button↔form swap; see hooks/use-disclosure-focus.
   const createFocus = useDisclosureFocus(creating);
@@ -419,6 +540,12 @@ export function UsersSection() {
       <SectionCard id={USERS_ANCHOR} title={t("title")} blurb={t("blurb")} action={createButton}>
         {query.isError ? (
           <ErrorLine onRetry={() => void query.refetch()}>{queryErrorMessage(query.error, t("unavailable"))}</ErrorLine>
+        ) : null}
+        {rolesGated ? <p className="mt-3 type-meta">{t("roles.gated")}</p> : null}
+        {customRoles.isError ? (
+          <ErrorLine onRetry={() => void customRoles.refetch()}>
+            {t("roles.unavailable", { reason: queryErrorMessage(customRoles.error, t("roles.noAnswer")) })}
+          </ErrorLine>
         ) : null}
         {query.isPending ? (
           <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">

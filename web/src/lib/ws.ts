@@ -32,6 +32,14 @@ export const TOPIC_TOPOLOGY = "topology";
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 15_000;
+/** The close code the console refuses a socket with at a websocket.* connection cap (ws/conn.go). */
+const CLOSE_TRY_AGAIN_LATER = 1013;
+/**
+ * How long a socket with no subscribed topic stays open. The grace keeps a route change between two
+ * realtime pages on one socket; past it, a tab parked on a page without a topic gives its
+ * websocket.* cap slot back.
+ */
+export const WS_IDLE_CLOSE_MS = 30_000;
 
 type Handler = (env: WsEnvelope) => void;
 
@@ -85,7 +93,10 @@ export class WsClient {
   private socket: WebSocket | null = null;
   private currentState: WsState = "closed";
   private backoffMs = RECONNECT_MIN_MS;
+  /** backoffMs as it stood before the last open reset it. */
+  private backoffBeforeOpenMs = RECONNECT_MIN_MS;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
   constructor(opts: WsClientOptions = {}) {
@@ -119,6 +130,7 @@ export class WsClient {
     listeners.add(handler);
     const isFirstForTopic = listeners.size === 1;
 
+    this.cancelIdleClose();
     this.connect();
     if (isFirstForTopic) {
       if (this.currentState === "open") this.sendSubscribe(topic);
@@ -140,6 +152,7 @@ export class WsClient {
       this.deliveredSeq.delete(topic);
       this.snapshotCache.delete(topic);
       if (this.currentState === "open") this.send({ action: "unsubscribe", topic });
+      if (this.handlers.size === 0) this.scheduleIdleClose();
     };
   }
 
@@ -157,6 +170,12 @@ export class WsClient {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    this.cancelIdleClose();
+    this.dropSocket();
+  }
+
+  /** dropSocket closes the current socket without firing its onclose, so no reconnect follows. */
+  private dropSocket(): void {
     const socket = this.socket;
     this.socket = null;
     if (socket) {
@@ -195,6 +214,7 @@ export class WsClient {
 
     socket.onopen = () => {
       if (this.socket !== socket) return;
+      this.backoffBeforeOpenMs = this.backoffMs;
       this.backoffMs = RECONNECT_MIN_MS;
       this.setState("open");
       // Re-subscribe every live topic. On a fresh socket lastSeq is 0 and the
@@ -215,9 +235,11 @@ export class WsClient {
       console.warn("console websocket error", this.url);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (ev?: { code?: number }) => {
       if (this.socket !== socket) return;
       this.socket = null;
+      // A cap refusal opens and closes at once; resetting on that open would redial every second.
+      if (ev?.code === CLOSE_TRY_AGAIN_LATER) this.backoffMs = this.backoffBeforeOpenMs;
       this.setState("closed");
       this.scheduleReconnect();
     };
@@ -229,8 +251,24 @@ export class WsClient {
     this.backoffMs = Math.min(this.backoffMs * 2, RECONNECT_MAX_MS);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      // The last topic may have gone during the backoff; the next subscribe dials.
+      if (this.handlers.size === 0) return;
       this.connect();
     }, delay);
+  }
+
+  private scheduleIdleClose(): void {
+    if (this.disposed || this.idleTimer !== null) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.handlers.size === 0) this.dropSocket();
+    }, WS_IDLE_CLOSE_MS);
+  }
+
+  private cancelIdleClose(): void {
+    if (this.idleTimer === null) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   /** dispatch applies the hub's consumer contract (internal/console/ws/hub.go, `func (h *Hub) subscribe`). */

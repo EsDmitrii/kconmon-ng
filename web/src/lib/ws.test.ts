@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeSocket, fakeWebSocketImpl } from "./fake-websocket";
-import { WsClient, wsUrl, type WsEnvelope, type WsState } from "./ws";
+import { WS_IDLE_CLOSE_MS, WsClient, wsUrl, type WsEnvelope, type WsState } from "./ws";
 
 function newClient(): WsClient {
   return new WsClient({ url: "ws://console.test/ws", WebSocketImpl: fakeWebSocketImpl });
@@ -170,6 +170,28 @@ describe("WsClient", () => {
       vi.advanceTimersByTime(1);
       expect(FakeSocket.instances).toHaveLength(i + 2);
       FakeSocket.last().emitClose(); // never opens, so the backoff keeps growing
+    });
+
+    client.close();
+  });
+
+  it("keeps backing off when the console refuses the socket at a connection cap", () => {
+    /* Over a websocket.* cap the console upgrades and closes at once with 1013 (internal/console/ws
+       conn.go refuse), so onopen fires every time; that open must not reset the backoff. */
+    vi.useFakeTimers();
+    const client = newClient();
+    client.subscribe("live", () => {});
+    FakeSocket.last().emitOpen();
+    FakeSocket.last().emitClose(1013, "too many connections from this address");
+
+    const delays = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000];
+    delays.forEach((delay, i) => {
+      vi.advanceTimersByTime(delay - 1);
+      expect(FakeSocket.instances).toHaveLength(i + 1);
+      vi.advanceTimersByTime(1);
+      expect(FakeSocket.instances).toHaveLength(i + 2);
+      FakeSocket.last().emitOpen();
+      FakeSocket.last().emitClose(1013, "too many connections from this address");
     });
 
     client.close();
@@ -463,6 +485,72 @@ describe("WsClient epoch discipline", () => {
     // at all: the cursor is now 3, in replica-b's own series.
     expect(next.sent).toEqual(['{"action":"subscribe","topic":"live","lastSeq":3,"epoch":"replica-b"}']);
 
+    client.close();
+  });
+});
+
+/* A tab parked on a page with no realtime topic must not keep one of the console's websocket.* cap slots. */
+describe("WsClient idle close", () => {
+  it("closes the socket once no topic has been subscribed for the idle grace, and dials again on the next subscribe", () => {
+    vi.useFakeTimers();
+    const client = newClient();
+    const off = client.subscribe("topology", () => {});
+    const first = FakeSocket.last();
+    first.emitOpen();
+    off();
+
+    vi.advanceTimersByTime(WS_IDLE_CLOSE_MS - 1);
+    expect(first.readyState).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(first.readyState).toBe(3);
+    expect(client.state).toBe("closed");
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    const seen: WsEnvelope[] = [];
+    client.subscribe("live", (env) => seen.push(env));
+    expect(FakeSocket.instances).toHaveLength(2);
+    const second = FakeSocket.last();
+    second.emitOpen();
+    expect(second.sent).toEqual(['{"action":"subscribe","topic":"live"}']);
+    second.emitEnvelope({ topic: "live", type: "event", seq: 1, data: {} });
+    expect(seen).toHaveLength(1);
+
+    client.close();
+  });
+
+  it("keeps the socket when a topic is subscribed again inside the grace", () => {
+    vi.useFakeTimers();
+    const client = newClient();
+    const off = client.subscribe("matrix:tcp:pod", () => {});
+    const first = FakeSocket.last();
+    first.emitOpen();
+    off();
+    vi.advanceTimersByTime(WS_IDLE_CLOSE_MS / 2);
+    client.subscribe("topology", () => {});
+
+    vi.advanceTimersByTime(WS_IDLE_CLOSE_MS * 4);
+    expect(first.readyState).toBe(1);
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(client.state).toBe("open");
+
+    client.close();
+  });
+
+  it("does not dial a pending reconnect once the last topic is gone", () => {
+    vi.useFakeTimers();
+    const client = newClient();
+    const off = client.subscribe("live", () => {});
+    FakeSocket.last().emitOpen();
+    FakeSocket.last().emitClose();
+    off();
+
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    client.subscribe("live", () => {});
+    expect(FakeSocket.instances).toHaveLength(2);
     client.close();
   });
 });

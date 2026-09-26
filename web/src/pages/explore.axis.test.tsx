@@ -5,6 +5,18 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { ExplorePage } from "./explore";
 
+/* The page waits for the subject and needs promql:query (pages/explore.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
+
 /*
 The range presets looked like they only redrew the curves: 6h and 24h produced the same axis,
 because ECharts fit it to the data and this stand's Prometheus holds a few hours (owner report).

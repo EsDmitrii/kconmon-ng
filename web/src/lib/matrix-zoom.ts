@@ -299,10 +299,24 @@ export function elideForHeaders(
 }
 
 /**
+ * headerLabel is the text one header box draws for `name` once its axis dropped `elide`.
+ *
+ * "…" plus the remainder when that fits the box. When it does not, the bare remainder: the header
+ * clips from its start with CSS text-overflow, and the browser's own ellipsis would otherwise land on
+ * top of ours plus the first real character ("…ontrol-plane" for "…control-plane").
+ */
+export function headerLabel(name: string, elide: string, boxWidth: number, fontSize: number): string {
+  if (!elide || !name.startsWith(elide) || name.length <= elide.length) return name;
+  const rest = name.slice(elide.length);
+  return fitsHeader(`…${rest}`, boxWidth, fontSize) ? `…${rest}` : rest;
+}
+
+/**
  * heightBudget is the vertical space the grid may fit into.
  *
- * The viewport is `max-h-[...] min-h-64`, so its clientHeight is the height its CONTENT produced,
- * floored by the min -- and feeding that back into fitScale is circular. A fresh render measured the
+ * The viewport is `max-h-[...]`, floored at 16rem, or at the grid's own height when that is less, so
+ * its clientHeight is the height its CONTENT produced, floored by the min -- and feeding that back
+ * into fitScale is circular. A fresh render measured the
  * 256px min, decided a seven-node grid did not fit, dropped to 50%, and the smaller grid then kept
  * the box at 256px: every fleet opened at half size on a screen with room to spare. The resolved
  * max-height is the space actually available, and clientHeight only wins where there is no max or

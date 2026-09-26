@@ -7,9 +7,10 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
+import { stubViewport } from "@/lib/viewport-stub";
 import { NAV_ITEMS } from "@/nav";
 import { AppShell, routeTree } from "@/routes";
 
@@ -18,22 +19,38 @@ import { AppShell, routeTree } from "@/routes";
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 
-function renderShell() {
+const SUBJECTS = {
+  user: { kind: "user", id: "ada", displayName: "Ada", groups: [], roles: ["viewer"] },
+  anonymous: { kind: "anonymous", id: "anonymous", displayName: "Anonymous", groups: [], roles: ["viewer"] },
+} as const;
+
+/** `config` is GET /config's answer: an auth mode, never answering, or a 500. The subject is the
+ *  anonymous one under an anonymous config and a signed-in user otherwise, unless given. */
+function renderShell(
+  config: "anonymous" | "local" | "pending" | "500" = "anonymous",
+  subject: keyof typeof SUBJECTS = config === "anonymous" ? "anonymous" : "user",
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
-      if (String(url).includes("/api/v1/auth/me")) {
+      const href = String(url);
+      if (href.includes("/api/v1/auth/me")) return Promise.resolve(json({ subject: SUBJECTS[subject], permissions: [] }));
+      if (href.includes("/api/v1/config") && config === "pending") return new Promise<Response>(() => {});
+      if (href.includes("/api/v1/config") && config === "500") {
         return Promise.resolve(
-          json({
-            subject: { kind: "anonymous", id: "anonymous", displayName: "Anonymous", groups: [], roles: ["viewer"] },
-            permissions: [],
+          new Response(JSON.stringify({ type: "about:blank", title: "boom", status: 500 }), {
+            status: 500,
+            headers: { "Content-Type": "application/problem+json" },
           }),
         );
       }
       return Promise.resolve(
         json({
-          auth: { mode: "anonymous", role: "viewer", loginPath: "" },
-          anonymousBanner: true,
+          auth:
+            config === "anonymous"
+              ? { mode: "anonymous", role: "viewer", loginPath: "" }
+              : { mode: "local", role: "", loginPath: "/api/v1/auth/login" },
+          anonymousBanner: config === "anonymous",
           controller: { configured: true },
           prometheus: { configured: true },
           database: { configured: false },
@@ -60,13 +77,14 @@ function renderShell() {
   });
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
         <RouterProvider router={testRouter} />
       </ThemeProvider>
     </QueryClientProvider>,
   );
+  return { ...utils, router: testRouter };
 }
 
 afterEach(() => {
@@ -178,6 +196,34 @@ describe("every signed-in route still gets the shell", () => {
   });
 });
 
+describe("AppShell in auth.mode=anonymous", () => {
+  it("shows the banner and the static footer, and no user menu", async () => {
+    renderShell("anonymous");
+    expect(await screen.findByRole("status")).toHaveTextContent(/anonymous mode/i);
+    expect(screen.getByRole("link", { name: /overview/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /events/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Anonymous" })).not.toBeInTheDocument();
+    expect(screen.getByText(/network connectivity console/i)).toBeInTheDocument();
+    expect(screen.getByText("page content")).toBeInTheDocument();
+  });
+});
+
+/* The shell only knows the mode once /config answers; a signed-in user must not see the
+   authentication-disabled warning while it is in flight or after it failed. */
+describe("AppShell banner before /config answers", () => {
+  it.each(["pending", "500"] as const)("shows no anonymous warning to a signed-in user while /config is %s", async (config) => {
+    renderShell(config, "user");
+    // The sidebar's user menu appears once /auth/me has answered, which is all the banner waits on.
+    await screen.findByRole("button", { name: "Ada" });
+    expect(screen.queryByText(/anonymous mode/i)).not.toBeInTheDocument();
+  });
+
+  it("still warns an anonymous session whose /config has not answered", async () => {
+    renderShell("pending", "anonymous");
+    expect(await screen.findByText(/anonymous mode/i)).toBeInTheDocument();
+  });
+});
+
 describe("AppShell keyboard entry", () => {
   it("offers a skip link ahead of the sidebar", async () => {
     const { container } = renderShell();
@@ -241,5 +287,75 @@ describe("keyboard scrolling reaches the content pane", () => {
     link.focus();
     fireEvent.click(link);
     expect(link).toHaveFocus();
+  });
+});
+
+/* ── the password dialog outlives the drawer that opened it ──────────────── */
+
+describe("Change password opened from the narrow-viewport drawer", () => {
+  async function openFromDrawer() {
+    const viewport = stubViewport(390);
+    renderShell("local");
+    fireEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    const drawer = await screen.findByRole("dialog", { name: "Navigation" });
+    fireEvent.click(await within(drawer).findByRole("button", { name: "Ada" }));
+    fireEvent.click(await within(drawer).findByRole("button", { name: "Change password" }));
+    const dialog = await screen.findByRole("dialog", { name: "Change password" });
+    fireEvent.change(within(dialog).getByLabelText("Current password"), { target: { value: "old-secret-1" } });
+    return { viewport, dialog };
+  }
+
+  /* A phone rotated past md closes the drawer, and the drawer's sidebar is the one that held the
+     dialog: typed passwords and a submit in flight used to vanish with it. */
+  it("keeps the dialog and what was typed when the drawer closes at md", async () => {
+    const { viewport } = await openFromDrawer();
+
+    viewport.resize(844);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).toBeNull());
+
+    const dialog = screen.getByRole("dialog", { name: "Change password" });
+    expect(within(dialog).getByLabelText("Current password")).toHaveValue("old-secret-1");
+  });
+
+  /* The user-menu trigger that opened the dialog went with the drawer, and focus fell to <body>, so
+     the next Tab started over at the skip link. */
+  it("puts focus on the page when the drawer that opened the dialog is gone", async () => {
+    const { viewport, dialog } = await openFromDrawer();
+    viewport.resize(844);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).toBeNull());
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Change password" })).toBeNull());
+    expect(screen.getByRole("main")).toHaveFocus();
+  });
+
+  /* Escape belongs to the top layer: the drawer's document-level listener used to take it first and
+     close the drawer, and the dialog with it. */
+  it("closes only the dialog on Escape, leaving the drawer open", async () => {
+    const { dialog } = await openFromDrawer();
+
+    fireEvent.keyDown(within(dialog).getByLabelText("Current password"), { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Change password" })).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Navigation" })).toBeInTheDocument();
+  });
+});
+
+/* ── the drawer does not outlive the page it was opened over ─────────────── */
+
+/* Back/Forward, the Android back gesture and a ⌘K navigation change the route without a drawer link,
+   and the drawer stayed open over the new page while the shell moved focus to <main> behind it. */
+describe("the narrow-viewport drawer on a navigation it did not start", () => {
+  it("closes, and focus lands on the new page", async () => {
+    stubViewport(390);
+    const { router } = renderShell();
+    fireEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    await screen.findByRole("dialog", { name: "Navigation" });
+
+    act(() => router.history.push("/live"));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).toBeNull());
+    expect(screen.getByRole("main")).toHaveFocus();
   });
 });

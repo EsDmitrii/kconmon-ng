@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, getRun } from "@/lib/api";
+import { ApiError, getRun, isSettledClientError } from "@/lib/api";
 import {
   RUN_TERMINAL_STATUSES,
   type RunDetail,
@@ -12,6 +12,10 @@ import { useCapabilities } from "./use-capabilities";
 import { getWsClient } from "./use-ws-topic";
 
 export const RUN_POLL_MS = 5_000;
+
+/* A settled probe on the socket asks for the run again after this long, at most once per
+   interval, so the REST-driven summary and timeline keep up with the frame-driven pair table. */
+export const RUN_FRAME_REFETCH_MS = 1_000;
 
 /** runTopic mirrors internal/console/ws.RunTopic("run:" + id) exactly. */
 export function runTopic(runId: string): string {
@@ -34,6 +38,8 @@ export interface RunPairRow {
   success?: boolean;
   durationNs?: number;
   error?: string;
+  /** When the row's probe was recorded; absent on a row only a progress frame has reported. */
+  recordedAt?: string;
   /** Set on a pmtu result: what the path MTU search found. */
   pmtu?: PMTUReading;
 }
@@ -80,6 +86,7 @@ function fromResult(r: RunResult): RunPairRow {
     success: r.success,
     durationNs: r.durationNs,
     error: r.error,
+    recordedAt: r.recordedAt,
     pmtu: pmtuReadingOf(r.result),
   };
 }
@@ -95,7 +102,8 @@ function fromFrame(f: RunProgressFrame): RunPairRow {
 export function mergeRunPairs(results: RunResult[], frames: Map<string, RunProgressFrame>): RunPairRow[] {
   const rows = new Map<string, RunPairRow>();
   for (const f of frames.values()) rows.set(pairKey(f.source, f.destination), fromFrame(f));
-  for (const r of results) rows.set(pairKey(r.sourceNode, r.destinationNode), fromResult(r));
+  /* The type says array; a server that sends anything else must not throw during render. */
+  for (const r of Array.isArray(results) ? results : []) rows.set(pairKey(r.sourceNode, r.destinationNode), fromResult(r));
   return [...rows.values()];
 }
 
@@ -110,6 +118,8 @@ export interface UseRunResult {
   notFound: boolean;
   error: Error | null;
   live: boolean;
+  /** The socket is enabled but has not yet opened or failed: neither live nor delayed is known. */
+  connecting: boolean;
   /** Exists for POST /api/v1/runs/{id}/cancel: the 204 means only "accepted". */
   refetch: () => Promise<unknown>;
 }
@@ -128,6 +138,9 @@ export function useRun(runId: string): UseRunResult {
      carried by the 5s poll — the one place a reader looks to know which of the two they are seeing.
      useWsTopic tracks the same state for the matrix and topology surfaces. */
   const [connected, setConnected] = useState(false);
+  /* Whether the socket has opened or failed since this subscription began; until then "Delayed data"
+     would be a claim about a connection still being dialled. */
+  const [settled, setSettled] = useState(false);
 
   // A run switch must not carry over the previous run's accumulated frames
   // or its socket-done latch -- each permalink id gets its own fresh state.
@@ -142,10 +155,11 @@ export function useRun(runId: string): UseRunResult {
     queryFn: () => getRun(runId),
     enabled,
     retry: false,
-    // Stops on its own once the run is terminal (nothing left to poll for) and on any error (a 404
-    // does not become fetchable by retrying on a timer -- see notFound below; this is what keeps
-    // that state from being an infinite spinner).
-    refetchInterval: (q) => (isTerminalRunStatus(q.state.data?.status) || q.state.error ? false : RUN_POLL_MS),
+    // Stops on its own once the run is terminal (nothing left to poll for) and on a settled 4xx (a
+    // 404 does not become fetchable by retrying on a timer -- see notFound below). A 5xx or network
+    // error keeps the cadence: a console rollout must not freeze the permalink on "running".
+    refetchInterval: (q) =>
+      isTerminalRunStatus(q.state.data?.status) || isSettledClientError(q.state.error) ? false : RUN_POLL_MS,
   });
 
   const terminal = isTerminalRunStatus(query.data?.status);
@@ -155,12 +169,19 @@ export function useRun(runId: string): UseRunResult {
   useEffect(() => {
     if (!socketEnabled) {
       setConnected(false);
+      setSettled(false);
       return;
     }
     const topic = runTopic(runId);
     const ws = getWsClient();
+    let refetchTimer: ReturnType<typeof setTimeout> | null = null;
     // The badge follows the CONNECTION, not the subscription; see `connected`.
-    const offState = ws.onStateChange((state) => setConnected(state === "open"));
+    const offState = ws.onStateChange((state) => {
+      setConnected(state === "open");
+      if (state !== "connecting") setSettled(true);
+    });
+    // onStateChange does not replay: another page may have opened the shared socket already.
+    setConnected(ws.state === "open");
     const off = ws.subscribe<RunProgressFrame | RunFinishedFrame>(topic, (env) => {
       if (env.type === "error") {
         // M2's "unknown topic" rejection (registry full, or this run's
@@ -175,11 +196,22 @@ export function useRun(runId: string): UseRunResult {
       }
       if (isProgressFrame(env.data)) {
         const frame = env.data;
+        const key = pairKey(frame.source, frame.destination);
         setFrames((prev) => {
+          /* An interval run re-dispatches every pair each tick; the row keeps its last settled
+             probe rather than dropping out of the ok count while the next one is in flight. */
+          const held = prev.get(key);
+          if (frame.state === "dispatched" && held !== undefined && held.state !== "dispatched") return prev;
           const next = new Map(prev);
-          next.set(pairKey(frame.source, frame.destination), frame);
+          next.set(key, frame);
           return next;
         });
+        if (frame.state !== "dispatched" && refetchTimer === null) {
+          refetchTimer = setTimeout(() => {
+            refetchTimer = null;
+            void queryClient.refetchQueries({ queryKey: ["run", runId] });
+          }, RUN_FRAME_REFETCH_MS);
+        }
         return;
       }
       // The finished frame carries only {state:"finished",status} -- no
@@ -187,9 +219,11 @@ export function useRun(runId: string): UseRunResult {
       // more REST read, not from this bare frame standing in for it.
       void queryClient.refetchQueries({ queryKey: ["run", runId] });
     });
+    setSettled(ws.state !== "connecting");
     return () => {
       off();
       offState();
+      if (refetchTimer !== null) clearTimeout(refetchTimer);
     };
   }, [socketEnabled, runId, queryClient]);
 
@@ -206,6 +240,7 @@ export function useRun(runId: string): UseRunResult {
     notFound,
     error: query.error,
     live: socketEnabled && connected,
+    connecting: socketEnabled && !settled,
     refetch,
   };
 }

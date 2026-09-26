@@ -325,8 +325,7 @@ export function InvestigationTimeline({
   notes: SourceNote[];
   loading: boolean;
   /**
-   * Every source this investigation actually ASKED came back an error (QA scope
-   * 3, finding #1). Distinct from `notes.some(n => n.failed)`, which says "some
+   * Every source this investigation actually ASKED came back an error. Distinct from `notes.some(n => n.failed)`, which says "some
    * of the picture is missing": with all of it missing there is no picture, and
    * the pane owes the reader an error state rather than a quieter caveat over an
    * empty list. The page computes it — only the page knows which of the eleven
@@ -334,7 +333,7 @@ export function InvestigationTimeline({
    */
   allFailed: boolean;
   /**
-   * At least one source was actually ASKED (QA scope 4).
+   * At least one source was actually ASKED.
    *
    * `allFailed`'s mirror image, and the other half of the same rule: an empty
    * list is only evidence of a quiet fleet when somebody put the question. A
@@ -348,11 +347,11 @@ export function InvestigationTimeline({
   asked: boolean;
   /**
    * Where the shared cursor goes: the pane WRITES it and never reads it back.
-   * It used to take the instant back as `cursorAt` and light every row sitting
-   * on it, which turned one hover into a highlighted block wherever rows share a
-   * timestamp; the highlight is row identity now, held here (see TimelineRow).
+   * Reading the instant back would light every row sitting on it, one hover
+   * turning into a highlighted block wherever rows share a timestamp; the
+   * highlight is row identity instead, held here (see TimelineRow).
    *
-   * OPTIONAL since the cursor became the page's rather than this pane's: the
+   * OPTIONAL because the cursor is the page's rather than this pane's: the
    * instant goes into lib/chart-cursor.tsx's group, which every chart on the
    * page reads. A caller that wants the instant for something else still can.
    */
@@ -416,7 +415,7 @@ export function InvestigationTimeline({
 
   /* NEWEST FIRST. The entries arrive ascending — mergeTimeline builds them that way and the onset
      detection and the correlation ranking both read them in that order — but a reader opening a
-     window wants the most recent thing at the top, not on page 5 (owner report). The reversal is
+     window wants the most recent thing at the top, not on page 5. The reversal is
      therefore here, at the render, and not in the data: everything computed FROM the timeline still
      sees time running forwards. */
   const newestFirst = useMemo<TimelineEntry[]>(() => [...entries].reverse(), [entries]);
@@ -438,7 +437,7 @@ export function InvestigationTimeline({
           <div className="flex items-baseline justify-between gap-3">
             <h2 className="type-section">{t("timeline.title")}</h2>
             {/* The WINDOW's count, never the page's (see the file header), and
-                it is rendered at ZERO too (QA scope 3, finding #15). A count
+                it is rendered at ZERO too. A count
                 that disappears when it reaches nought leaves the reader to work
                 out whether the pane counted and found nothing or never counted
                 at all — «0 записей в этом интервале» answers that in four
@@ -486,7 +485,7 @@ export function InvestigationTimeline({
               ))}
             </ul>
           </details>
-          {/* One line for the WHOLE picture, above the rows (finding #1). The
+          {/* One line for the WHOLE picture, above the rows. The
               per-source lines say which and why; this one says what that costs
               the reader, which is the thing they have to carry while reading
               everything below it. */}
@@ -510,8 +509,8 @@ export function InvestigationTimeline({
           </div>
         ) : null}
 
-        {/* EVERYTHING failed: an error state, not a caveat (QA scope 3,
-            finding #1). The per-source lines above name which requests were
+        {/* EVERYTHING failed: an error state, not a caveat. The per-source
+            lines above name which requests were
             refused and what the server said about each; this says the one thing
             they cannot say individually — that there is no timeline here at all,
             and that the emptiness below is a property of the console rather than
@@ -531,7 +530,7 @@ export function InvestigationTimeline({
         ) : null}
 
         {/* The nothing-happened claim requires EVERY enabled source to have
-            settled successfully (finding #1). With one of them failed, an empty
+            settled successfully. With one of them failed, an empty
             list is not evidence of a quiet fleet — it is evidence of a fetch
             that did not come back, and the partial line above has already said
             so rather than this sentence contradicting it. */}

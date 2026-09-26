@@ -39,6 +39,9 @@ const en = {
   "packetLoss": "packet loss {ratio}",
   "pathMtu": "path MTU {mtu} bytes",
   "pathMtuReduced": "path MTU {mtu} of {probe} bytes",
+  /* The same words as the grid's visible sub-line (dict/matrix.ts cell.mtuBlackhole/cell.mtuRecovering). */
+  "mtuBlackhole": "black hole",
+  "mtuRecovering": "recovering",
 } as const;
 
 export type MatrixCellsKey = keyof typeof en;
@@ -54,6 +57,8 @@ export const matrixCellsDict: Dictionary<MatrixCellsKey> = defineDict(en, {
   "packetLoss": "потери пакетов {ratio}",
   "pathMtu": "MTU пути {mtu} байт",
   "pathMtuReduced": "MTU пути {mtu} из {probe} байт",
+  "mtuBlackhole": "чёрная дыра",
+  "mtuRecovering": "после сбоя",
 });
 
 /** enT is the ENGLISH translator cellSummary defaults to, so a caller with one

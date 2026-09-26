@@ -87,6 +87,34 @@ describe("useWsTopic", () => {
     expect(result.current.lastSeq).toBe(0);
   });
 
+  /* A socket still being dialled is neither live nor delayed: a caller's badge waits for its first answer. */
+  it("says connecting until the socket first opens or fails", () => {
+    const { result } = renderHook(() => useWsTopic(TOPIC_TOPOLOGY));
+    expect(result.current.connecting).toBe(true);
+    expect(result.current.connected).toBe(false);
+    act(() => FakeSocket.last().emitOpen());
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.connected).toBe(true);
+  });
+
+  it("stops saying connecting when the first dial fails", () => {
+    const { result } = renderHook(() => useWsTopic(TOPIC_TOPOLOGY));
+    expect(result.current.connecting).toBe(true);
+    act(() => FakeSocket.last().emitClose(1006));
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.connected).toBe(false);
+  });
+
+  it("is not connecting on a socket another hook already opened, nor when disabled", () => {
+    renderHook(() => useWsTopic(TOPIC_TOPOLOGY));
+    act(() => FakeSocket.last().emitOpen());
+    const { result } = renderHook(() => useWsTopic("matrix:tcp:pod"));
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.connected).toBe(true);
+    const off = renderHook(() => useWsTopic("matrix:udp:pod", { enabled: false }));
+    expect(off.result.current.connecting).toBe(false);
+  });
+
   it("opens no socket at all when disabled", () => {
     const { result } = renderHook(() => useWsTopic(TOPIC_TOPOLOGY, { enabled: false }));
     expect(FakeSocket.instances).toHaveLength(0);

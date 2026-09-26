@@ -204,7 +204,6 @@ describe("the credential boxes take whatever is typed into them", () => {
        worth asking about is the one it keeps. */
     ["a NUL byte", "ada\u0000root"],
     ["only whitespace", "   "],
-    ["nothing at all", ""],
   ])("POSTs %s verbatim, once, and never throws", async (_name, hostile) => {
     const navigateSpy = vi.fn();
     setNavigateForTest(navigateSpy);
@@ -216,7 +215,8 @@ describe("the credential boxes take whatever is typed into them", () => {
 
     await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith("/"));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    // The browser is not a validator: what was typed is what the server judges.
+    // The browser is not a validator: what was typed is what the server judges. An EMPTY field is
+    // the one exception, refused before sending as the server would (login.test.tsx).
     expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
       username: hostile,
       password: hostile,

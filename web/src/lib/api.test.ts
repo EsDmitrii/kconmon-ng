@@ -10,6 +10,7 @@ import {
   getMe,
   getTopology,
   getVersion,
+  isAuthUnavailable,
   login,
   logout,
   promqlQuery,
@@ -253,6 +254,32 @@ describe("apiFetch: 401 redirect (task-19-brief.md)", () => {
     );
     await expect(getMe()).rejects.toBeInstanceOf(ApiError);
     expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  it("a 503 'authentication unavailable' keeps the session: no redirect, and it reads as retryable", async () => {
+    window.history.pushState({}, "", "/matrix");
+    const navigateSpy = vi.fn();
+    setNavigateForTest(navigateSpy);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            type: "about:blank",
+            title: "authentication unavailable",
+            status: 503,
+            detail: "the session or user store did not answer; retry shortly, the session is still valid",
+          }),
+          { status: 503, headers: { "Content-Type": "application/problem+json", "Retry-After": "1" } },
+        ),
+      ),
+    );
+    const err = await getMe().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(navigateSpy).not.toHaveBeenCalled();
+    expect(isAuthUnavailable(err)).toBe(true);
+    expect(isAuthUnavailable(new ApiError({ type: "about:blank", title: "database not configured", status: 503 }))).toBe(false);
+    expect(isAuthUnavailable(new ApiError({ type: "about:blank", title: "authentication required", status: 401 }))).toBe(false);
   });
 
   it("does not loop when already on /login", async () => {

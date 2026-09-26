@@ -69,10 +69,16 @@ function ruleRow(over: Record<string, unknown> = {}) {
 }
 
 function foreignRow(over: Record<string, unknown> = {}) {
-  return { name: "kube-prometheus-rules", groups: 2, rules: 7, managedBy: "prometheus-operator", ...over };
+  return { name: "kube-prometheus-rules", groups: 2, rules: 7, alertRules: 5, managedBy: "prometheus-operator", ...over };
 }
 
 const EMPTY_REPORT = { created: [], skipped: [], notes: [] };
+
+/** Import is two presses, like a delete: the first arms the row, the second sends. */
+async function importForeign(name = "kube-prometheus-rules") {
+  fireEvent.click(await screen.findByRole("button", { name: `Import ${name}` }));
+  fireEvent.click(await screen.findByRole("button", { name: `Confirm import of ${name}` }));
+}
 
 interface Call {
   method: string;
@@ -484,7 +490,7 @@ describe("foreign PrometheusRules", () => {
        `null`, so ONE server-side `var xs []string` is the whole distance
        between this report and a white screen. */
     renderPage({ foreign: [foreignRow()], importReport: { created: null, skipped: null, notes: null } });
-    fireEvent.click(await screen.findByRole("button", { name: /^Import kube-prometheus-rules/ }));
+    await importForeign();
     const report = await screen.findByTestId("import-report");
     expect(report.textContent).toBeTruthy();
     for (const testId of ["import-created", "import-skipped", "import-notes"]) {
@@ -498,7 +504,7 @@ describe("foreign PrometheusRules", () => {
       foreign: [foreignRow()],
       onWrite: (method, url) => (url.includes("/import") && method === "POST" ? problem(422, "unprocessable", detail) : undefined),
     });
-    fireEvent.click(await screen.findByRole("button", { name: /^Import kube-prometheus-rules/ }));
+    await importForeign();
     expect((await screen.findByRole("alert")).textContent).toContain(detail);
     expect(screen.queryByTestId("import-report")).toBeNull();
   });
@@ -512,7 +518,7 @@ describe("foreign PrometheusRules", () => {
         notes: [],
       },
     });
-    fireEvent.click(await screen.findByRole("button", { name: /^Import kube-prometheus-rules/ }));
+    await importForeign();
     const skipped = await screen.findByTestId("import-skipped");
     expect(within(skipped).getAllByRole("term")).toHaveLength(200);
     expect(within(screen.getByTestId("import-created")).getByText("none")).toBeTruthy();
@@ -527,7 +533,7 @@ describe("foreign PrometheusRules", () => {
         notes: [{ name: "x", note: "severity was defaulted to warning" }],
       },
     });
-    fireEvent.click(await screen.findByRole("button", { name: /^Import kube-prometheus-rules/ }));
+    await importForeign();
     const skipped = await screen.findByTestId("import-skipped");
     expect(skipped.textContent).toContain("(unnamed entry)");
   });

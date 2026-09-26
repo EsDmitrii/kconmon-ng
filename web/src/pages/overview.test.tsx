@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
+import { TimeMachineProvider } from "@/lib/timemachine";
 import {
   OverviewPage,
   crossPlaneStatement,
@@ -18,6 +19,7 @@ import {
 } from "./overview";
 import type { Alert, Matrix, Protocol, Topology } from "@/lib/types";
 import { fmtEventStamp, fmtEventTime } from "@/lib/utils";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 /** The two translators the pure helpers take, so a unit case can read either
  *  language without mounting a provider. */
@@ -84,6 +86,46 @@ describe("summarize", () => {
     expect(s.pairsFailing).toBe(1);
     expect(s.pairsDegraded).toBe(1);
     expect(s.worstPairs.map((c) => c.destination)).toEqual(["b", "c"]);
+  });
+
+  /* On PMTU the tier is not monotone in the ratio: a fresh black hole at 3% is red while a
+     recovering path at 40% is amber, so the table ranks by tier before ratio. */
+  it("lists a low-ratio black hole ahead of higher-ratio amber pairs", () => {
+    const pmtu: Matrix = {
+      ...matrix,
+      protocol: "pmtu",
+      cells: [
+        { source: "c", destination: "d", failRatio: 0.03, mtuBytes: 1400, probeMtuBytes: 1500 },
+        ...["a", "b", "e", "f", "g"].map((src) => ({
+          source: src,
+          destination: "h",
+          failRatio: 0.4,
+          mtuBytes: 1500,
+          probeMtuBytes: 1500,
+          recentFailRatio: 0,
+        })),
+      ],
+    };
+    const s = summarize(pmtu);
+    expect(s.pairsFailing).toBe(1);
+    expect(s.pairsDegraded).toBe(5);
+    expect(s.worstPairs).toHaveLength(5);
+    expect(`${s.worstPairs[0].source}->${s.worstPairs[0].destination}`).toBe("c->d");
+  });
+
+  it("counts a recovering full-size path as degraded, and a half-failing one as failing", () => {
+    const pmtu: Matrix = {
+      ...matrix,
+      protocol: "pmtu",
+      cells: [
+        { source: "a", destination: "b", failRatio: 0.2, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 },
+        { source: "a", destination: "c", failRatio: 0.5, mtuBytes: 1500, probeMtuBytes: 1500 },
+      ],
+    };
+    const s = summarize(pmtu);
+    expect(s.pairsDegraded).toBe(1);
+    expect(s.pairsFailing).toBe(1);
+    expect(s.worstPairs.map((c) => c.destination)).toEqual(["c", "b"]);
   });
 
   it("falls back to matrix.nodes when topology is absent", () => {
@@ -353,6 +395,32 @@ interface PanelOptions {
   promConfigured?: boolean;
   /** A 502 from GET /api/v1/alerts: Prometheus is wired and did not answer. */
   alertsProblem?: string;
+  /** Engage the Time Machine at this instant (?at= plus the provider). */
+  engagedAt?: string;
+  /** Serves GET /api/v1/incidents the way the server does (see incidentsServer), instead of `incidents` verbatim. */
+  incidentsFor?: (href: string) => unknown;
+}
+
+/**
+ * incidentsServer answers like ListIncidents: the window test coalesce(to_at, inf) >= from AND
+ * from_at < to, `status` when asked, created_at DESC, then the cursor (an offset here) and LIMIT.
+ */
+function incidentsServer(rows: ReturnType<typeof incidentRow>[]) {
+  return (href: string) => {
+    const q = new URLSearchParams(href.slice(href.indexOf("?")));
+    const from = q.get("from") ? Date.parse(q.get("from") as string) : -Infinity;
+    const to = q.get("to") ? Date.parse(q.get("to") as string) : Infinity;
+    const status = q.get("status");
+    const matched = rows
+      .filter((r) => {
+        const toAt = "toAt" in r && typeof r.toAt === "string" ? Date.parse(r.toAt) : Infinity;
+        return toAt >= from && Date.parse(r.fromAt) < to && (status === null || r.status === status);
+      })
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    const start = Number(q.get("cursor") ?? "0");
+    const end = Math.min(matched.length, start + Number(q.get("limit") ?? "100"));
+    return { incidents: matched.slice(start, end), nextCursor: end < matched.length ? String(end) : "" };
+  };
 }
 
 function renderOverview(opts: PanelOptions = {}) {
@@ -364,7 +432,10 @@ function renderOverview(opts: PanelOptions = {}) {
     alerts = [],
     promConfigured = true,
     alertsProblem,
+    engagedAt,
+    incidentsFor,
   } = opts;
+  if (engagedAt) window.history.pushState({}, "", `/?at=${engagedAt}`);
   const urls: string[] = [];
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
@@ -372,7 +443,9 @@ function renderOverview(opts: PanelOptions = {}) {
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(database)));
     if (href.includes("/api/v1/topology")) return Promise.resolve(json(topo));
-    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
+    if (href.startsWith("/api/v1/incidents")) {
+      return Promise.resolve(json(incidentsFor ? incidentsFor(href) : { incidents, nextCursor: "" }));
+    }
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events, nextCursor: "" }));
     if (href.startsWith("/api/v1/alerts")) {
       if (alertsProblem !== undefined) {
@@ -389,11 +462,14 @@ function renderOverview(opts: PanelOptions = {}) {
   });
   vi.stubGlobal("fetch", fetchMock);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const utils = render(
-    <QueryClientProvider client={qc}>
+  const page = engagedAt ? (
+    <TimeMachineProvider>
       <OverviewPage />
-    </QueryClientProvider>,
+    </TimeMachineProvider>
+  ) : (
+    <OverviewPage />
   );
+  const utils = render(<QueryClientProvider client={qc}>{page}</QueryClientProvider>);
   return { ...utils, urls, fetchMock };
 }
 
@@ -441,6 +517,84 @@ describe("OverviewPage — Open incidents (Decision 9)", () => {
     expect(call).toContain("limit=5");
   });
 
+  /* The from/to filter matches the incident's own window, and a resolve leaves that window open-ended. */
+  it("engaged, drops an incident resolved before the instant on screen", async () => {
+    try {
+      renderOverview({
+        engagedAt: "2026-01-01T02:00:00Z",
+        incidents: [
+          incidentRow({ id: "inc-old", title: "resolved before t", status: "resolved", resolvedAt: "2026-01-01T01:00:00Z" }),
+          incidentRow({ id: "inc-then", title: "open at t", status: "resolved", resolvedAt: "2026-01-01T03:00:00Z" }),
+        ],
+      });
+      const panel = await screen.findByRole("region", { name: "Open incidents" });
+      const rows = await within(panel).findAllByTestId("open-incident");
+      expect(rows.map((r) => within(r).getByRole("link").textContent)).toEqual(["open at t"]);
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  /* The server cuts the window match at LIMIT by created_at, before "open at t" is known. Five
+     incidents opened after A and resolved before t filled that page, and A never arrived. */
+  it("engaged, finds an incident open at t behind a page of newer ones resolved before t", async () => {
+    const short = Array.from({ length: 5 }, (_, i) =>
+      incidentRow({
+        id: `inc-short-${i}`,
+        title: `short ${i}`,
+        fromAt: `2026-01-01T10:1${i + 1}:00Z`,
+        createdAt: `2026-01-01T10:1${i + 1}:00Z`,
+        status: "resolved",
+        resolvedAt: "2026-01-01T11:15:00Z",
+      }),
+    );
+    const a = incidentRow({
+      id: "inc-a",
+      title: "open at t",
+      fromAt: "2026-01-01T10:00:00Z",
+      createdAt: "2026-01-01T10:00:00Z",
+      status: "resolved",
+      resolvedAt: "2026-01-01T14:00:00Z",
+    });
+    try {
+      renderOverview({ engagedAt: "2026-01-01T12:00:00Z", incidentsFor: incidentsServer([a, ...short]) });
+      const panel = await screen.findByRole("region", { name: "Open incidents" });
+      const rows = await within(panel).findAllByTestId("open-incident");
+      expect(rows.map((r) => within(r).getByRole("link").textContent)).toEqual(["open at t"]);
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  /* Investigate saves the window it looked at, so toAt is the instant of the save, and the server's
+     window test dropped the row at every later t although it stayed open until 15:00. The window's
+     start is not the declaration either: a row declared after t was open-looking at t. */
+  it("engaged, lists every incident declared by t and not resolved by then, whatever its saved window", async () => {
+    const saved = incidentRow({
+      id: "inc-saved",
+      title: "saved from Investigate",
+      fromAt: "2026-01-01T09:00:00Z",
+      toAt: "2026-01-01T10:00:00Z",
+      createdAt: "2026-01-01T10:00:00Z",
+      status: "resolved",
+      resolvedAt: "2026-01-01T15:00:00Z",
+    });
+    const declaredLater = incidentRow({
+      id: "inc-later",
+      title: "declared after t",
+      fromAt: "2026-01-01T11:00:00Z",
+      createdAt: "2026-01-01T12:30:00Z",
+    });
+    try {
+      renderOverview({ engagedAt: "2026-01-01T12:00:00Z", incidentsFor: incidentsServer([saved, declaredLater]) });
+      const panel = await screen.findByRole("region", { name: "Open incidents" });
+      const rows = await within(panel).findAllByTestId("open-incident");
+      expect(rows.map((r) => within(r).getByRole("link").textContent)).toEqual(["saved from Investigate"]);
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
   it("says there are none rather than rendering an empty box", async () => {
     renderOverview({ incidents: [] });
     expect(await screen.findByText(/no open incidents/i)).toBeInTheDocument();
@@ -457,7 +611,7 @@ describe("OverviewPage — Open incidents (Decision 9)", () => {
   it("without a database: the one-line database note and ZERO requests", async () => {
     const { urls } = renderOverview({ database: false });
 
-    expect((await screen.findAllByText(/set console\.database\.mode/i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/set database\.dsnFile \(Helm: database\.existingSecret\)/i)).length).toBeGreaterThan(0);
     await waitFor(() => expect(urls.some((u) => u.includes("/api/v1/config"))).toBe(true));
     expect(urls.some((u) => u.startsWith("/api/v1/incidents"))).toBe(false);
   });
@@ -473,7 +627,7 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
     expect(within(rows[0]).getByText("node-b NotReady")).toBeInTheDocument();
     // Live's capitalized vocabulary, not a second one for the same fact.
     expect(within(rows[0]).getByText("Warn")).toBeInTheDocument();
-    expect(within(panel).getByRole("link", { name: /open Live/i }).getAttribute("href")).toBe("/live");
+    expect(within(panel).getByRole("link", { name: /open Events/i }).getAttribute("href")).toBe("/live");
   });
 
   /* ONE formatter now, in lib/utils — pages/live.test.tsx pins the same call for the same input on the other side. */
@@ -1109,8 +1263,37 @@ describe("OverviewPage — the plane selector and the cross-plane header (P3)", 
     stubPlanes({ cleanUdp: true, pmtu: { ...pmtuBlackHole, cells: [...pmtuBlackHole.cells, reduced] } });
     renderPage();
     await waitFor(() => expect(screen.getByRole("radio", { name: "PMTU" })).toBeChecked());
-    expect(await screen.findByText("Reduced path or fail 1–10%")).toBeInTheDocument();
+    expect(await screen.findByText("Reduced or recovering path")).toBeInTheDocument();
     expect(screen.queryByText("Fail 1–10%")).toBeNull();
+    expect(screen.getByText("Black hole")).toBeInTheDocument();
+    expect(screen.queryByText("Fail ≥ 10%")).toBeNull();
+  });
+
+  it("sends 'open Matrix' to the protocol on show, and claims no failure ratio on PMTU", async () => {
+    const pmtuHealthy: Matrix = {
+      ...pmtuBlackHole,
+      cells: [{ source: "a", destination: "b", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 }],
+    };
+    stubPlanes({ cleanUdp: true, pmtu: pmtuHealthy });
+    renderPage();
+    await screen.findByTestId("health-statement");
+
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "open Matrix" })).toHaveAttribute("href", "/matrix?protocol=udp"),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "PMTU" }));
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "open Matrix" })).toHaveAttribute("href", "/matrix?protocol=pmtu"),
+    );
+    expect(screen.getByText("No failing or degraded pairs")).toBeInTheDocument();
+    expect(screen.queryByText(/1% failure ratio/)).toBeNull();
+    expect(screen.getByText(/Every measured path carries full-size datagrams/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "TCP" }));
+    await waitFor(() => expect(screen.getByRole("link", { name: "open Matrix" })).toHaveAttribute("href", "/matrix"));
+    expect(screen.getByText(/1% failure ratio/)).toBeInTheDocument();
+    expect(screen.queryByText(/full-size datagrams/)).toBeNull();
   });
 
   it("an operator's own click still wins over the auto-follow", async () => {
@@ -1369,5 +1552,29 @@ describe("nodesTile — an external agent", () => {
 
   it("is still counted among the agents when no k8s inventory exists", () => {
     expect(nodesTile({ ...externalTopo, nodes: [] }, false)).toEqual({ kind: "noInventory", nodes: 2, source: "agents" });
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("OverviewPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderOverview({ incidents: [incidentRow()], alerts: [alertRow()], events: [eventRow()] });
+    await screen.findByTestId("open-incident");
+    await screen.findByTestId("overview-event");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderOverview({ incidents: [incidentRow()], alerts: [alertRow()], events: [eventRow()] });
+    await screen.findByTestId("open-incident");
+    await screen.findByTestId("overview-event");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

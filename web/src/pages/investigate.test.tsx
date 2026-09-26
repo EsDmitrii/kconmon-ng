@@ -8,7 +8,7 @@ import {
   TIME_MACHINE_REASON_ID,
   TimeMachineProvider,
 } from "@/lib/timemachine";
-import { CAUSE_WEIGHTS } from "@/lib/investigation";
+import { CAUSE_WEIGHTS, rankCauses } from "@/lib/investigation";
 import type { Alert, AuditEntry, Incident, PromResult } from "@/lib/types";
 import { COPY_NOTE_TTL_MS, InvestigatePage } from "./investigate";
 import {
@@ -59,6 +59,7 @@ import { stampClock } from "@/lib/i18n";
 import { useEffect } from "react";
 import { formatSeconds } from "@/lib/curated-metrics";
 import { MAINTENANCE_SERIES_NAME, maintenanceOverlaySeries } from "@/lib/annotations";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 // Same reason as every other page test in this repo: echarts.init reaches for a 2d canvas context
 // jsdom does not implement.
@@ -210,6 +211,10 @@ interface Options {
    *  but the ru smoke pin at the bottom of this file — the page renders with
    *  no provider at all, which lib/i18n defines as English. */
   locale?: Locale;
+  /** GET /api/v1/targets answered page by page (cursor = page index); absent = one page of api-gw. */
+  targetPages?: Record<string, unknown>[][];
+  /** The rows GET /api/v1/incidents lists, newest first; `status`, `limit` and an index cursor are honoured. */
+  incidentList?: Record<string, unknown>[];
 }
 
 function renderPage(opts: Options = {}) {
@@ -232,6 +237,8 @@ function renderPage(opts: Options = {}) {
     topology = topologyBody(),
     failRatio = "0.2",
     locale,
+    targetPages,
+    incidentList = [],
   } = opts;
 
   if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
@@ -263,6 +270,11 @@ function renderPage(opts: Options = {}) {
       return Promise.resolve(json(configBody(databaseConfigured, prometheusConfigured)));
     }
     if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topology));
+    if (href.startsWith("/api/v1/targets") && targetPages) {
+      const page = Number(new URL(href, "http://x").searchParams.get("cursor") ?? "0");
+      const next = page + 1 < targetPages.length ? String(page + 1) : "";
+      return Promise.resolve(json({ targets: targetPages[page], nextCursor: next }));
+    }
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets: [targetRow()], nextCursor: "" }));
     if (href.startsWith("/api/v1/k8s-events")) return Promise.resolve(json({ events: k8sEvents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events, nextCursor: "" }));
@@ -289,6 +301,14 @@ function renderPage(opts: Options = {}) {
         createdAt: "2026-08-08T01:00:00Z",
       };
       return Promise.resolve(json(stored, { status: 201 }));
+    }
+    if (method === "GET" && /^\/api\/v1\/incidents(\?|$)/.test(href)) {
+      const q = new URL(href, "http://x").searchParams;
+      const status = q.get("status");
+      const rows = incidentList.filter((r) => status === null || r.status === status);
+      const start = Number(q.get("cursor") ?? "0");
+      const end = start + Number(q.get("limit") ?? "100");
+      return Promise.resolve(json({ incidents: rows.slice(start, end), nextCursor: end < rows.length ? String(end) : "" }));
     }
     if (/^\/api\/v1\/incidents\/[^/?]+$/.test(href)) {
       if (method === "PATCH") {
@@ -2127,6 +2147,20 @@ describe("InvestigatePage — ?incident= hydrates the page", () => {
     await waitFor(() => expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("api-gw"));
   });
 
+  it("resolves a saved target name that sits past the first page of targets", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      incident: incidentRow({ scope: "api-gw-231" }),
+      targetPages: [
+        [targetRow()],
+        [targetRow({ id: "t-231", name: "api-gw-231" })],
+      ],
+    });
+
+    expect(await screen.findByRole("radio", { name: "Target", checked: true })).toBeTruthy();
+    await waitFor(() => expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("api-gw-231"));
+  });
+
   it("says so honestly when the id matches nothing, and still renders an investigation", async () => {
     renderPage({ search: "?incident=gone", incident: null });
 
@@ -2194,6 +2228,63 @@ describe("InvestigatePage — an incident's three writes", () => {
     expect(patchCalls()[0].body).toEqual({ notes: "the switch was upgraded at 00:18" });
   });
 
+  /** Holds every PATCH response until release() and answers GET inc-2 with a second row. */
+  function holdPatches() {
+    const inner = globalThis.fetch;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (String(url) === "/api/v1/incidents/inc-2" && (init?.method ?? "GET") === "GET") {
+        return json(incidentRow({ id: "inc-2", title: "Second incident", notes: "B notes" }));
+      }
+      const res = inner(url, init);
+      if ((init?.method ?? "GET").toUpperCase() === "PATCH") await gate;
+      return res;
+    });
+    return () =>
+      act(async () => {
+        open();
+      });
+  }
+
+  it("keeps what is typed while a notes save is in flight", async () => {
+    const { patchCalls, qc } = renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: incidentRow() });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+    const release = holdPatches();
+    const box = within(strip).getByLabelText("Incident notes") as HTMLTextAreaElement;
+
+    fireEvent.change(box, { target: { value: "first line" } });
+    fireEvent.click(within(strip).getByRole("button", { name: "Save notes" }));
+    await waitFor(() => expect(patchCalls().length).toBe(1));
+    fireEvent.change(box, { target: { value: "first line\nsecond line typed while saving" } });
+
+    await release();
+    await waitFor(() => expect((qc.getQueryData(["incident", "inc-1"]) as Incident).notes).toBe("first line"));
+    expect(box.value).toBe("first line\nsecond line typed while saving");
+    expect((within(strip).getByRole("button", { name: "Save notes" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("does not carry a save that lands after the page moved to another incident into its editor", async () => {
+    const { patchCalls, qc } = renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: incidentRow() });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+    const release = holdPatches();
+    qc.setQueryData(["incident", "inc-2"], incidentRow({ id: "inc-2", title: "Second incident", notes: "B notes" }));
+
+    fireEvent.change(within(strip).getByLabelText("Incident notes"), { target: { value: "A new notes" } });
+    fireEvent.click(within(strip).getByRole("button", { name: "Save notes" }));
+    await waitFor(() => expect(patchCalls().length).toBe(1));
+
+    act(() => window.history.pushState({}, "", "/investigate?incident=inc-2"));
+    const second = await screen.findByRole("region", { name: "Incident" });
+    await within(second).findByText("Second incident");
+    await release();
+    await waitFor(() => expect((qc.getQueryData(["incident", "inc-1"]) as Incident).notes).toBe("A new notes"));
+
+    const now = screen.getByRole("region", { name: "Incident" });
+    expect((within(now).getByLabelText("Incident notes") as HTMLTextAreaElement).value).toBe("B notes");
+    expect((within(now).getByRole("button", { name: "Save notes" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("copies the permalink — the id alone, which is the whole address", async () => {
     const writeText = vi.fn((_text: string) => Promise.resolve());
     vi.stubGlobal("navigator", { clipboard: { writeText } });
@@ -2223,15 +2314,40 @@ describe("InvestigatePage — pinning findings from the timeline", () => {
     await waitFor(() => expect(patchCalls().length).toBe(1));
     expect(patchCalls()[0].body).toEqual({ pinned: [{ kind: "snapshot", id: "s-1" }] });
 
-    // The row now reads as pinned, and the finding is listed above the timeline.
+    // The row now reads as pinned, and the finding is listed above the timeline under the
+    // timeline's word for it: "snapshot" is the store's kind, not what the reader saw.
     const unpin = await screen.findByRole("button", { name: /^Unpin: Route changed/ });
     expect(unpin.getAttribute("aria-pressed")).toBe("true");
-    expect(within(await screen.findByRole("region", { name: "Pinned findings" })).getByText("snapshot")).toBeTruthy();
+    const listed = await screen.findByRole("region", { name: "Pinned findings" });
+    expect(within(listed).getByText("path change")).toBeTruthy();
+    expect(within(listed).queryByText("snapshot")).toBeNull();
 
     // Unpinning sends the whole array again — now empty, not a delete.
     fireEvent.click(unpin);
     await waitFor(() => expect(patchCalls().length).toBe(2));
     expect(patchCalls()[1].body).toEqual({ pinned: [] });
+  });
+
+  it("keeps notes typed but not saved when a pin or a resolve replaces the incident row", async () => {
+    const { patchCalls } = renderPage({
+      permissions: WRITE,
+      search: "?incident=inc-1",
+      incident: incidentRow(),
+      snapshots: [snapshotRow()],
+    });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+    const draft = "draft: switch upgraded at 00:18";
+    fireEvent.change(within(strip).getByLabelText("Incident notes"), { target: { value: draft } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Pin: Route changed/ }));
+    await waitFor(() => expect(patchCalls().length).toBe(1));
+    await screen.findByRole("button", { name: /^Unpin: Route changed/ });
+    expect((within(strip).getByLabelText("Incident notes") as HTMLTextAreaElement).value).toBe(draft);
+
+    fireEvent.click(within(strip).getByRole("button", { name: "Resolve" }));
+    await waitFor(() => expect(patchCalls().length).toBe(2));
+    await within(strip).findByText("Resolved");
+    expect((within(strip).getByLabelText("Incident notes") as HTMLTextAreaElement).value).toBe(draft);
   });
 
   it("offers NO pin on a threshold row — there is no store kind for a derived crossing", async () => {
@@ -2245,6 +2361,90 @@ describe("InvestigatePage — pinning findings from the timeline", () => {
     renderPage({ permissions: WRITE, snapshots: [snapshotRow()] });
     await screen.findAllByTestId("timeline-row");
     expect(screen.queryByRole("button", { name: /^Pin:/ })).toBeNull();
+  });
+
+  /* The mirror of the incident-notes case above: a notes save, a resolve or a reopen hands the page
+     a new incident row whose pins carry no unsaved note, and that row used to reset the pin list. */
+  it("keeps pin notes typed but not saved when the incident notes are saved, resolved or reopened", async () => {
+    const { patchCalls } = renderPage({
+      permissions: WRITE,
+      search: "?incident=inc-1",
+      incident: incidentRow({ pinned: [{ kind: "snapshot", id: "s-1" }] }),
+      snapshots: [snapshotRow()],
+    });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+    const list = await screen.findByRole("region", { name: "Pinned findings" });
+    const pinNote = () => within(list).getByLabelText("Note for snapshot s-1") as HTMLInputElement;
+    fireEvent.change(pinNote(), { target: { value: "route moved here" } });
+
+    fireEvent.change(within(strip).getByLabelText("Incident notes"), { target: { value: "switch upgraded" } });
+    fireEvent.click(within(strip).getByRole("button", { name: "Save notes" }));
+    await waitFor(() => expect(patchCalls().length).toBe(1));
+    await waitFor(() =>
+      expect((within(strip).getByRole("button", { name: "Save notes" }) as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(pinNote().value).toBe("route moved here");
+
+    fireEvent.click(within(strip).getByRole("button", { name: "Resolve" }));
+    await within(strip).findByText("Resolved");
+    expect(pinNote().value).toBe("route moved here");
+
+    fireEvent.click(within(strip).getByRole("button", { name: "Reopen" }));
+    await within(strip).findByText("Open");
+    expect(pinNote().value).toBe("route moved here");
+
+    fireEvent.click(within(list).getByRole("button", { name: "Save pin notes" }));
+    await waitFor(() => expect(patchCalls().length).toBe(4));
+    expect(patchCalls()[3].body).toEqual({ pinned: [{ kind: "snapshot", id: "s-1", note: "route moved here" }] });
+  });
+
+  it("keeps a pin note being typed when a refetch brings another writer's pins", async () => {
+    const { qc } = renderPage({
+      permissions: WRITE,
+      search: "?incident=inc-1",
+      incident: incidentRow({ pinned: [{ kind: "snapshot", id: "s-1" }] }),
+      snapshots: [snapshotRow()],
+    });
+    const list = await screen.findByRole("region", { name: "Pinned findings" });
+    fireEvent.change(within(list).getByLabelText("Note for snapshot s-1"), { target: { value: "route moved here" } });
+
+    act(() => {
+      qc.setQueryData(
+        ["incident", "inc-1"],
+        incidentRow({ pinned: [{ kind: "snapshot", id: "s-1", note: "someone else's" }] }),
+      );
+    });
+
+    expect((within(list).getByLabelText("Note for snapshot s-1") as HTMLInputElement).value).toBe("route moved here");
+    expect((within(list).getByRole("button", { name: "Save pin notes" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps the typed pin notes, still unsaved, when saving them fails", async () => {
+    renderPage({
+      permissions: WRITE,
+      search: "?incident=inc-1",
+      incident: incidentRow({ pinned: [{ kind: "snapshot", id: "s-1" }] }),
+      snapshots: [snapshotRow()],
+    });
+    const list = await screen.findByRole("region", { name: "Pinned findings" });
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) =>
+      (init?.method ?? "GET").toUpperCase() === "PATCH"
+        ? Promise.resolve(
+            new Response(JSON.stringify({ type: "about:blank", title: "Bad Gateway", status: 502, detail: "upstream reset" }), {
+              status: 502,
+              headers: { "Content-Type": "application/problem+json" },
+            }),
+          )
+        : inner(url, init),
+    );
+
+    fireEvent.change(within(list).getByLabelText("Note for snapshot s-1"), { target: { value: "route moved here" } });
+    fireEvent.click(within(list).getByRole("button", { name: "Save pin notes" }));
+
+    expect(await screen.findByText(/upstream reset/)).toBeInTheDocument();
+    expect((within(list).getByLabelText("Note for snapshot s-1") as HTMLInputElement).value).toBe("route moved here");
+    expect((within(list).getByRole("button", { name: "Save pin notes" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("saves an inline pin note by PATCHing the list again", async () => {
@@ -2570,6 +2770,45 @@ describe("#3 the Time Machine clamps the investigated window", () => {
     fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
     expect(await screen.findByText(/The window is after the viewed instant/)).toBeTruthy();
     expect(screen.queryByTestId("clamp-banner")).toBeNull();
+  });
+
+  it("clamps an incident permalink's saved window to the viewed instant too", async () => {
+    const { calls } = renderPage({ search: "?incident=inc-1&at=2026-08-08T00:30:00Z", incident: incidentRow() });
+    expect(await screen.findByRole("heading", { name: "Loss between node-a and node-b" })).toBeTruthy();
+    expect(await screen.findByTestId("clamp-banner")).toHaveTextContent("Window clamped to the viewed instant.");
+    await waitFor(() =>
+      expect(calls.some((c) => c.url.startsWith("/api/v1/events") && c.url.includes("scope=node-a"))).toBe(true),
+    );
+    const events = calls.filter((c) => c.url.startsWith("/api/v1/events"));
+    for (const c of events) expect(c.url).not.toContain(encodeURIComponent("2026-08-08T01:00:00.000Z"));
+    expect(new URLSearchParams(window.location.search).get("incident")).toBe("inc-1");
+  });
+
+  /* The strip's badge is a fact about the viewed instant, not about now. */
+  it("says an incident permalink viewed before the incident was saved was not saved yet", async () => {
+    renderPage({
+      search: "?incident=inc-1&at=2026-08-08T00:30:00Z",
+      incident: incidentRow({
+        status: "resolved",
+        createdAt: "2026-08-08T00:45:00Z",
+        resolvedAt: "2026-08-08T02:00:00Z",
+      }),
+    });
+    const strip = await screen.findByRole("region", { name: /incident/i });
+    expect(await within(strip).findByText("Not yet saved at this instant")).toBeInTheDocument();
+    expect(within(strip).queryByText("Resolved")).not.toBeInTheDocument();
+  });
+
+  it("shows an incident resolved later as Open at an instant before it was resolved", async () => {
+    renderPage({
+      search: "?incident=inc-1&at=2026-08-08T00:30:00Z",
+      incident: incidentRow({ status: "resolved", createdAt: FROM, resolvedAt: "2026-08-08T02:00:00Z" }),
+    });
+    const strip = await screen.findByRole("region", { name: /incident/i });
+    expect(await within(strip).findByText("Open")).toBeInTheDocument();
+    expect(within(strip).queryByText("Resolved")).not.toBeInTheDocument();
+    // The toggle acts on the incident as it is now, which is resolved.
+    expect(within(strip).queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
   });
 
   it("issues ZERO alert requests while engaged, and says why in the source list", async () => {
@@ -3008,6 +3247,15 @@ describe("isReadOnlyAudit (finding #8)", () => {
     expect(isReadOnlyAudit("POST /api/v1/promql/query_range")).toBe(true);
   });
 
+  /* Both render a draft on every debounced edit and persist nothing, and the console audits every
+     POST: unsaved previews ranked above a real PUT of the same check as the suspected cause. */
+  it("calls the two draft previews reads — a check projection and an alert-rule preview", () => {
+    expect(isReadOnlyAudit("POST /api/v1/checks/projection")).toBe(true);
+    expect(isReadOnlyAudit("POST /api/v1/alert-rules/preview")).toBe(true);
+    expect(isReadOnlyAudit("POST /api/v1/alert-rules")).toBe(false);
+    expect(isReadOnlyAudit("POST /api/v1/checks")).toBe(false);
+  });
+
   it("calls every OTHER write a write, including a POST that only LOOKS harmless", () => {
     expect(isReadOnlyAudit("POST /api/v1/runs")).toBe(false);
     expect(isReadOnlyAudit("POST /api/v1/annotations")).toBe(false);
@@ -3049,6 +3297,30 @@ describe("auditEntries marks reads, and the ranking honours it (finding #8)", ()
       new Date(TO),
     );
     expect(entry.readOnly).toBe(false);
+  });
+
+  /* The server audits a refused or failed request and every sign-in, sign-out and password change,
+     and none of them changed the configuration. Closer to the onset, each one outranked the real change. */
+  it("ranks the real change above refused writes and sign-ins that landed closer to the onset", () => {
+    const onset = new Date("2026-08-08T00:30:00Z");
+    const entries = auditEntries(
+      [
+        row({ id: 1, at: "2026-08-08T00:28:00Z", action: "PUT /api/v1/checks/{id}", resource: "checks" }),
+        row({ id: 2, at: "2026-08-08T00:29:30Z", action: "POST /api/v1/auth/login", resource: "auth" }),
+        row({ id: 3, at: "2026-08-08T00:29:35Z", action: "POST /api/v1/auth/password", resource: "auth" }),
+        row({ id: 4, at: "2026-08-08T00:29:40Z", action: "DELETE /api/v1/targets/{id}", outcome: "denied" }),
+        row({ id: 5, at: "2026-08-08T00:29:45Z", action: "POST /api/v1/auth/logout", resource: "auth" }),
+        row({ id: 6, at: "2026-08-08T00:29:50Z", action: "POST /api/v1/auth/login", outcome: "error" }),
+        row({ id: 7, at: "2026-08-08T00:29:55Z", action: "POST /api/v1/targets", outcome: "error" }),
+      ] as never,
+      new Date(FROM),
+      new Date(TO),
+    );
+
+    expect(rankCauses(entries, onset).map((c) => c.entry.ref?.id)).toEqual(["1"]);
+    // Out of the suspects, not out of the history, and not folded away as reads either.
+    expect(entries).toHaveLength(7);
+    expect(entries.every((e) => e.readOnly === false)).toBe(true);
   });
 });
 
@@ -3202,6 +3474,20 @@ describe("a permalink to a DELETED incident (finding #3)", () => {
   });
 });
 
+describe("the incident strip's creator", () => {
+  it("names the signed-in creator by their display name, keeping the subject id on hover", async () => {
+    renderPage({ search: "?incident=inc-1", permissions: WRITE, incident: incidentRow({ createdBy: "user:u1" }) });
+    const line = await screen.findByText(/^opened by Ada · /);
+    expect(line).toHaveAttribute("title", "user:u1");
+    expect(screen.queryByText(/user:u1/)).toBeNull();
+  });
+
+  it("keeps another subject's id, which this page has no name for", async () => {
+    renderPage({ search: "?incident=inc-1", permissions: WRITE, incident: incidentRow({ createdBy: "token:t-9" }) });
+    expect(await screen.findByText(/^opened by token:t-9 · /)).toBeInTheDocument();
+  });
+});
+
 describe("a pinned finding whose row left the window (finding #10)", () => {
   it("says the row is out of window instead of letting 'audit / 1757' read as a title", async () => {
     renderPage({
@@ -3218,6 +3504,18 @@ describe("a pinned finding whose row left the window (finding #10)", () => {
     expect(row.textContent).toContain("audit");
     expect(row.textContent).toContain("1757");
     expect(within(row).getByDisplayValue("the rollout")).toBeTruthy();
+  });
+
+  it("names the pin's kind in the timeline's own words", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "snapshot", id: "snap-9" }] }),
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    expect(within(row).getByText("path change")).toBeInTheDocument();
+    expect(within(row).queryByText("snapshot")).toBeNull();
   });
 
   it("says nothing when the row IS on screen — the caption is about absence", async () => {
@@ -3242,6 +3540,39 @@ describe("a pinned finding whose row left the window (finding #10)", () => {
 
     const row = await screen.findByTestId("pinned-finding");
     await waitFor(() => expect(within(row).queryByTestId("pin-out-of-window")).toBeNull());
+  });
+});
+
+describe("a pinned run older than the runs scan", () => {
+  const newer = { id: "run-newer", createdAt: "2026-08-08T00:50:00Z", status: "succeeded", type: "tcp", pairTotal: 1, pairOk: 1, pairFailed: 0 };
+
+  it("reads the pinned run itself and keeps its title when it lies inside the window", async () => {
+    const { urlsFor } = renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "run", id: "run-old" }] }),
+      runs: [newer],
+      runDetail: (id) => runDetailRow({ id, createdAt: id === "run-old" ? "2026-08-08T00:10:00Z" : newer.createdAt }),
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    const title = await within(row).findByTestId("pinned-finding-title");
+    expect(title.getAttribute("title")).toBe("run run-old");
+    expect(within(row).queryByTestId("pin-out-of-window")).toBeNull();
+    expect(urlsFor("/api/v1/runs/run-old").length).toBeGreaterThan(0);
+  });
+
+  it("still says out of window for a pinned run created outside it", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "run", id: "run-old" }] }),
+      runs: [newer],
+      runDetail: (id) => runDetailRow({ id, createdAt: id === "run-old" ? "2026-08-07T20:00:00Z" : newer.createdAt }),
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    expect(await within(row).findByTestId("pin-out-of-window")).toBeInTheDocument();
   });
 });
 
@@ -3586,5 +3917,102 @@ describe("the notes rail", () => {
     const global = items.find((li) => (li.textContent ?? "").includes("global note"));
     expect(own && within(own).queryByText("node-a→node-b")).toBeNull();
     expect(global && within(global).getByText("global")).toBeTruthy();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("InvestigatePage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage();
+    await screen.findByRole("button", { name: "Investigate" });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage();
+    await screen.findByRole("button", { name: "Investigate" });
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
+  });
+});
+
+describe("the Incidents page lists saved incidents", () => {
+  const open1 = incidentRow({ id: "inc-open", title: "Open one", createdAt: "2026-08-08T00:40:00Z" });
+  const resolved1 = incidentRow({
+    id: "inc-res",
+    title: "Resolved one",
+    scope: "",
+    status: "resolved",
+    createdAt: "2026-08-08T00:10:00Z",
+    resolvedAt: "2026-08-08T00:35:00Z",
+  });
+  const savedList = () => screen.findByRole("region", { name: "Saved incidents" });
+
+  it("lists open AND resolved incidents on a bare /investigate, each linking to its permalink", async () => {
+    renderPage({ search: "", incidentList: [open1, resolved1] });
+    const list = await savedList();
+    const rows = await within(list).findAllByTestId("saved-incident");
+    expect(rows.map((r) => r.textContent)).toEqual([
+      expect.stringContaining("Open one"),
+      expect.stringContaining("Resolved one"),
+    ]);
+    expect(within(rows[0]).getByRole("link", { name: "Open one" })).toHaveAttribute("href", "/investigate?incident=inc-open");
+    expect(within(rows[1]).getByText("Resolved")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("global")).toBeInTheDocument();
+  });
+
+  it("filters by status through the server's own filter", async () => {
+    const { urlsFor } = renderPage({ search: "", incidentList: [open1, resolved1] });
+    const list = await savedList();
+    await within(list).findAllByTestId("saved-incident");
+    fireEvent.click(within(list).getByRole("radio", { name: "Resolved" }));
+    await waitFor(() => expect(within(list).getAllByTestId("saved-incident")).toHaveLength(1));
+    expect(within(list).getByTestId("saved-incident")).toHaveTextContent("Resolved one");
+    expect(urlsFor("/api/v1/incidents?").some((u) => u.includes("status=resolved"))).toBe(true);
+  });
+
+  it("follows the cursor past the first server page", async () => {
+    const many = Array.from({ length: 55 }, (_, i) =>
+      incidentRow({ id: `inc-${i}`, title: `Incident ${i}`, createdAt: new Date(Date.parse(TO) - i * 60_000).toISOString() }),
+    );
+    renderPage({ search: "", incidentList: many });
+    const list = await savedList();
+    fireEvent.click(await within(list).findByRole("button", { name: "Load older" }));
+    await waitFor(() => expect(within(list).queryByRole("button", { name: "Load older" })).toBeNull());
+    expect(list).toHaveTextContent("Showing 10 of 55");
+  });
+
+  it("shows, engaged, only the incidents saved by the instant, with their status at it", async () => {
+    renderPage({ search: "?at=2026-08-08T00:30:00Z", incidentList: [open1, resolved1] });
+    const list = await savedList();
+    const rows = await within(list).findAllByTestId("saved-incident");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Resolved one");
+    expect(within(rows[0]).getByText("Open")).toBeInTheDocument();
+    expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", "/investigate?incident=inc-res&at=2026-08-08T00%3A30%3A00Z");
+  });
+
+  it("stays out of an incident permalink, where the incident itself is the page", async () => {
+    renderPage({ search: "?incident=inc-1", incident: incidentRow(), incidentList: [open1] });
+    await screen.findByRole("heading", { name: "Loss between node-a and node-b" });
+    expect(screen.queryByRole("region", { name: "Saved incidents" })).toBeNull();
+  });
+
+  it("names the missing permission and asks nothing without incidents:read", async () => {
+    const { urlsFor } = renderPage({
+      search: "",
+      permissions: ALL_READS.filter((p) => p !== "incidents:read"),
+      incidentList: [open1],
+    });
+    const list = await savedList();
+    expect(await within(list).findByText(/need incidents:read/)).toBeInTheDocument();
+    expect(urlsFor("/api/v1/incidents")).toEqual([]);
   });
 });

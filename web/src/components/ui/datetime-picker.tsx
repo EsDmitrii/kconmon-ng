@@ -56,12 +56,10 @@ export function composeLocal(date: string, time: string): Date | null {
  * formatInstant is the trigger's label: "Aug 8, 2026, 1:23 AM". Short by design
  * — the trigger sits in a one-line bar.
  *
- * It delegates to lib/i18n's stampInstant, which is where the shape now lives so
+ * It delegates to lib/i18n's stampInstant, which is where the shape lives so
  * that a range shown on a trigger, in a row's detail line and in the incident
- * form reads one way (QA scope 3, finding #18). Two things moved with it: the
- * locale is the INTERFACE's rather than a bare `undefined` (finding #7), and the
- * hour is "numeric" — `hour: "2-digit"` printed "08:00 PM" on this control and
- * nowhere else in the console (finding #17).
+ * form reads one way: the INTERFACE's locale rather than a bare `undefined`,
+ * and a "numeric" hour like the rest of the console.
  */
 export function formatInstant(d: Date, locale: Locale = "en"): string {
   return stampInstant(d, locale);
@@ -113,9 +111,9 @@ export const POPOVER_WIDTH_PX = 280;
  * pickerAlignSide decides which EDGE the popover hangs from. Left-aligned is the default and the
  * tie-break, exactly as "down" is vertically.
  *
- * The trigger moved into the page header, where it sits at the RIGHT edge of the row — and a
- * popover anchored to its left edge ran off the viewport, taking the calendar with it and giving
- * the whole page a horizontal scrollbar (owner report). Space is measured from the trigger's own
+ * The trigger sits at the RIGHT edge of the page header's row, and a popover anchored to its left
+ * edge would run off the viewport, taking the calendar with it and giving the whole page a
+ * horizontal scrollbar. Space is measured from the trigger's own
  * left edge, because that is where a left-aligned popover starts.
  */
 export function pickerAlignSide(spaceRightOfTriggerLeft: number, spaceLeftOfTriggerRight: number): "left" | "right" {
@@ -606,7 +604,7 @@ export function DateTimePicker({
             /* One of the two, never both — same rule as the vertical class below. */
             side === "right" ? "right-0" : "left-0",
             /* One of the two, never both — the class IS the direction, so a
-               test can read it without a layout engine (finding #16). */
+               test can read it without a layout engine. */
             drop === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
           )}
         >
@@ -852,10 +850,10 @@ export function DateTimePicker({
             </Button>
           </div>
 
-          {/* The clamp, said BEFORE it happens (QA round 1, finding #11). The
-              grid disables future days, but the time field cannot: 23:00 typed
-              on today is a legal wall clock and a future instant, and the
-              store silently rewrote it to now on Apply. Apply stays enabled —
+          {/* The clamp, said BEFORE it happens. The grid disables future days,
+              but the time field cannot: 23:00 typed on today is a legal wall
+              clock and a future instant, which the store rewrites to now on
+              Apply. Apply stays enabled —
               the clamp is real and the result is a usable view, so refusing
               the click would trade a surprise for a dead end. */}
           {futureDraft ? (

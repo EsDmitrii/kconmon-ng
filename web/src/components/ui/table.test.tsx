@@ -49,6 +49,16 @@ describe("Table — semantics", () => {
     renderTable({ bare: true });
     expect(screen.getByRole("table").parentElement).not.toHaveClass("overflow-x-auto");
   });
+
+  /* An sr-only header label is position:absolute. With a static scroller its containing block is
+     further up the page, so it escaped the scroller and widened <main> sideways on a phone. */
+  it.each([
+    ["plain", {}],
+    ["labelled", { scrollLabel: "Users" }],
+  ] as const)("makes the %s scroller the containing block for what the cells position", (_name, props) => {
+    renderTable(props);
+    expect(screen.getByRole("table").parentElement).toHaveClass("relative", "overflow-x-auto");
+  });
 });
 
 describe("Table — default variant (the current page look)", () => {

@@ -639,29 +639,9 @@ describe("a file that is not a bundle", () => {
 
 /* ── the language switch, with work on screen ───────────────────────────── */
 
-/**
- * FOREIGN ROOT — components/page-shell.tsx.
- *
- * PageShell renders `<div key={title}>` so that a route change re-runs its
- * entrance animation. The title is a TRANSLATED string, so switching the
- * language changes the key, and a changed key is not a re-render: React
- * unmounts the whole page and mounts a new one. Every piece of local state on
- * the page goes with it.
- *
- * On THIS page that means an open webhook form and everything typed into it, an
- * armed delete confirmation, a loaded bundle and its dry-run table — and the
- * MINTED TOKEN card, which is the one and only render of a secret the API will
- * never hand back. An operator who mints a token and then switches language has
- * lost it. It also refetches every query on the page for nothing.
- *
- * Every page in the console is affected identically; the fix belongs in
- * page-shell.tsx (key on the route path, not on the title — the animation is
- * about navigation, and a language switch is not one). The tests below are the
- * reproduction: the it.skip pair is what should hold, the active test is what
- * holds today, so the day the shell is fixed this file fails and the report is
- * closed rather than quietly rotting.
- */
-describe("switching language keeps the page (page-shell fixed)", () => {
+/* Switching the language re-renders the page, it does not remount it: typed drafts, the one-time
+   minted token and the loaded queries survive. */
+describe("switching language keeps the page", () => {
   it("keeps a half-typed webhook draft, and retitles the form around it", async () => {
     renderPage();
     await openWebhookForm();

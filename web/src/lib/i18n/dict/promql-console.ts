@@ -48,7 +48,7 @@ const en = {
   "tab.json": "JSON",
   /* The disabled Chart tab's tooltip. The block follows the RESULT, not the query
      mode: an instant query on a range vector answers with a matrix and draws. */
-  "tab.chart.disabled": "This result has no series to chart",
+  "tab.chart.disabled": "A chart needs several points per series over time; a query run as Range returns them",
 
   /* ── the three placeholders ────────────────────────────────────────────── */
   /* "empty" only ever renders when NOTHING failed (QA round 4, finding #2):
@@ -104,6 +104,12 @@ const en = {
   /* The stand-in for a Prometheus error envelope that carries no message. Its
      `error` field, when there is one, is server text and renders verbatim. */
   "queryFailed": "query failed",
+
+  /* The permission string is interpolated, never translated: it is what authz/roles.go spells. */
+  "permission.requires": "Requires the {permission} permission",
+  "permission.body":
+    "Queries go through the console's guarded Prometheus proxy, and the proxy needs promql:query. A role without " +
+    "it sees this instead of an editor whose every run would be refused.",
 } as const;
 
 export type PromQLConsoleKey = keyof typeof en;
@@ -133,7 +139,7 @@ export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
   "tab.table": "Таблица",
   "tab.chart": "График",
   "tab.json": "JSON",
-  "tab.chart.disabled": "В этом результате нет серий для графика",
+  "tab.chart.disabled": "Графику нужно несколько точек на серию во времени; их возвращает запрос в режиме «Диапазон»",
 
   "table.empty": "Данных нет: запрос вернул пустой результат.",
   "table.empty.body": "На этот момент под селекторы ничего не попало: ослабьте матчер по меткам или попробуйте режим «Диапазон».",
@@ -162,4 +168,9 @@ export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
   "json.idle": "Выполните запрос, чтобы увидеть сырой ответ.",
 
   "queryFailed": "запрос не выполнен",
+
+  "permission.requires": "Нужно право {permission}",
+  "permission.body":
+    "Запросы идут через защищённый прокси консоли к Prometheus, а прокси нужно право promql:query. Роль без него " +
+    "видит эту карточку вместо редактора, каждый запуск в котором был бы отклонён.",
 });

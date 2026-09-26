@@ -15,7 +15,7 @@ import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/
  *     AS the label. Translating those would mean the box shows «узел» and the
  *     API stores "node" — a control lying about what it is about to write.
  *   - Field names quoted inside a sentence stay too: `sourceSelection`,
- *     `one-per-zone`, `console.database.mode`, `GET /api/v1/runs`. An operator
+ *     `one-per-zone`, `database.dsnFile`, `GET /api/v1/runs`. An operator
  *     types those into a config file next, not into a conversation.
  *   - Sample values in placeholders — "edge-gateway", "10.0.0.1",
  *     "env=prod, tier=edge", '{"port": 443}' — are examples of DATA. Only the
@@ -63,20 +63,23 @@ const en = {
     "External targets, their check definitions and their schedules are configuration, not telemetry: reading them is " +
     "granted to the operator and admin roles, and deliberately not to viewer — which is the role an anonymous " +
     "session gets. Sign in with an account that holds it.",
-  "gate.noDatabase": "Targets, definitions and schedules are stored in the database — set console.database.mode",
+  "gate.noDatabase": "Targets, definitions and schedules are stored in the database — set database.dsnFile (Helm: database.existingSecret)",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so targets, definitions and schedules were not requested: {error}",
+  "config.failed.generic": "the request failed",
 
   /* ── Targets tab ───────────────────────────────────────────────────────── */
   "targets.heading": "Targets",
   "targets.listAria": "Targets",
   /* ui/pager.tsx's noun for this list. */
   "targets.subject": "targets",
-  /* Each *.empty teaches in dict/mtr.ts destinations.empty.*'s three-part
-     shape: what the object is, what appears once one exists, and a CTA naming
-     the create button — the .cta key renders only beside that button. */
+  /* Each *.empty is the body under its *.empty.title: what the object is and what appears once one
+     exists. The slate carries the create button itself. */
+  "targets.empty.title": "No targets yet",
   "targets.empty":
-    "No targets yet. A target names a host or URL outside the fleet, and external checks probe what is listed " +
+    "A target names a host or URL outside the fleet, and external checks probe what is listed " +
     "here. Point a definition at one, and its results land in run history and metrics.",
-  "targets.empty.cta": "Create the first one with the New target button above.",
   "targets.unavailable": "Targets are unavailable",
   "targets.gate.write":
     "The list below is complete and current — creating, editing and deleting targets is what needs the extra " +
@@ -85,6 +88,7 @@ const en = {
   "targets.form.edit": "Edit {name}",
   "targets.form.create": "New target",
   "targets.form.name": "Name",
+  "targets.form.nameRequired": "A name is required.",
   "targets.form.kind": "Kind",
   "targets.form.address": "Address",
   "targets.form.labels": "Labels",
@@ -107,11 +111,11 @@ const en = {
   "definitions.heading": "Check definitions",
   "definitions.listAria": "Check definitions",
   "definitions.subject": "definitions",
+  "definitions.empty.title": "No check definitions yet",
   "definitions.empty":
-    "No check definitions yet. A definition says what the fleet probes: a check type, which agents send, and " +
+    "A definition says what the fleet probes: a check type, which agents send, and " +
     "where the probes go — a target or the nodes themselves. Give one a schedule, and its results land in run " +
     "history and metrics.",
-  "definitions.empty.cta": "Create one with the New definition button above.",
   "definitions.unavailable": "Check definitions are unavailable",
   "definitions.gate.read":
     "Check definitions say what the fleet probes and how often. Reading them is granted to the operator and admin " +
@@ -123,6 +127,7 @@ const en = {
   "definitions.form.edit": "Edit {name}",
   "definitions.form.create": "New definition",
   "definitions.form.name": "Name",
+  "definitions.form.nameRequired": "A name is required.",
   "definitions.form.checkType": "Check type",
   "definitions.form.sourceSelection": "Source selection",
   "definitions.form.destinationKind": "Destination kind",
@@ -131,7 +136,8 @@ const en = {
   "definitions.form.pickTarget": "— pick a target —",
   "definitions.form.plane": "Plane",
   "definitions.form.planeNote":
-    "Definitions probe from the pod network. M4 ships no second plane, so this is fixed rather than chosen.",
+    "Definitions probe from the pod network; this release ships no second plane, so this is fixed rather than chosen.",
+  "definitions.form.nodesOnly": "{type} probes kconmon nodes only: only a kconmon agent answers it.",
   "definitions.form.params": "Params (JSON)",
   "definitions.form.enabled": "Enabled",
   "definitions.form.save": "Save definition",
@@ -172,10 +178,10 @@ const en = {
   "schedules.subject": "schedules",
   /* "never fires on its own" is the scheduler's contract, not a guess: the
      loop fires only schedule rows, and agents get only continuous ones. */
+  "schedules.empty.title": "No schedules yet",
   "schedules.empty":
-    "No schedules yet. A schedule is the cadence that fires a check definition: once, at an interval, or " +
+    "A schedule is the cadence that fires a check definition: once, at an interval, or " +
     "continuously on the agents. A definition without a schedule never fires on its own.",
-  "schedules.empty.cta": "Create one with the New schedule button above.",
   "schedules.unavailable": "Schedules are unavailable",
   "schedules.schedulerOff":
     "These schedules will not fire: the scheduler loop is disabled on this install " +
@@ -192,10 +198,12 @@ const en = {
   "schedules.form.definitionFixed": "A schedule belongs to its definition; create a new one to point elsewhere.",
   "schedules.form.error.runAtPast": "The moment must be in the future.",
   "schedules.form.definition": "Definition",
+  "schedules.form.definitionRequired": "Pick a definition to schedule.",
   "schedules.form.pickDefinition": "— pick a definition —",
   "schedules.form.kind": "Kind",
   "schedules.form.interval": "Interval (seconds)",
   "schedules.form.runAt": "Run at",
+  "schedules.form.runAtRequired": "Pick when the run happens.",
   "schedules.form.runAtNotSet": "Not set",
   "schedules.form.runAtClear": "Clear",
   "schedules.form.runAtClearAria": "Clear run at",
@@ -207,13 +215,20 @@ const en = {
   "schedules.form.hint.continuous":
     "Continuous schedules are pushed to the agents and never fire on the scheduler's clock — they carry no interval " +
     "and no run-at.",
+  "schedules.form.kinds.continuousOnly":
+    "{type} runs toward a target or an ad-hoc address only continuously: one-off and repeating runs go there for " +
+    "tcp, icmp and mtr only.",
+  "schedules.form.kinds.runsOnly":
+    "{type} runs toward a target or an ad-hoc address only as one-off or repeating runs: continuous checks go there " +
+    "for tcp, icmp, dns and http only.",
+  "schedules.form.kinds.nodesOnly":
+    "{type} probes kconmon nodes only, so no schedule of this definition could run. Point it at nodes first.",
   /* Says what the box WANTS rather than what was wrong with what was typed:
      one sentence covers "5 seconds", "abc", "0x10", "-1" and an empty box, and
      an operator reading it knows immediately what to write instead. */
   "schedules.form.error.interval": "interval must be a positive number of seconds, like 60 or 2.5",
   /* The other refusal is a RANGE, so it names the bound. */
   "schedules.form.error.intervalRange": "interval must be at most {max} seconds",
-  "schedules.form.error.runAt": "kind once requires a run at time",
   "schedules.row.edit": "Edit {name}",
   "schedules.row.enable": "Enable {name}",
   "schedules.row.disable": "Disable {name}",
@@ -230,6 +245,21 @@ const en = {
   "schedules.enabled": "enabled",
   "schedules.disabled": "disabled",
   "schedules.paused": "paused: definition disabled",
+  /* A once schedule that has fired: still enabled, never firing again. */
+  "schedules.done": "done",
+  "schedules.done.title": "This once schedule has fired and will not fire again.",
+  /* The stored kinds, on row chips and in pickers. English keeps the wire word. */
+  "kind.target.host": "host",
+  "kind.target.url": "url",
+  "kind.source.all": "all",
+  "kind.source.per-zone": "per-zone",
+  "kind.source.one-per-zone": "one-per-zone",
+  "kind.destination.node": "node",
+  "kind.destination.target": "target",
+  "kind.destination.adhoc": "adhoc",
+  "kind.schedule.once": "once",
+  "kind.schedule.interval": "interval",
+  "kind.schedule.continuous": "continuous",
   "schedules.paused.title": "The schedule is on, but {name} is switched off, so nothing fires. The cadence keeps its place and resumes when the definition is switched back on.",
   "schedules.rowAria": "{name}, {cadence}",
   "schedules.cadence.interval": "every {interval}",
@@ -269,15 +299,17 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
     "Внешние цели, их определения проверок и расписания относятся к конфигурации, а не к телеметрии. Читать их " +
     "могут operator и admin, а viewer намеренно не может, и именно viewer достаётся анонимной сессии. Войдите " +
     "под учётной записью с нужной ролью.",
-  "gate.noDatabase": "Цели, определения и расписания хранятся в базе, задайте console.database.mode",
+  "gate.noDatabase": "Цели, определения и расписания хранятся в базе, задайте database.dsnFile (Helm: database.existingSecret)",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому цели, определения и расписания не запрашивались: {error}",
+  "config.failed.generic": "запрос не выполнен",
 
   "targets.heading": "Цели",
   "targets.listAria": "Цели",
   "targets.subject": "Цели",
+  "targets.empty.title": "Целей пока нет",
   "targets.empty":
-    "Целей пока нет. Цель — это хост или URL за пределами флота; внешние проверки зондируют то, что перечислено " +
+    "Цель — это хост или URL за пределами флота; внешние проверки зондируют то, что перечислено " +
     "здесь. Наведите на цель определение — и результаты пойдут в историю запусков и в метрики.",
-  "targets.empty.cta": "Создайте первую кнопкой «Новая цель» выше.",
   "targets.unavailable": "Цели недоступны",
   "targets.gate.write":
     "Список ниже полон и актуален. Дополнительное право нужно только на то, чтобы создавать, изменять и удалять " +
@@ -286,6 +318,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "targets.form.edit": "Изменить {name}",
   "targets.form.create": "Новая цель",
   "targets.form.name": "Имя",
+  "targets.form.nameRequired": "Имя обязательно.",
   "targets.form.kind": "Вид",
   "targets.form.address": "Адрес",
   "targets.form.labels": "Метки",
@@ -303,10 +336,10 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "definitions.heading": "Определения проверок",
   "definitions.listAria": "Определения проверок",
   "definitions.subject": "Проверки",
+  "definitions.empty.title": "Определений проверок пока нет",
   "definitions.empty":
-    "Определений проверок пока нет. Определение описывает проверку: её тип, какие агенты зондируют и куда — " +
+    "Определение описывает проверку: её тип, какие агенты зондируют и куда — " +
     "на цель или на сами узлы. Дайте ему расписание — и результаты пойдут в историю запусков и в метрики.",
-  "definitions.empty.cta": "Создайте первое кнопкой «Новое определение» выше.",
   "definitions.unavailable": "Определения проверок недоступны",
   "definitions.gate.read":
     "Определения проверок описывают, что и как часто зондирует флот. Читать их могут роли operator и admin.",
@@ -317,6 +350,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "definitions.form.edit": "Изменить {name}",
   "definitions.form.create": "Новое определение",
   "definitions.form.name": "Имя",
+  "definitions.form.nameRequired": "Имя обязательно.",
   "definitions.form.checkType": "Тип проверки",
   "definitions.form.sourceSelection": "Выбор источников",
   "definitions.form.destinationKind": "Вид назначения",
@@ -325,7 +359,8 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "definitions.form.pickTarget": "выберите цель…",
   "definitions.form.plane": "Плоскость",
   "definitions.form.planeNote":
-    "Определения зондируют из сети подов. Второй плоскости в M4 нет, поэтому значение фиксировано, а не выбирается.",
+    "Определения зондируют из сети подов; второй плоскости в этом выпуске нет, поэтому значение фиксировано, а не выбирается.",
+  "definitions.form.nodesOnly": "{type} проверяет только узлы kconmon: ответить ему может лишь агент kconmon.",
   "definitions.form.params": "Параметры (JSON)",
   "definitions.form.enabled": "Включено",
   "definitions.form.save": "Сохранить определение",
@@ -358,10 +393,10 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.heading": "Расписания",
   "schedules.listAria": "Расписания",
   "schedules.subject": "Расписания",
+  "schedules.empty.title": "Расписаний пока нет",
   "schedules.empty":
-    "Расписаний пока нет. Расписание — это ритм, по которому срабатывает определение: однократно, с интервалом " +
+    "Расписание — это ритм, по которому срабатывает определение: однократно, с интервалом " +
     "или непрерывно на агентах. Определение без расписания само не срабатывает никогда.",
-  "schedules.empty.cta": "Создайте первое кнопкой «Новое расписание» выше.",
   "schedules.unavailable": "Расписания недоступны",
   "schedules.schedulerOff":
     "Эти расписания не сработают: цикл планировщика на этой инсталляции выключен " +
@@ -379,10 +414,12 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.form.definitionFixed": "Расписание принадлежит своему определению; чтобы указать другое, создайте новое.",
   "schedules.form.error.runAtPast": "Момент должен быть в будущем.",
   "schedules.form.definition": "Определение",
+  "schedules.form.definitionRequired": "Выберите определение для расписания.",
   "schedules.form.pickDefinition": "выберите определение…",
   "schedules.form.kind": "Вид",
   "schedules.form.interval": "Интервал (секунды)",
   "schedules.form.runAt": "Момент запуска",
+  "schedules.form.runAtRequired": "Выберите время запуска.",
   "schedules.form.runAtNotSet": "Не задан",
   "schedules.form.runAtClear": "Очистить",
   "schedules.form.runAtClearAria": "Очистить момент запуска",
@@ -394,9 +431,17 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.form.hint.continuous":
     "Непрерывные расписания раздаются агентам и по часам планировщика не срабатывают никогда: ни интервала, " +
     "ни момента запуска у них нет.",
+  "schedules.form.kinds.continuousOnly":
+    "{type} к цели или произвольному адресу идёт только непрерывно: разовые и повторяющиеся запуски туда бывают " +
+    "лишь для tcp, icmp и mtr.",
+  "schedules.form.kinds.runsOnly":
+    "{type} к цели или произвольному адресу идёт только разовыми и повторяющимися запусками: непрерывно туда " +
+    "проверяют лишь tcp, icmp, dns и http.",
+  "schedules.form.kinds.nodesOnly":
+    "{type} проверяет только узлы kconmon, так что ни одно расписание этого определения не сработает. Сначала " +
+    "направьте определение на узлы.",
   "schedules.form.error.interval": "интервал — положительное число секунд, например 60 или 2.5",
   "schedules.form.error.intervalRange": "интервал не может быть больше {max} секунд",
-  "schedules.form.error.runAt": "для вида once нужен момент запуска",
   "schedules.row.edit": "Изменить {name}",
   "schedules.row.enable": "Включить {name}",
   "schedules.row.disable": "Выключить {name}",
@@ -411,6 +456,19 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.enabled": "включено",
   "schedules.disabled": "выключено",
   "schedules.paused": "пауза: определение выключено",
+  "schedules.done": "выполнено",
+  "schedules.done.title": "Разовое расписание уже сработало и больше не сработает.",
+  "kind.target.host": "хост",
+  "kind.target.url": "URL",
+  "kind.source.all": "все",
+  "kind.source.per-zone": "по зонам",
+  "kind.source.one-per-zone": "по одному на зону",
+  "kind.destination.node": "узлы",
+  "kind.destination.target": "цель",
+  "kind.destination.adhoc": "произвольный адрес",
+  "kind.schedule.once": "разовое",
+  "kind.schedule.interval": "интервальное",
+  "kind.schedule.continuous": "непрерывное",
   "schedules.paused.title": "Расписание включено, но {name} выключено, поэтому ничего не запускается. Отсчёт продолжается и возобновится, когда определение снова включат.",
   "schedules.rowAria": "{name}, {cadence}",
   "schedules.cadence.interval": "каждые {interval}",

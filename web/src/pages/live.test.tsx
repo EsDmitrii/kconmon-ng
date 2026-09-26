@@ -10,7 +10,8 @@ import { fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE } from "@/lib/ws";
 import { NAV_ITEMS } from "@/nav";
 import { LIVE_RING_CAP, pushEvents } from "@/lib/live-events";
-import { LivePage, ROW_HEIGHT, countMissedEvents, filterEvents } from "./live";
+import { LivePage, ROW_HEIGHT, STACKED_ROW_HEIGHT, countMissedEvents, filterEvents } from "./live";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 // Give the layout a real height for this file only (jsdom defines these as configurable accessors)
 // and restore it afterwards.
@@ -514,6 +515,74 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
     expect(loadOlder).toBeDisabled();
   });
 
+  /* One transient failure on an older page used to clear the cursor: the button read "nothing
+     older" and no retry existed until a filter changed. */
+  it("keeps the cursor when an older page fails, so 'Load older' retries the same page", async () => {
+    const page1 = { events: [ev(5, { timestamp: "2026-07-28T09:50:00Z" })], nextCursor: "cursor-1" };
+    const page2 = { events: [ev(4, { timestamp: "2026-07-28T09:40:00Z" })], nextCursor: "" };
+    let failNext = true;
+    const fetchMock = stubEventsFetch((qs) => {
+      if (qs.get("cursor") !== "cursor-1") return json(page1);
+      if (failNext) {
+        failNext = false;
+        return new Response(JSON.stringify({ type: "about:blank", title: "Bad Gateway", status: 502, detail: "upstream reset" }), {
+          status: 502,
+          headers: { "Content-Type": "application/problem+json" },
+        });
+      }
+      return json(page2);
+    });
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("event 5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older" }));
+    expect(await screen.findByText("upstream reset")).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Load older" });
+    expect(retry).not.toBeDisabled();
+
+    fireEvent.click(retry);
+    await screen.findByText("event 4");
+    const cursors = fetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter((u) => u.startsWith("/api/v1/events"))
+      .map((u) => new URLSearchParams(u.split("?")[1] ?? "").get("cursor"));
+    expect(cursors).toEqual([null, "cursor-1", "cursor-1"]);
+    expect(screen.queryByText("upstream reset")).toBeNull();
+  });
+
+  /* A replica restart answering page one with a 502 used to leave "Load older" disabled as
+     "nothing older" with no way back but a reload or a filter change. */
+  it("offers a retry when the first page fails, and does not call the feed exhausted", async () => {
+    let failNext = true;
+    const fetchMock = stubEventsFetch(() => {
+      if (failNext) {
+        failNext = false;
+        return new Response(JSON.stringify({ type: "about:blank", title: "Bad Gateway", status: 502, detail: "upstream reset" }), {
+          status: 502,
+          headers: { "Content-Type": "application/problem+json" },
+        });
+      }
+      return json({ events: [ev(3, { summary: "history after retry" })], nextCursor: "" });
+    });
+
+    renderPage(["events"], true);
+    open();
+    expect(await screen.findByText("upstream reset")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load older" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("history after retry");
+    const cursors = fetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter((u) => u.startsWith("/api/v1/events"))
+      .map((u) => new URLSearchParams(u.split("?")[1] ?? "").get("cursor"));
+    expect(cursors).toEqual([null, null]);
+    expect(screen.queryByText("upstream reset")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("makes no history request and shows no scrollback control when database.configured is false", async () => {
     const fetchMock = stubEventsFetch(() => json({ events: [], nextCursor: "" }));
 
@@ -535,7 +604,7 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
             type: "about:blank",
             title: "event history not available",
             status: 503,
-            detail: "set console.database.mode in the console config to enable GET /api/v1/events",
+            detail: "set database.dsnFile in the console config (Helm: database.existingSecret) to enable GET /api/v1/events",
           }),
           { status: 503, headers: { "Content-Type": "application/problem+json" } },
         ),
@@ -543,7 +612,7 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
 
     renderPage(["events"], true);
     open();
-    await screen.findByText(/set console.database.mode/);
+    await screen.findByText(/set database\.dsnFile in the console config/);
 
     await emit([ev(1, { summary: "still live" })]);
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
@@ -626,6 +695,18 @@ describe("LivePage — the feed's clock", () => {
   });
 });
 
+describe("LivePage — severity is a word at every width", () => {
+  it("shows the severity word, not only the dot, so a phone never reads it by colour alone", async () => {
+    renderPage();
+    open();
+    await emit([ev(1, { severity: "warn" }), ev(2, { severity: "error" })]);
+    for (const word of ["Warn", "Error"]) {
+      const label = screen.getByText(word, { selector: "span" });
+      expect(label.className).not.toContain("sr-only");
+    }
+  });
+});
+
 describe("LivePage — paused is not live (#12)", () => {
   it("drops the green Live badge while paused; the Paused chip is the state", async () => {
     renderPage();
@@ -636,10 +717,9 @@ describe("LivePage — paused is not live (#12)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
 
     expect(screen.queryByText("Live", { selector: "span" })).toBeNull();
-    // Two chips now, and deliberately: the filter bar's "Paused · N buffered"
-    // is the state, and the transport slot's "Paused · socket live" keeps the
-    // socket answerable while the feed is held (finding 20).
-    expect(screen.getAllByText(/^Paused ·/).length).toBeGreaterThanOrEqual(1);
+    // One chip: the transport slot's "Paused · socket live" says the state and keeps the socket
+    // answerable while the feed is held; the Resume button carries the buffered count.
+    expect(screen.getAllByText(/^Paused ·/)).toHaveLength(1);
     expect(within(screen.getByTestId("live-transport-slot")).getByText(/^Paused ·/)).toBeInTheDocument();
   });
 
@@ -704,6 +784,35 @@ describe("LivePage — Load older says why it is disabled (#16)", () => {
     await screen.findByText("event 5");
 
     expect(screen.getByRole("button", { name: "Load older" })).not.toBeDisabled();
+  });
+});
+
+describe("LivePage — a failed GET /api/v1/config", () => {
+  it("says the configuration could not be read instead of treating it as no database", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (String(url).startsWith("/api/v1/config")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ type: "about:blank", title: "Bad Gateway", status: 502, detail: "ingress upstream gone" }), {
+              status: 502,
+              headers: { "Content-Type": "application/problem+json" },
+            }),
+          );
+        }
+        return Promise.resolve(json({ version: "1.6.0", commit: "abc123", capabilities: ["events"] }));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "abc123", capabilities: ["events"] });
+    render(
+      <QueryClientProvider client={qc}>
+        <LivePage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeInTheDocument();
+    expect(screen.getByText("Event history is unavailable")).toBeInTheDocument();
   });
 });
 
@@ -901,5 +1010,41 @@ describe("countMissedEvents and server-filtered history", () => {
   it("still sees a hole between unfiltered rows when filtered rows are mixed in", () => {
     const mixed = [ev(1), ev(4), ev(900, { filteredHistory: true })];
     expect(countMissedEvents(mixed)).toBe(2);
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("LivePage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage();
+    open();
+    await emit([ev(1, { summary: "first thing" }), ev(2, { summary: "second thing" })]);
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  /* Below md a row wraps onto two lines, and the virtualizer has to reserve the height of both. */
+  it("lays the feed out on the stacked row height the phone's two-line row needs", async () => {
+    emulatePhone();
+    renderPage();
+    open();
+    await emit([ev(1, { summary: "first thing" }), ev(2, { summary: "second thing" })]);
+    const rows = screen.getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row.style.height).toBe(`${STACKED_ROW_HEIGHT}px`);
+    expect(rows[1].style.transform).toBe(`translateY(${STACKED_ROW_HEIGHT}px)`);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage();
+    open();
+    await emit([ev(1, { summary: "first thing" }), ev(2, { summary: "second thing", severity: "warn" })]);
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

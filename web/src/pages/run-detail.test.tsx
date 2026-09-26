@@ -6,7 +6,9 @@ import { FakeSocket } from "@/lib/fake-websocket";
 import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import type { RunDetail } from "@/lib/types";
 import { TimeMachineProvider } from "@/lib/timemachine";
+import { fmtNsCompact } from "@/lib/run-samples";
 import { decodeRunId, okPairs, runIdFromPath, RunDetailPage } from "./run-detail";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 vi.mock("@/components/echart", () => ({
   EChart: ({ className }: { className?: string }) => <div data-testid="echart" className={className} />,
@@ -62,9 +64,11 @@ function renderPage(
     locale?: Locale;
     /** GET /api/v1/mtr/snapshots, which a pair row reads when it is opened. */
     onSnapshots?: () => Response;
+    /** The same, for a case that pages or holds its answer back: gets the request URL. */
+    onSnapshotsPage?: (url: string) => Response | Promise<Response>;
   } = {},
 ) {
-  const { permissions = ["runs:create"], onCancel, locale, onSnapshots } = opts;
+  const { permissions = ["runs:create"], onCancel, locale, onSnapshots, onSnapshotsPage } = opts;
   if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   window.history.pushState({}, "", `/diagnostics/runs/${runId}`);
   const calls: Call[] = [];
@@ -78,6 +82,7 @@ function renderPage(
       return Promise.resolve(onCancel ? onCancel() : new Response(null, { status: 204 }));
     }
     if (href.startsWith("/api/v1/mtr/snapshots")) {
+      if (onSnapshotsPage) return Promise.resolve(onSnapshotsPage(href));
       return Promise.resolve(onSnapshots ? onSnapshots() : json({ snapshots: [], nextCursor: "" }));
     }
     if (href.startsWith("/api/v1/runs/")) return Promise.resolve(json(typeof run === "function" ? run() : run));
@@ -389,9 +394,14 @@ describe("RunDetailPage realtime badge", () => {
     await screen.findByText("running");
     /* The badge follows the CONNECTION now, not the mere existence of a subscription: it used to
        read "Live" while the socket was down and the page was really being carried by the 5s poll. */
-    await screen.findByText("Delayed data");
+    /* Nor does it say "Delayed data" while the socket is still being dialled: that flashed on
+       every fresh permalink before the first frame could possibly have arrived. */
+    expect(screen.queryByText("Live")).toBeNull();
+    expect(screen.queryByText("Delayed data")).toBeNull();
     act(() => FakeSocket.last().emitOpen());
     expect(await screen.findByText("Live")).toBeInTheDocument();
+    act(() => FakeSocket.last().emitClose(1006));
+    expect(await screen.findByText("Delayed data")).toBeInTheDocument();
   });
 });
 
@@ -742,6 +752,7 @@ describe("interval runs", () => {
 
     expect(await screen.findByText("Probe timeline")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /cancel run/i })).toBeInTheDocument();
+    act(() => FakeSocket.last().emitOpen());
     expect(screen.getByText(/^(Live|Delayed data)$/)).toBeInTheDocument();
     // 1h widens the cadence past the 5s floor: 3600s/500 = 7.2s -> "7s", labelled as the plan it is.
     expect(screen.getByText("7s planned")).toBeInTheDocument();
@@ -1086,8 +1097,59 @@ describe("RunDetailPage — Russian", () => {
     // and stays verbatim inside the translated tick title.
     expect(screen.getByRole("button", { name: "Отменить запуск" })).toBeInTheDocument();
     expect(screen.getByTitle("#0 connection refused")).toBeInTheDocument();
-    // The status badge is the store's enum and does NOT move.
-    expect(screen.getByText("running")).toBeInTheDocument();
+    // The status badge speaks Russian too, with the words the Run checks list uses.
+    expect(screen.getByText("выполняется")).toBeInTheDocument();
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
+  });
+
+  it("translates the run status and pair states, and writes latencies and ratios the Russian way", async () => {
+    renderPage(
+      [],
+      runBody({
+        status: "failed",
+        startedAt: "2026-07-28T10:00:00Z",
+        finishedAt: "2026-07-28T10:01:00Z",
+        spec: { Type: "tcp", Duration: 60 * s },
+        pairTotal: 2,
+        pairOk: 1,
+        pairFailed: 1,
+        results: [
+          {
+            sourceNode: "node-a",
+            destinationNode: "node-b",
+            success: true,
+            durationNs: 73_000,
+            recordedAt: "2026-07-28T10:00:00Z",
+            sampleSeq: 0,
+          },
+          {
+            sourceNode: "node-b",
+            destinationNode: "node-a",
+            success: false,
+            durationNs: 300_000,
+            recordedAt: "2026-07-28T10:00:00Z",
+            sampleSeq: 0,
+            error: "connection refused",
+          },
+        ],
+      } as Partial<RunDetail>),
+      RUN_ID,
+      { locale: "ru" },
+    );
+
+    expect(await screen.findByText("Лента зондов")).toBeInTheDocument();
+    // «сбой», never «отказ»: the run's badge and the failed pair's state.
+    expect(screen.getAllByText("сбой").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("успешно")).toBeInTheDocument();
+    expect(screen.queryByText("failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("succeeded")).not.toBeInTheDocument();
+    expect(screen.queryByText(/отказ/)).not.toBeInTheDocument();
+    // Latencies: «мкс» and a decimal comma, never "73µs" or "0.3ms".
+    expect(screen.getAllByText("73 мкс").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("0,3 мс").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/µs|\d\.\dms/)).not.toBeInTheDocument();
+    // The failure ratio's decimal mark follows the language too.
+    expect(screen.getByText("1 (50,0%)")).toBeInTheDocument();
   });
 
   // The answer to «не понимаю сколько осталось», in Russian: count, approximate total, tail as time.
@@ -1365,6 +1427,244 @@ describe("a run's pairs open onto the route they took", () => {
     fireEvent.click(expander());
 
     expect(await screen.findByText("No route recorded for this pair yet.")).toBeInTheDocument();
+  });
+
+  /* The pair's route list is newest first and not bounded by the run, so its head is whatever the
+     pair walks NOW. An old run's row has to show the route its own probe walked. */
+  it("opens onto the route the run's probe walked, not the pair's newest one", async () => {
+    const later = {
+      id: "snap-2",
+      sourceNode: "node-a",
+      destination: "node-b",
+      pathHash: "bbbbbbbbbbbb0000",
+      hopCount: 1,
+      hops: [hop(1, "10.99.0.1")],
+      firstSeen: "2026-07-29T08:00:00Z",
+      lastSeen: "2026-07-29T09:00:00Z",
+      traceCount: 5,
+    };
+    renderPage(["events"], mtrRun(), RUN_ID, {
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            later,
+            {
+              id: "snap-1",
+              sourceNode: "node-a",
+              destination: "node-b",
+              pathHash: "aaaaaaaaaaaa0000",
+              hopCount: 2,
+              hops: [hop(1, "10.244.9.17"), hop(2, "10.0.0.9")],
+              firstSeen: "2026-07-28T10:00:00Z",
+              lastSeen: "2026-07-28T10:30:00Z",
+              traceCount: 3,
+            },
+          ],
+          nextCursor: "",
+        }),
+    });
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(expander());
+
+    expect(await screen.findByText("10.244.9.17")).toBeInTheDocument();
+    expect(screen.queryByText("10.99.0.1")).not.toBeInTheDocument();
+  });
+
+  /* The list is ordered by first_seen, so a long-lived route sits behind every route first seen
+     after it, however briefly those were walked. One page of 20 left it unreached: "no route". */
+  it("walks the route list past its first page to find the route the probe walked", async () => {
+    const transient = Array.from({ length: 20 }, (_, i) => ({
+      id: `snap-t${i}`,
+      sourceNode: "node-a",
+      destination: "node-b",
+      pathHash: `cccccccccccc${String(i).padStart(4, "0")}`,
+      hopCount: 1,
+      hops: [hop(1, `10.77.0.${i + 1}`)],
+      firstSeen: `2026-07-28T11:${String(i).padStart(2, "0")}:00Z`,
+      lastSeen: `2026-07-28T11:${String(i).padStart(2, "0")}:30Z`,
+      traceCount: 1,
+    }));
+    const lived = {
+      id: "snap-1",
+      sourceNode: "node-a",
+      destination: "node-b",
+      pathHash: "aaaaaaaaaaaa0000",
+      hopCount: 2,
+      hops: [hop(1, "10.244.9.17"), hop(2, "10.0.0.9")],
+      firstSeen: "2026-07-28T10:00:00Z",
+      lastSeen: "2026-07-28T12:00:00Z",
+      traceCount: 90,
+    };
+    const all = [...transient.reverse(), lived];
+    renderPage(["events"], mtrRun(), RUN_ID, {
+      onSnapshotsPage: (url) => {
+        const q = new URLSearchParams(url.slice(url.indexOf("?")));
+        const from = Number(q.get("cursor") ?? "0");
+        const limit = Number(q.get("limit") ?? "100");
+        const end = Math.min(all.length, from + limit);
+        return json({ snapshots: all.slice(from, end), nextCursor: end < all.length ? String(end) : "" });
+      },
+    });
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(expander());
+
+    expect(await screen.findByText("10.244.9.17")).toBeInTheDocument();
+    expect(screen.queryByText("No recorded route covers this pair's latest probe.")).not.toBeInTheDocument();
+  });
+
+  it("says a pair whose probe failed recorded no route, even when a stored one covers its instant", async () => {
+    const failedRun = mtrRun({
+      results: [
+        {
+          sourceNode: "node-a",
+          destinationNode: "node-b",
+          success: false,
+          error: "trace timed out",
+          durationNs: 30 * s,
+          recordedAt: "2026-07-28T10:10:00Z",
+          sampleSeq: 0,
+        },
+      ],
+    });
+    renderPage(["events"], failedRun, RUN_ID, { onSnapshots: snapshotsBody });
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(expander());
+
+    expect(await screen.findByText(/this pair's latest probe recorded no route/i)).toBeInTheDocument();
+    expect(screen.queryByText("10.244.9.17")).not.toBeInTheDocument();
+  });
+
+  it("says no stored route covers the pair's probe rather than showing a later one", async () => {
+    const lateRun = mtrRun({
+      results: [
+        {
+          sourceNode: "node-a",
+          destinationNode: "node-b",
+          success: true,
+          durationNs: 2 * s,
+          recordedAt: "2026-07-28T23:00:00Z",
+          sampleSeq: 0,
+        },
+      ],
+    });
+    renderPage(["events"], lateRun, RUN_ID, { onSnapshots: snapshotsBody });
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(expander());
+
+    expect(await screen.findByText("No recorded route covers this pair's latest probe.")).toBeInTheDocument();
+    expect(screen.queryByText("10.244.9.17")).not.toBeInTheDocument();
+  });
+
+  /* Per-flow ECMP alternates a pair between two routes, and the store only extends each route's
+     lastSeen, so both windows cover the probe; naming either one would guess the route it walked. */
+  it("says several stored routes cover the pair's probe instead of picking one", async () => {
+    renderPage(["events"], mtrRun(), RUN_ID, {
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            {
+              id: "snap-b",
+              sourceNode: "node-a",
+              destination: "node-b",
+              pathHash: "bbbbbbbbbbbb0000",
+              hopCount: 1,
+              hops: [hop(1, "10.99.0.1")],
+              firstSeen: "2026-07-28T10:05:00Z",
+              lastSeen: "2026-07-28T10:30:00Z",
+              traceCount: 9,
+            },
+            {
+              id: "snap-a",
+              sourceNode: "node-a",
+              destination: "node-b",
+              pathHash: "aaaaaaaaaaaa0000",
+              hopCount: 2,
+              hops: [hop(1, "10.244.9.17"), hop(2, "10.0.0.9")],
+              firstSeen: "2026-07-28T10:00:00Z",
+              lastSeen: "2026-07-28T10:29:30Z",
+              traceCount: 9,
+            },
+          ],
+          nextCursor: "",
+        }),
+    });
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(expander());
+
+    expect(await screen.findByText(/several recorded routes cover this pair's latest probe/i)).toBeInTheDocument();
+    expect(screen.queryByText("10.99.0.1")).not.toBeInTheDocument();
+    expect(screen.queryByText("10.244.9.17")).not.toBeInTheDocument();
+  });
+
+  /* A running MTR run lands a new probe of the pair every few seconds. The route list is the pair's,
+     so an open row must neither blank nor re-walk the list on each one. */
+  describe("on a running run", () => {
+    const probeAt = (recordedAt: string, sampleSeq: number) => ({
+      sourceNode: "node-a",
+      destinationNode: "node-b",
+      success: true,
+      durationNs: (2 + sampleSeq * 5) * s,
+      recordedAt,
+      sampleSeq,
+    });
+    /* The pair row's Duration cell is the newest probe's: once it reads 7s, the row holds probe 1. */
+    const newProbeOnScreen = () => waitFor(() => expect(screen.getAllByText(fmtNsCompact(7 * s)).length).toBeGreaterThan(0));
+    const snapshotCalls = (calls: { url: string }[]) => calls.filter((c) => c.url.startsWith("/api/v1/mtr/snapshots")).length;
+
+    it("keeps the open row's route on screen and asks nothing when the new probe is on a route it holds", async () => {
+      let results = [probeAt("2026-07-28T10:10:00Z", 0)];
+      let first = true;
+      const { calls, qc } = renderPage(["events"], () => mtrRun({ status: "running", results }), RUN_ID, {
+        onSnapshots: () => {
+          if (first) {
+            first = false;
+            return snapshotsBody();
+          }
+          throw new Error("the route list was asked for again");
+        },
+      });
+      await screen.findByRole("heading", { name: "Pairs" });
+      fireEvent.click(expander());
+      expect(await screen.findByText("10.244.9.17")).toBeInTheDocument();
+
+      results = [...results, probeAt("2026-07-28T10:20:00Z", 1)];
+      await act(() => qc.refetchQueries({ queryKey: ["run", RUN_ID] }));
+      await newProbeOnScreen();
+
+      expect(screen.getByText("10.244.9.17")).toBeInTheDocument();
+      expect(screen.queryByText("Loading the recorded route…")).toBeNull();
+      expect(snapshotCalls(calls)).toBe(1);
+    });
+
+    it("keeps the route on screen while it asks again for a probe newer than every route it holds", async () => {
+      let results = [probeAt("2026-07-28T10:10:00Z", 0)];
+      let release: (r: Response) => void = () => {};
+      let n = 0;
+      const { calls, qc } = renderPage(["events"], () => mtrRun({ status: "running", results }), RUN_ID, {
+        onSnapshotsPage: () => {
+          n++;
+          if (n === 1) return snapshotsBody();
+          return new Promise<Response>((resolve) => {
+            release = resolve;
+          });
+        },
+      });
+      await screen.findByRole("heading", { name: "Pairs" });
+      fireEvent.click(expander());
+      expect(await screen.findByText("10.244.9.17")).toBeInTheDocument();
+
+      results = [...results, probeAt("2026-07-28T10:40:00Z", 1)];
+      await act(() => qc.refetchQueries({ queryKey: ["run", RUN_ID] }));
+      await newProbeOnScreen();
+      await waitFor(() => expect(snapshotCalls(calls)).toBe(2));
+      expect(screen.getByText("10.244.9.17")).toBeInTheDocument();
+      expect(screen.queryByText("No recorded route covers this pair's latest probe.")).toBeNull();
+      expect(screen.queryByText("Loading the recorded route…")).toBeNull();
+
+      await act(async () => release(snapshotsBody({ lastSeen: "2026-07-28T10:40:00Z" })));
+      expect(screen.getByText("10.244.9.17")).toBeInTheDocument();
+      expect(snapshotCalls(calls)).toBe(2);
+    });
   });
 
   it("opens a NON-MTR pair onto the sample's own facts, with the error whole", async () => {
@@ -1838,5 +2138,49 @@ describe("RunDetailPage — the order of the pairs", () => {
     const rows = screen.getAllByRole("button", { name: /^Show the details of / });
     expect(rows[0]).toHaveAccessibleName("Show the details of node-x → node-y");
     expect(rows[1]).toHaveAccessibleName("Show the details of node-0 → node-z");
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("RunDetailPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage(
+      ["events"],
+      runBody({
+        status: "succeeded",
+        pairOk: 1,
+        pairFailed: 1,
+        results: [
+          { sourceNode: "node-a", destinationNode: "node-b", success: true, durationNs: 12, recordedAt: "t", sampleSeq: 0 },
+          { sourceNode: "node-b", destinationNode: "node-a", success: false, error: "i/o timeout", durationNs: 30, recordedAt: "t", sampleSeq: 0 },
+        ],
+      }),
+    );
+    await screen.findByText("i/o timeout");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage(
+      ["events"],
+      runBody({
+        status: "succeeded",
+        pairOk: 1,
+        pairFailed: 1,
+        results: [
+          { sourceNode: "node-a", destinationNode: "node-b", success: true, durationNs: 12, recordedAt: "t", sampleSeq: 0 },
+          { sourceNode: "node-b", destinationNode: "node-a", success: false, error: "i/o timeout", durationNs: 30, recordedAt: "t", sampleSeq: 0 },
+        ],
+      }),
+    );
+    await screen.findByText("i/o timeout");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

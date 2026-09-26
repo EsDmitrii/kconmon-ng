@@ -12,6 +12,7 @@ import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/table";
 import { useTheme } from "@/components/theme-provider";
+import { useAuth } from "@/hooks/use-auth";
 import { promqlQuery, promqlQueryRange } from "@/lib/api";
 import { chartColors } from "@/lib/chart-theme";
 import { GRID_BOTTOM, GRID_RIGHT, timeAxisLabel } from "@/lib/curated-metrics";
@@ -171,7 +172,7 @@ export function toChartModel(res: PromResult, dark: boolean, locale: Locale = "e
       xAxis: {
         type: "time",
         axisLine: { lineStyle: { color: colors.grid } },
-        // Same anti-smear rule the curated charts take (QA round 2, #19): this
+        // Same anti-smear rule the curated charts take: this
         // console's plot lives in a narrower column than any of them. And the
         // same clock: HH:mm, the day on its own line where it turns.
         axisLabel: { color: colors.axis, hideOverlap: true, formatter: (value: number) => timeAxisLabel(value, locale) },
@@ -479,6 +480,7 @@ function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode })
 
 export function PromQLConsolePage() {
   const t = useT(promqlConsoleDict);
+  const { me, can } = useAuth();
   const { locale } = useLocale();
   const { theme } = useTheme();
   /** The Time Machine anchors this page too. */
@@ -504,7 +506,7 @@ export function PromQLConsolePage() {
     },
   });
 
-  /* A mode switch invalidates whatever is on screen (QA scope 4, finding #16).
+  /* A mode switch invalidates whatever is on screen.
      Instant answers a vector at ONE timestamp; Range answers a matrix over a
      window — so the table left behind after a switch describes a query the
      controls no longer describe, with nothing saying so. Dropping it is the
@@ -576,6 +578,19 @@ export function PromQLConsolePage() {
   /* Whether an EMPTY-RESULT note is honest at all; the note therefore renders only when nothing failed. */
   const failed = promError !== undefined || mutation.error !== null;
 
+  /* The editor and Run are absent, not refused on click: every query this page sends goes
+     through the proxy's promql:query check. */
+  if (me !== undefined && !can("promql:query")) {
+    return (
+      <PageShell title={t("title")} help={{ body: t("help.body"), slug: "promql" }} description={t("description")}>
+        <Card role="status" className="p-4 sm:p-6">
+          <p className="text-sm font-medium">{t("permission.requires", { permission: "promql:query" })}</p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("permission.body")}</p>
+        </Card>
+      </PageShell>
+    );
+  }
+
   return (
     <PageShell
       timeMachine
@@ -583,7 +598,7 @@ export function PromQLConsolePage() {
       help={{ body: t("help.body"), slug: "promql" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here, never formatted by the
-         dictionary (QA scope 2, finding #8). */
+         dictionary. */
       description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
       actions={
         <>

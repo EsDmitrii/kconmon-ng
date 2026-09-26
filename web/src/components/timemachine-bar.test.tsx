@@ -175,6 +175,14 @@ describe("Time Machine while engaged", () => {
     expect(screen.getByRole("button", { name: /time machine/i })).toBeInTheDocument();
   });
 
+  it("hands focus to the header trigger, since the button it was on goes away with the banner", () => {
+    renderEngaged();
+    const back = screen.getByRole("button", { name: /return to live/i });
+    back.focus();
+    fireEvent.click(back);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: /time machine/i }));
+  });
+
   /* One picker, in one place: the banner used to carry a second one two inches
      from the first, both naming the same instant. */
   it("leaves the picking to the header trigger — the banner is a status, not a control", () => {

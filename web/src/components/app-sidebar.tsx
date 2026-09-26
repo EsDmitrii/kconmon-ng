@@ -12,10 +12,12 @@ import {
   SquareTerminal,
   Stethoscope,
   Target,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { NAV_ITEMS, type NavItem } from "@/nav";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { Button } from "@/components/ui/button";
 import { UserMenu } from "@/components/user-menu";
 import { useAuth } from "@/hooks/use-auth";
 import { useT } from "@/lib/i18n";
@@ -108,7 +110,7 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
           ) : null}
           <span className="min-w-0 flex-1">
             <span className="block truncate">{key ? t(key) : item.label}</span>
-            {/* The active item's description is visible UI (M3-9), not only a
+            {/* The active item's description is visible UI, not only a
                 tooltip. aria-hidden because the title attribute above already
                 describes the link — the accessible name stays the bare label. */}
             {isActive ? (
@@ -127,9 +129,9 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
  * AppSidebar is the column itself. `onNavigate` fires on every link click and is
  * how the narrow-viewport drawer closes after a navigation — a drawer that
  * stayed open over the page it just loaded would hide the thing it was used to
- * reach.
+ * reach. `onClose` is the drawer's own Close control, beside the theme toggle.
  */
-export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
+export function AppSidebar({ onNavigate, onClose }: { onNavigate?: () => void; onClose?: () => void } = {}) {
   const { me, can, isAnonymous } = useAuth();
   const t = useT(chromeDict);
   return (
@@ -142,7 +144,14 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           />
           <span className="text-[15px] font-semibold tracking-tight">kconmon-ng</span>
         </span>
-        <ThemeToggle />
+        <span className="flex items-center gap-1">
+          <ThemeToggle />
+          {onClose ? (
+            <Button variant="ghost" size="icon" onClick={onClose} aria-label={t("shell.menu.close")}>
+              <X aria-hidden="true" className="size-4" />
+            </Button>
+          ) : null}
+        </span>
       </div>
       {/* Named, like every other role in this kit (the palette's listbox is
           "Commands", the picker's grid is "Calendar"): "navigation" alone is
@@ -173,8 +182,8 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             <span className="text-[11px] text-muted-foreground">{t("sidebar.footer")}</span>
           )}
         </div>
-        {/* The palette's one visible trace in the chrome (M3-12): without it,
-            ⌘K/Ctrl+K existed only for readers of the docs. Hidden below md, where
+        {/* The palette's one visible trace in the chrome: without it, ⌘K/Ctrl+K
+            would exist only for readers of the docs. Hidden below md, where
             this column is the touch drawer and the shortcut cannot be pressed. */}
         <kbd
           title={t("sidebar.palette.hint", { keys: PALETTE_KEYS })}

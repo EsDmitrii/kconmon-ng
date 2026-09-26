@@ -8,10 +8,12 @@ import {
   SettingsPage,
   exportFilename,
   parseBundle,
+  shortCommit,
   subjectLine,
   webhookFieldForDetail,
   webhookRequestFrom,
 } from "./settings";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 /**
  * The three that are not boundary questions — the honest lastStatus rendering, the import result
@@ -134,7 +136,7 @@ function renderPage(
      *  in the list body rather than as a bare call count. */
     onTest?: (rows: Record<string, unknown>[]) => void;
     onWriteWebhook?: (method: string, body: unknown) => Response | undefined;
-    onImport?: (body: unknown) => Response;
+    onImport?: (body: unknown) => Response | Promise<Response>;
     exportResponse?: Response;
     engaged?: boolean;
     /** The rows GET /api/v1/tokens answers (QA round 6, finding #14). */
@@ -148,6 +150,10 @@ function renderPage(
     locale?: "en" | "ru";
     /** What GET /api/v1/version answers — About renders the build from it. */
     versionBody?: Record<string, unknown>;
+    /** The rows GET /api/v1/users answers. */
+    users?: unknown[];
+    /** A refusal standing in for PATCH /api/v1/users/{id}'s 200, after the tokens were revoked. */
+    patchUserProblem?: Response;
   } = {},
 ) {
   const {
@@ -164,6 +170,8 @@ function renderPage(
     onCreateToken,
     locale,
     versionBody,
+    users = [],
+    patchUserProblem,
   } = opts;
   const rows = [...webhooks] as Record<string, unknown>[];
   const tokenRows = [...tokens] as Record<string, unknown>[];
@@ -180,6 +188,21 @@ function renderPage(
       return Promise.resolve(json(versionBody ?? { version: "1.4.0", commit: "abc1234", capabilities: [] }));
     }
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(config)));
+    /* Mirrors handleUsersPatch: a change of `disabled` revokes every active token the user owns. */
+    if (href.startsWith("/api/v1/users/") && method === "PATCH") {
+      const id = decodeURIComponent(href.slice("/api/v1/users/".length));
+      const change = body as { disabled?: boolean };
+      if (change.disabled !== undefined) {
+        tokenRows.forEach((r, i) => {
+          if (r.owner === id && r.revokedAt === undefined) tokenRows[i] = { ...r, revokedAt: NOW_ISO };
+        });
+      }
+      if (patchUserProblem) return Promise.resolve(patchUserProblem);
+      const user = (users as Record<string, unknown>[]).find((u) => u.id === id);
+      return Promise.resolve(json({ ...user, ...change }));
+    }
+    if (href.startsWith("/api/v1/users")) return Promise.resolve(json({ users }));
+    if (href.startsWith("/api/v1/rbac/roles")) return Promise.resolve(json({ roles: [] }));
     if (href.startsWith("/api/v1/export")) {
       return Promise.resolve(exportResponse ?? json(BUNDLE));
     }
@@ -422,6 +445,79 @@ describe("section gating", () => {
   });
 });
 
+/* The Users section needs BOTH halves: users:manage, and a console that is its own identity
+   provider. Each negative case waits for the auth mode to show in About first, because before
+   GET /config lands the section is hidden for every role and the assertion would prove nothing. */
+describe("users section gating", () => {
+  const ada = { id: "u1", username: "ada", displayName: "Ada", roles: ["admin"], disabled: false, createdAt: "2026-09-24T00:00:00Z" };
+  const usersCalls = (calls: Call[]) => calls.filter((c) => c.url.startsWith("/api/v1/users"));
+
+  it("local mode with users:manage shows the users table", async () => {
+    renderPage({ permissions: ["users:manage"], users: [ada] });
+    const table = await screen.findByRole("table", { name: "Local users" });
+    expect(within(table).getByText("ada")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Users" })).toBeInTheDocument();
+    expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
+  });
+
+  it("oidc mode hides it even with users:manage, and never asks for the list", async () => {
+    const { calls } = renderPage({
+      permissions: ["users:manage"],
+      config: { auth: { mode: "oidc", role: "viewer", loginPath: "/api/v1/auth/login" } },
+      users: [ada],
+    });
+    expect(await screen.findByText("oidc")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Users" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Local users" })).not.toBeInTheDocument();
+    // users:manage alone buys nothing here, so the page says so rather than rendering empty.
+    expect(screen.getByText(/can view none of the console's settings/i)).toBeInTheDocument();
+    expect(usersCalls(calls)).toEqual([]);
+  });
+
+  it("re-reads the tokens after disabling a user, since the server revoked theirs", async () => {
+    const ops = { id: "u2", username: "ops", displayName: "Ops", roles: ["viewer"], disabled: false, createdAt: "2026-09-24T00:00:00Z" };
+    renderPage({
+      permissions: [...ADMIN, "users:manage"],
+      users: [ada, ops],
+      tokens: [tokenRow({ id: "t-9", name: "ops-ci", owner: "u2" })],
+    });
+    const tokens = await screen.findByRole("table", { name: "API tokens" });
+    expect(await within(tokens).findByText("active")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Disable ops" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm disabling ops/ }));
+
+    expect(await within(tokens).findByText("revoked")).toBeInTheDocument();
+    expect(within(tokens).queryByText("active")).not.toBeInTheDocument();
+  });
+
+  it("re-reads the tokens when a re-enable fails after revoking them", async () => {
+    const ops = { id: "u2", username: "ops", displayName: "Ops", roles: ["viewer"], disabled: true, createdAt: "2026-09-24T00:00:00Z" };
+    renderPage({
+      permissions: [...ADMIN, "users:manage"],
+      users: [ada, ops],
+      tokens: [tokenRow({ id: "t-9", name: "ops-ci", owner: "u2" })],
+      patchUserProblem: problem(502, "tokens unavailable", "failed to revoke the user's API tokens; the user stays disabled"),
+    });
+    const tokens = await screen.findByRole("table", { name: "API tokens" });
+    expect(await within(tokens).findByText("active")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Enable ops" }));
+
+    expect(await screen.findByText(/the user stays disabled/)).toBeInTheDocument();
+    expect(await within(tokens).findByText("revoked")).toBeInTheDocument();
+  });
+
+  it("local mode without users:manage hides it, and never asks for the list", async () => {
+    const { calls } = renderPage({ permissions: ADMIN, users: [ada] });
+    expect(await screen.findByText("local")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Users" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Local users" })).not.toBeInTheDocument();
+    expect(usersCalls(calls)).toEqual([]);
+  });
+});
+
 /* ── API tokens (QA round 6, finding #14) ───────────────────────────────── */
 
 describe("tokens section", () => {
@@ -446,6 +542,30 @@ describe("tokens section", () => {
     expect(within(rows[0]).getByTestId("token-last-used")).toHaveTextContent(
       new Date("2026-02-03T04:05:00Z").toLocaleString(undefined, { hour12: false }),
     );
+  });
+
+  /* A token holds console.auth.defaultRole, never its minter's role; with the default (empty) it is
+     refused on every gated route, and neither the form nor the one-time panel said so. */
+  it("says in the form and in the minted panel which role a token gets", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    expect(screen.getAllByText(/console\.auth\.defaultRole/).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+    const panel = await screen.findByRole("region", { name: /token/i });
+    expect(within(panel).getByText(/console\.auth\.defaultRole/)).toBeInTheDocument();
+    expect(within(panel).getByText(/not yours/)).toBeInTheDocument();
+  });
+
+  it("names the owner by username when the users list is readable", async () => {
+    renderPage({
+      permissions: [...ADMIN, "users:manage"],
+      users: [{ id: "u1", username: "ada", displayName: "Ada", roles: ["admin"], disabled: false, createdAt: AT }],
+      tokens: [tokenRow()],
+    });
+    const row = await screen.findByTestId("token-row");
+    await waitFor(() => expect(within(row).getByText("ada")).toBeInTheDocument());
+    expect(within(row).getByText("ada")).toHaveAttribute("title", "u1");
   });
 
   /* lastUsedAt absent is a FACT — "never used" — not a field the API withheld,
@@ -479,13 +599,13 @@ describe("tokens section", () => {
       tokensProblem: problem(
         503,
         "token admin not available",
-        "set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/tokens",
+        "set database.dsnFile in the console config (Helm: database.existingSecret) to enable /api/v1/tokens",
       ),
     });
 
     expect(
       await screen.findByText(
-        "set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/tokens",
+        "set database.dsnFile in the console config (Helm: database.existingSecret) to enable /api/v1/tokens",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("No tokens. Nothing is calling this API with one.")).not.toBeInTheDocument();
@@ -654,7 +774,12 @@ describe("webhook list", () => {
       if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(ADMIN)));
       if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
       return Promise.resolve(
-        problem(503, "webhooks not available", "webhooks are stored configuration: set console.database.mode"),
+        problem(
+          503,
+          "webhooks not available",
+          "webhook endpoints are persisted configuration with no in-memory fallback: " +
+            "set database.dsnFile in the console config (Helm: database.existingSecret) to enable /api/v1/webhooks",
+        ),
       );
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -666,7 +791,7 @@ describe("webhook list", () => {
         </TimeMachineProvider>
       </QueryClientProvider>,
     );
-    expect(await screen.findByText(/set console.database.mode/)).toBeInTheDocument();
+    expect(await screen.findByText(/set database\.dsnFile in the console config/)).toBeInTheDocument();
   });
 });
 
@@ -878,6 +1003,45 @@ describe("export", () => {
     expect(screen.getByText(/are NOT created by an import/i)).toBeInTheDocument();
   });
 
+  /* A caller with settings:write but without every section's own read permission gets a partial
+     file. The bundle names what it withheld, and the page has to as well, or the download reads as
+     the whole configuration. */
+  it("names the sections the export withheld from this account", async () => {
+    stubObjectURL();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderPage({ exportResponse: json({ ...BUNDLE, omitted: ["webhooks", "rbac"] }) });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Export configuration" }));
+    expect(
+      await screen.findByText(
+        "Exported without these sections: Webhooks, Access control. This account cannot read them, and importing the file leaves them as they are.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("names them in Russian too", async () => {
+    stubObjectURL();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderPage({ locale: "ru", exportResponse: json({ ...BUNDLE, omitted: ["checkSchedules", "rbac"] }) });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Экспортировать конфигурацию" }));
+    expect(
+      await screen.findByText(
+        "Выгружено без разделов: Расписания проверок, Управление доступом. Этой учётной записи они недоступны, а импорт файла оставит их как есть.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about withheld sections when the export withheld none", async () => {
+    const { create } = stubObjectURL();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Export configuration" }));
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(screen.queryByText(/Exported without/)).toBeNull();
+  });
+
   it("renders an export failure instead of downloading an error page", async () => {
     const { create } = stubObjectURL();
     renderPage({ exportResponse: problem(502, "export unavailable", "failed to read the configuration to export") });
@@ -960,7 +1124,7 @@ describe("import", () => {
     /* The ledger is the shared dense table now (M4-3): counts are numeric
        cells — right-aligned, in the data face. */
     const cells = within(targets).getAllByRole("cell");
-    expect(cells).toHaveLength(3);
+    expect(cells).toHaveLength(4);
     for (const cell of cells) {
       expect(cell.className).toContain("mono-data");
       expect(cell.className).toContain("text-right");
@@ -971,6 +1135,100 @@ describe("import", () => {
     expect(screen.getByText("edge-tcp/interval")).toBeInTheDocument();
     expect(screen.getByText("not imported: a bundle never carries webhook secrets")).toBeInTheDocument();
     expect(screen.getByText("pagerduty")).toBeInTheDocument();
+  });
+
+  /* Re-importing the bundle just exported listed every row as Updated; the server now counts
+     them as unchanged, and the table says so in a column of its own. */
+  it("shows the unchanged count, and a dash where the server sent none", async () => {
+    renderPage({
+      onImport: () =>
+        json(
+          importResult({
+            targets: { created: 0, updated: 0, unchanged: 2, skipped: 0, errors: [], warnings: [] },
+          }),
+        ),
+    });
+    await loadBundle(BUNDLE);
+    const targets = await screen.findByTestId("import-row-targets");
+    expect(screen.getByRole("columnheader", { name: "Unchanged" })).toBeInTheDocument();
+    expect(within(targets).getAllByRole("cell").map((c) => c.textContent)).toEqual(["0", "0", "2", "0"]);
+    expect(within(screen.getByTestId("import-row-webhooks")).getAllByRole("cell")[2]).toHaveTextContent("—");
+  });
+
+  /* One binding per note, one identical ~400-character sentence per binding: 63 bindings printed it
+     63 times. The sentence is said once, over every name it applies to. */
+  it("prints a reason shared by several items once, naming every item", async () => {
+    const reason = "not imported by design: a binding names a person in the SOURCE console's identity provider";
+    renderPage({
+      onImport: () =>
+        json(
+          importResult({
+            rbacBindings: {
+              created: 0,
+              updated: 0,
+              skipped: 3,
+              errors: [],
+              warnings: [
+                { name: "admin/user:ada", reason },
+                { name: "viewer/group:ops", reason },
+                { name: "operator/user:bob", reason },
+              ],
+            },
+          }),
+        ),
+    });
+    await loadBundle(BUNDLE);
+    await screen.findByTestId("import-row-rbacBindings");
+    expect(screen.getAllByText(reason)).toHaveLength(1);
+    for (const name of ["admin/user:ada", "viewer/group:ops", "operator/user:bob"]) {
+      expect(screen.getByText(new RegExp(name))).toBeInTheDocument();
+    }
+  });
+
+  /* The shape the server now sends for an identical bundle: every row unchanged, the role bindings
+     as ONE warning named "N role bindings", and an existing window with another reason skipped. */
+  it("renders an identical bundle's dry run as unchanged, with one bindings warning", async () => {
+    const bindingReason =
+      "not imported by design: a binding names a person in the SOURCE console's identity namespace";
+    const windowReason =
+      "skipped: a window with this scope, start and end already exists with a different reason, and an import " +
+      "never rewrites a maintenance window; delete it first to replace it";
+    renderPage({
+      onImport: () =>
+        json(
+          importResult({
+            targets: { created: 0, updated: 0, unchanged: 4, skipped: 0, errors: [], warnings: [] },
+            maintenanceWindows: {
+              created: 0,
+              updated: 0,
+              unchanged: 1,
+              skipped: 1,
+              errors: [],
+              warnings: [{ name: "node-a 2026-09-26T10:00:00Z", reason: windowReason }],
+            },
+            rbacBindings: {
+              created: 0,
+              updated: 0,
+              unchanged: 0,
+              skipped: 3,
+              errors: [],
+              warnings: [{ name: "3 role bindings", reason: bindingReason }],
+            },
+          }),
+        ),
+    });
+    await loadBundle(BUNDLE);
+    const targets = await screen.findByTestId("import-row-targets");
+    expect(within(targets).getAllByRole("cell").map((c) => c.textContent)).toEqual(["0", "0", "4", "0"]);
+    expect(within(screen.getByTestId("import-row-maintenanceWindows")).getAllByRole("cell").map((c) => c.textContent)).toEqual([
+      "0",
+      "0",
+      "1",
+      "1",
+    ]);
+    expect(screen.getAllByText("3 role bindings")).toHaveLength(1);
+    expect(screen.getAllByText(bindingReason)).toHaveLength(1);
+    expect(screen.getAllByText(windowReason)).toHaveLength(1);
   });
 
   it("keeps Apply enabled after an all-zero dry run: a no-op is a valid outcome", async () => {
@@ -1016,6 +1274,173 @@ describe("import", () => {
     await loadBundle(BUNDLE);
     expect(await screen.findByText("import: bundle version 7 is not supported")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Apply import" })).toBeEnabled();
+  });
+});
+
+/* Two picks in a row put two dry runs in flight. Whichever answers last, the table has to show the
+   plan of the file Apply would send, and the older call finishing must not re-arm Apply early. */
+describe("import — overlapping dry runs", () => {
+  const OLD = "2026-08-01T00:00:00Z";
+  const NEW = "2026-08-02T00:00:00Z";
+  const plan = (created: number) =>
+    json(importResult({ dryRun: true, targets: { created, updated: 0, skipped: 0, errors: [], warnings: [] } }));
+
+  function deferredImports() {
+    const pending = new Map<string, (r: Response) => void>();
+    const onImport = (body: unknown) =>
+      new Promise<Response>((resolve) => {
+        pending.set((body as { bundle: { exportedAt: string } }).bundle.exportedAt, resolve);
+      });
+    return { pending, onImport };
+  }
+
+  const createdCell = async () => within(await screen.findByTestId("import-row-targets")).getAllByRole("cell")[0];
+
+  async function pickBoth(pending: Map<string, unknown>) {
+    await loadBundle({ ...BUNDLE, exportedAt: OLD });
+    await waitFor(() => expect(pending.has(OLD)).toBe(true));
+    await loadBundle({ ...BUNDLE, exportedAt: NEW });
+    await waitFor(() => expect(pending.has(NEW)).toBe(true));
+  }
+
+  it("keeps the newer file's plan when the older dry run answers last", async () => {
+    const { pending, onImport } = deferredImports();
+    renderPage({ onImport });
+    await pickBoth(pending);
+
+    await act(async () => pending.get(NEW)?.(plan(7)));
+    expect(await createdCell()).toHaveTextContent("7");
+
+    await act(async () => pending.get(OLD)?.(plan(3)));
+    expect(await createdCell()).toHaveTextContent("7");
+  });
+
+  it("drops the older answer and keeps Apply busy while the newer dry run is still out", async () => {
+    const { pending, onImport } = deferredImports();
+    renderPage({ onImport });
+    await pickBoth(pending);
+
+    await act(async () => pending.get(OLD)?.(plan(3)));
+    expect(screen.queryByTestId("import-row-targets")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply import" })).toBeDisabled();
+
+    await act(async () => pending.get(NEW)?.(plan(7)));
+    expect(await createdCell()).toHaveTextContent("7");
+    expect(screen.getByRole("button", { name: "Apply import" })).toBeEnabled();
+  });
+});
+
+/* An applied bundle rewrites lists this page and others already hold. The webhook list sits a few
+   cards above on this very page, with no poll, so it has to re-read; the rest are marked stale. */
+describe("import — an applied bundle refreshes what it wrote", () => {
+  const IMPORTED_LISTS = [
+    ["targets"],
+    ["definitions"],
+    ["schedules"],
+    ["alert-rules"],
+    ["maintenance", "global"],
+    ["rbac-roles"],
+    ["target", "t-1"],
+    ["alerting", "maintenance"],
+    ["investigate", "maintenance", "k"],
+    ["investigate", "targets"],
+  ];
+
+  it("re-reads the webhook list and marks the other imported lists stale", async () => {
+    const hook = webhookRow();
+    const { qc } = renderPage({
+      webhooks: [hook],
+      onImport: (body) => {
+        const dryRun = (body as { dryRun: boolean }).dryRun;
+        // The server updates an existing endpoint's url in place; an import never creates one.
+        if (!dryRun) hook.url = "https://hooks.example.test/after-import";
+        return json(importResult({ dryRun }));
+      },
+    });
+    for (const key of IMPORTED_LISTS) qc.setQueryData(key, []);
+    expect(await screen.findByText("https://hooks.example.test/pd")).toBeInTheDocument();
+
+    await loadBundle(BUNDLE);
+    expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
+    // A dry run writes nothing, so it invalidates nothing.
+    for (const key of IMPORTED_LISTS) expect(qc.getQueryState(key)?.isInvalidated, key.join("/")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply import" }));
+    expect(await screen.findByText(/Applied — these writes happened/i)).toBeInTheDocument();
+    expect(await screen.findByText("https://hooks.example.test/after-import")).toBeInTheDocument();
+    for (const key of IMPORTED_LISTS) expect(qc.getQueryState(key)?.isInvalidated, key.join("/")).toBe(true);
+  });
+
+  it("re-reads the custom roles the Users section on this page offers", async () => {
+    const { calls } = renderPage({ permissions: [...ADMIN, "users:manage", "rbac:manage"] });
+    const roleReads = () => calls.filter((c) => c.method === "GET" && c.url.startsWith("/api/v1/rbac/roles")).length;
+    await waitFor(() => expect(roleReads()).toBe(1));
+
+    await loadBundle(BUNDLE);
+    expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
+    expect(roleReads()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Apply import" }));
+    expect(await screen.findByText(/Applied — these writes happened/i)).toBeInTheDocument();
+    await waitFor(() => expect(roleReads()).toBe(2));
+  });
+
+  it("invalidates nothing when the apply is refused", async () => {
+    const { qc } = renderPage({
+      onImport: (body) =>
+        (body as { dryRun: boolean }).dryRun
+          ? json(importResult({ dryRun: true }))
+          : problem(422, "invalid bundle", "import: target \"edge\" is invalid"),
+    });
+    for (const key of IMPORTED_LISTS) qc.setQueryData(key, []);
+    await loadBundle(BUNDLE);
+    expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Apply import" }));
+    expect(await screen.findByText('import: target "edge" is invalid')).toBeInTheDocument();
+    for (const key of IMPORTED_LISTS) expect(qc.getQueryState(key)?.isInvalidated, key.join("/")).toBe(false);
+  });
+
+  /* The server applies a bundle section by section with no single transaction, so a 5xx or a lost
+     answer can come after some sections were written. */
+  it.each([
+    ["a 502 after a partial write", () => problem(502, "import unavailable", "import: list alert rules: store down")],
+    ["a network error", () => Promise.reject(new TypeError("Failed to fetch"))],
+  ])("refreshes the imported lists when the apply fails with %s", async (_name, failure) => {
+    const { qc } = renderPage({
+      onImport: (body) => ((body as { dryRun: boolean }).dryRun ? json(importResult({ dryRun: true })) : failure()),
+    });
+    for (const key of IMPORTED_LISTS) qc.setQueryData(key, []);
+    await loadBundle(BUNDLE);
+    expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Apply import" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply import" })).toBeEnabled());
+    for (const key of IMPORTED_LISTS) expect(qc.getQueryState(key)?.isInvalidated, key.join("/")).toBe(true);
+  });
+});
+
+/* A file picked while an Apply is out would supersede it, and the Apply's own result or refusal
+   would never reach the screen. */
+describe("import — a running apply keeps the file picker", () => {
+  it("disables the file input until the apply answers, then shows the apply's result", async () => {
+    let answerApply: ((r: Response) => void) | undefined;
+    renderPage({
+      onImport: (body) =>
+        (body as { dryRun: boolean }).dryRun
+          ? json(importResult({ dryRun: true }))
+          : new Promise<Response>((resolve) => {
+              answerApply = resolve;
+            }),
+    });
+    await loadBundle(BUNDLE);
+    expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Configuration bundle")).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply import" }));
+    await waitFor(() => expect(answerApply).toBeDefined());
+    expect(screen.getByLabelText("Configuration bundle")).toBeDisabled();
+
+    await act(async () => answerApply?.(json(importResult({ dryRun: false }))));
+    expect(await screen.findByText(/Applied — these writes happened/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Configuration bundle")).toBeEnabled();
   });
 });
 
@@ -1447,6 +1872,14 @@ describe("About names the build it is running (#15)", () => {
     await waitFor(() => expect(screen.getByTestId("about-version")).toHaveTextContent("dev"));
     expect(screen.getByTestId("about-commit")).toHaveTextContent("unknown");
   });
+
+  it("keeps the -dirty mark whole when it shortens a hash", async () => {
+    expect(shortCommit("0442cbb-dirty")).toBe("0442cbb-dirty");
+    expect(shortCommit("0442cbbf51e9a2c7d1-dirty")).toBe("0442cbbf51e9-dirty");
+    expect(shortCommit("0442cbbf51e9a2c7d1")).toBe("0442cbbf51e9");
+    renderPage({ versionBody: { version: "2.5.0", commit: "0442cbb-dirty", capabilities: [] } });
+    await waitFor(() => expect(screen.getByTestId("about-commit")).toHaveTextContent(/^0442cbb-dirty$/));
+  });
 });
 
 /* #14. A revoked row was permanent: the list only ever grew, and the one
@@ -1727,5 +2160,27 @@ describe("link interpolation in translated sentences (M3-7)", () => {
     expect(para.textContent).toContain("on Incidents and Metrics, next to the chart they cover");
     expect(para.textContent).not.toMatch(/[{}]/);
     expect(para.textContent).not.toContain("on  and ");
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("SettingsPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage({ permissions: ADMIN });
+    await screen.findByRole("heading", { name: "API tokens" });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage({ permissions: ADMIN });
+    await screen.findByRole("heading", { name: "API tokens" });
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

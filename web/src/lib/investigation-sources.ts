@@ -13,8 +13,10 @@ import type {
   RunDetail,
 } from "./types";
 import { PROTOCOLS } from "./types";
+import { getIncidents, scanIncidents } from "./api";
 import { stampFull, type Locale, type Translate } from "./i18n";
 import { enT, investigationSourcesDict, type InvestigationSourcesKey } from "./i18n/dict/investigation-sources";
+import { METRICS_PREFIX } from "./matrix-promql";
 import { PAIR_ARROW, escapeLabelValue, normalizePairInput } from "./utils";
 
 /** T is this module's translator, spelled once. Every function that renders a
@@ -353,6 +355,30 @@ export function incidentPermalink(id: string): string {
   return `${INVESTIGATE_PATH}?incident=${encodeURIComponent(id)}`;
 }
 
+/**
+ * incidentOpenAt says whether an incident was open at `at`: declared by then and not resolved yet.
+ * That is the lifecycle, not fromAt/toAt: those are the window the incident was saved with, and
+ * Investigate saves one that ends at the save while the incident stays open for hours after it.
+ */
+export function incidentOpenAt(i: Pick<Incident, "createdAt" | "resolvedAt">, at: Date): boolean {
+  const t = at.getTime();
+  if (!(Date.parse(i.createdAt) <= t)) return false;
+  return !i.resolvedAt || Date.parse(i.resolvedAt) > t;
+}
+
+/**
+ * openIncidents is the newest `want` incidents open now, or, engaged, open at `at` (scanIncidents
+ * over pages of `pageSize`). `truncated` is only ever set by that scan; the caller says so.
+ */
+export async function openIncidents(
+  at: Date | null | undefined,
+  want: number,
+  pageSize = want,
+): Promise<{ incidents: Incident[]; truncated: boolean }> {
+  if (at) return scanIncidents({ limit: pageSize }, (i) => incidentOpenAt(i, at), want);
+  return { incidents: (await getIncidents({ status: "open", limit: want })).incidents, truncated: false };
+}
+
 /* The API's own maxLengths (docs/console-api.yaml's Incident/PinnedRef), named
    here so the form's maxLength attribute and the counter beside it cite ONE
    number rather than three literals that can drift apart from the schema. */
@@ -453,7 +479,6 @@ export function scopesToQuery(scope: InvestigationScope): (string | undefined)[]
 
 /* ── the scope's own PromQL ─────────────────────────────────────────────── */
 
-const METRICS_PREFIX = "kconmon_ng";
 const RATE_WINDOW = "5m";
 
 /**
@@ -690,7 +715,9 @@ function rawAuditSubject(row: AuditEntry): string {
  * READ_ONLY_AUDIT_POSTS is the CLOSED list of POST routes that only read. A POST
  * is a change by default and this list is the exception the console makes for
  * itself: PromQL is expressed as a request body, so evaluating a query has to be
- * a POST even though it stores nothing.
+ * a POST even though it stores nothing. The check projection and the alert-rule
+ * preview are the same shape: a draft goes in as a body, is rendered, and is
+ * never stored — the forms send one on every debounced edit.
  *
  * THE CONSTRAINT, and it is the whole reason the list is spelled out rather than
  * pattern-matched: a route belongs here ONLY if it cannot change any state a
@@ -698,22 +725,52 @@ function rawAuditSubject(row: AuditEntry): string {
  * configuration change from the cause ranking, which is the most expensive kind
  * of wrong an investigation surface can be.
  */
-const READ_ONLY_AUDIT_POSTS = ["/api/v1/promql/query", "/api/v1/promql/query_range"];
+const READ_ONLY_AUDIT_POSTS = [
+  "/api/v1/promql/query",
+  "/api/v1/promql/query_range",
+  "/api/v1/checks/projection",
+  "/api/v1/alert-rules/preview",
+];
 
-/**
- * isReadOnlyAudit answers "did this audited request only READ?" from the row's
- * `action`, which the API defines as a method plus a route pattern ("POST
- * /api/v1/runs"). GET, plus the two PromQL POSTs above — nothing else.
- */
-export function isReadOnlyAudit(action: string): boolean {
+/** auditAction splits the row's `action`, which the API defines as a method plus a route pattern ("POST /api/v1/runs"). */
+function auditAction(action: string): { method: string; route: string } {
   /* An absent `action` used to throw here — and this runs over EVERY audit row
      the scan returns, so one such row emptied the timeline instead of itself. */
   const text = str(action);
   const space = text.indexOf(" ");
-  const method = (space === -1 ? text : text.slice(0, space)).toUpperCase();
+  return {
+    method: (space === -1 ? text : text.slice(0, space)).toUpperCase(),
+    route: space === -1 ? "" : text.slice(space + 1).trim(),
+  };
+}
+
+/**
+ * isReadOnlyAudit answers "did this audited request only READ?" from the row's
+ * `action`. GET, plus READ_ONLY_AUDIT_POSTS — nothing else.
+ */
+export function isReadOnlyAudit(action: string): boolean {
+  const { method, route } = auditAction(action);
   if (method === "GET") return true;
-  const route = space === -1 ? "" : text.slice(space + 1).trim();
   return method === "POST" && READ_ONLY_AUDIT_POSTS.includes(route);
+}
+
+/**
+ * AUTH_AUDIT_POSTS are the session and credential routes. They write a session
+ * or a password and nothing a probe, a check or an alert rule reads, so a
+ * sign-in beside an onset is never its cause.
+ */
+const AUTH_AUDIT_POSTS = ["/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/password"];
+
+/**
+ * auditLeftConfigAlone answers "could this audited request NOT have changed the
+ * configuration?" for a row that is no read: the server refused it or it failed
+ * (the audit log records both), or it only signed someone in or out or changed
+ * a password.
+ */
+function auditLeftConfigAlone(row: AuditEntry): boolean {
+  if (row.outcome !== "allowed") return true;
+  const { method, route } = auditAction(row.action);
+  return method === "POST" && AUTH_AUDIT_POSTS.includes(route);
 }
 
 /** auditEntries: configuration changes; CLIENT-SIDE window filtering, and the only source here that needs. */
@@ -733,6 +790,7 @@ export function auditEntries(rows: AuditEntry[], from: Date, to: Date): Timeline
       /* The row STAYS in the timeline — the badge already says "audit" out loud
          — and is only kept out of the cause candidates (finding #8). */
       readOnly: isReadOnlyAudit(row.action),
+      notACause: auditLeftConfigAlone(row),
       ref: { kind: "audit", id: String(row.id) },
     });
   }

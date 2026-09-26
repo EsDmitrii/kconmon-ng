@@ -14,9 +14,10 @@ import { useTopology } from "@/hooks/use-topology";
 import { externalByNode } from "@/lib/agents";
 import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
-import { getEvents, getIncidents, isServerSentence, listAlerts } from "@/lib/api";
-import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
-import { cellTier, isMeasured, severityRatio } from "@/lib/matrix-cells";
+import { getEvents, isServerSentence, listAlerts, queryErrorMessage } from "@/lib/api";
+import { buildInvestigateURL, incidentPermalink, openIncidents, scopeFromAlertLabels } from "@/lib/investigation-sources";
+import { cellTier, isMeasured, severityRatio, type CellTier } from "@/lib/matrix-cells";
+import { matrixHref } from "@/lib/protocol-param";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import {
   PROTOCOLS,
@@ -43,14 +44,17 @@ export interface OverviewSummary {
   worstPairs: MatrixCell[]; // top 5, failing/degraded only, worst first
 }
 
-/* isMeasured used to live here. */
+const TIER_RANK: Record<CellTier, number> = { bad: 0, warn: 1, ok: 2, unknown: 3 };
 
 /**
- * compareWorst orders the problem table the way the matrix ranks a cell: its worst ratio (failure or
- * packet loss) first, a reduced path MTU after every ratio, RTT as the tiebreak; two pairs failing
- * at the same ratio are not equally bad.
+ * compareWorst orders the problem table the way the matrix ranks a cell: red before amber (on PMTU a
+ * 3% black hole is red while a 40% recovering path is amber), then its worst ratio (failure or
+ * packet loss), RTT as the tiebreak; two pairs failing at the same ratio are not equally bad.
  */
 function compareWorst(a: MatrixCell, b: MatrixCell): number {
+  const ta = TIER_RANK[cellTier(a)];
+  const tb = TIER_RANK[cellTier(b)];
+  if (ta !== tb) return ta - tb;
   const sa = severityRatio(a) ?? 0;
   const sb = severityRatio(b) ?? 0;
   if (sa !== sb) return sb - sa;
@@ -346,7 +350,7 @@ function SetupStep({ met, label, value, fix }: { met: boolean; label: string; va
 }
 
 /**
- * SetupProgress is the first-run card (M4-6): Live with zero measured pairs is
+ * SetupProgress is the first-run card: Live with zero measured pairs is
  * an install in progress, and ONE card walking agents → scrape → first round
  * says more than four separate empty panels. The signals are the ones the page
  * already holds: useTopology's agent list, useMatrix's series.
@@ -421,6 +425,8 @@ function OverviewSkeleton() {
  */
 
 const OPEN_INCIDENTS_LIMIT = 5;
+/** Engaged, the page size of the scan for incidents open at t (lib/api.ts scanIncidents). */
+const INCIDENTS_AT_PAGE = 100;
 const RECENT_EVENTS_LIMIT = 10;
 
 /*
@@ -479,23 +485,18 @@ export function fmtAge(iso: string, now: Date, t: T): string {
 function OpenIncidents() {
   const t = useT(overviewDict);
   const { me, can } = useAuth();
-  const { available, resolved } = useDatabaseAvailable();
+  const { available, resolved, error: configError } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const canRead = can("incidents:read");
   const enabled = me !== undefined && canRead && resolved && available;
 
   /*
    * Engaged, "open" is the wrong question to ask this endpoint; `status` is a NOW fact (it is
-   * resolved_at's witness).
+   * resolved_at's witness). So are from/to, which match the saved window rather than the lifecycle.
    */
   const query = useQuery({
     queryKey: at ? ["overview", "incidents", "at", at.toISOString()] : ["overview", "incidents"],
-    queryFn: () =>
-      getIncidents(
-        at
-          ? { from: at, to: new Date(at.getTime() + 1000), limit: OPEN_INCIDENTS_LIMIT }
-          : { status: "open", limit: OPEN_INCIDENTS_LIMIT },
-      ),
+    queryFn: () => openIncidents(at, OPEN_INCIDENTS_LIMIT, INCIDENTS_AT_PAGE),
     enabled,
     refetchInterval: enabled ? PANEL_POLL_MS : false,
   });
@@ -516,6 +517,8 @@ function OpenIncidents() {
 
         {me !== undefined && !canRead ? (
           <PanelNote>{t("incidents.denied")}</PanelNote>
+        ) : configError !== null ? (
+          <PanelNote>{t("config.failed", { error: queryErrorMessage(configError, t("config.failed.generic")) })}</PanelNote>
         ) : resolved && !available ? (
           <PanelNote>{t("db.note")}</PanelNote>
         ) : query.isError ? (
@@ -541,9 +544,11 @@ function OpenIncidents() {
                   {i.title}
                 </a>
                 {/* TRUNCATED and shrinkable: a scope is a node or pair name off the wire, and an
-                    unbounded nowrap badge pushed the title and the age clean off the card. */}
-                <Badge variant="neutral" className="max-w-[12rem] shrink truncate" title={i.scope}>
-                  {i.scope === "" ? t("incidents.scope.global") : i.scope}
+                    unbounded nowrap badge pushed the title and the age clean off the card. The
+                    ellipsis needs an inner span: text-overflow does not reach a flex container's
+                    anonymous text item. */}
+                <Badge variant="neutral" className="min-w-0 max-w-[12rem] shrink" title={i.scope}>
+                  <span className="min-w-0 truncate">{i.scope === "" ? t("incidents.scope.global") : i.scope}</span>
                 </Badge>
                 <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
                   {fmtAge(i.fromAt, now, t)}
@@ -552,6 +557,7 @@ function OpenIncidents() {
             ))}
           </ul>
         )}
+        {query.data?.truncated ? <PanelNote>{t("incidents.scanCapped")}</PanelNote> : null}
       </section>
     </Card>
   );
@@ -634,7 +640,7 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
 function RecentEvents() {
   const t = useT(overviewDict);
   const { me, can } = useAuth();
-  const { available, resolved } = useDatabaseAvailable();
+  const { available, resolved, error: configError } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const canRead = can("events:read");
   const enabled = me !== undefined && canRead && resolved && available;
@@ -669,6 +675,8 @@ function RecentEvents() {
 
         {me !== undefined && !canRead ? (
           <PanelNote>{t("events.denied")}</PanelNote>
+        ) : configError !== null ? (
+          <PanelNote>{t("config.failed", { error: queryErrorMessage(configError, t("config.failed.generic")) })}</PanelNote>
         ) : resolved && !available ? (
           <PanelNote>{t("db.note")}</PanelNote>
         ) : query.isError ? (
@@ -1148,8 +1156,8 @@ export function OverviewPage() {
 
         {summary ? (
           <>
-            {/* The page LEADS with the verdict in words (M4-6), and since P3
-                the verdict is CROSS-PLANE — it reads all three protocols and
+            {/* The page LEADS with the verdict in words, and the verdict is
+                CROSS-PLANE — it reads all three protocols and
                 names the worst one, whatever the selector below shows. The
                 tiles carry the arithmetic. Nothing scored — nothing claimed. */}
             {statement ? (
@@ -1203,13 +1211,13 @@ export function OverviewPage() {
                 note={foldBounds(topo.data, t)}
               />
               {/* Both pair tiles carry the qualifier: they count ONE protocol
-                  on ONE plane — the SELECTED one, since P3 — and the bare
+                  on ONE plane — the SELECTED one — and the bare
                   label claimed the whole fleet. */}
               <StatTile
                 label={t("tiles.failing")}
                 value={pairsValue(summary.pairsFailing)}
                 tone={summary.pairsFailing > 0 ? "bad" : undefined}
-                toneLabel={t("tiles.failing.tone")}
+                toneLabel={t(protocol === "pmtu" ? "tiles.failing.tone.pmtu" : "tiles.failing.tone")}
                 hint={t("qualifier", { protocol: protocol.toUpperCase() })}
                 note={pairsNote}
               />
@@ -1264,11 +1272,17 @@ export function OverviewPage() {
                       )}
                     />
                   ) : (
+                    /* The 1% line is the failure-ratio tiers' rule; PMTU ranks by path MTU, so its
+                       slate says only that nothing is reduced or black-holed. The link keeps the
+                       protocol on show, in the Matrix's own ?protocol= key. */
                     <EmptyState
                       title={t("worstPairs.empty.healthy.title")}
-                      body={t("worstPairs.empty.healthy.body")}
+                      body={t(protocol === "pmtu" ? "worstPairs.empty.healthy.body.pmtu" : "worstPairs.empty.healthy.body")}
                       action={
-                        <a href={withAtParam("/matrix")} className="text-xs text-primary hover:underline">
+                        <a
+                          href={withAtParam(matrixHref(protocol))}
+                          className="text-xs text-primary hover:underline"
+                        >
                           {t("worstPairs.open")}
                         </a>
                       }

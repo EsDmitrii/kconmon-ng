@@ -18,16 +18,18 @@ import { useTopology } from "@/hooks/use-topology";
 import { agentPlanes, EXTERNAL_SCRAPE_DOCS_URL, isExternalAgent, unscrapedExternalNodes, type Plane } from "@/lib/agents";
 import { getRun, getRuns } from "@/lib/api";
 import type { InvestigationScope } from "@/lib/investigation-sources";
-import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
+import { fixedDecimal, stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { cardsDict, pluralKey, type CardsKey } from "@/lib/i18n/dict/cards";
 import { sharedDict } from "@/lib/i18n/dict/shared";
 import { cellTier, DEGRADED_AT, FAILING_AT, isMeasured, pmtuReading, severityRatio } from "@/lib/matrix-cells";
 /* The ?protocol= reader and writer live on pages/matrix.tsx — one URL key, one
    spelling, imported the way target-card.tsx imports fmtIntervalNs. */
 import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/lib/protocol-param";
+import { groupSamplesByPair } from "@/lib/run-samples";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol, type RunDetail } from "@/lib/types";
 import { cn, runsAtOrBefore } from "@/lib/utils";
+import { knownNodes, NotInFleet } from "./pair-card";
 
 const NODE_PATH_PREFIX = "/nodes/";
 
@@ -75,8 +77,8 @@ const MESH_PLANES: readonly Plane[] = ["tcp", "udp", "icmp", "pmtu", "mtr"];
  *
  * `scored` and `total` are the figure's own COVERAGE, and they exist because a
  * bare "100.0% healthy" computed from one scored pair out of nine is a claim
- * about the node that only one ninth of the evidence supports (QA scope 2,
- * finding #3). `total` counts every outbound pair the matrix carries a cell
+ * about the node that only one ninth of the evidence supports. `total` counts
+ * every outbound pair the matrix carries a cell
  * for, `scored` the ones that actually produced a severity ratio; the header
  * states the gap wherever it exists, the way the Overview's worstPairs.scoredGap
  * already does for the fleet.
@@ -148,12 +150,12 @@ const TABS: { value: NodeTab; labelKey: CardsKey }[] = [
  * On UDP and ICMP the header's verdict comes from packet loss (severityRatio is
  * worst-of), while this table had no loss column at all and printed an em-dash
  * in the fail column for every row — a table that agreed with nothing and
- * explained less (QA scope 2, finding #5). The loss column appears whenever the
+ * explained less. The loss column appears whenever the
  * cells CARRY loss, which is the same rule the matrix tooltip applies rather
  * than a second protocol switch: the vector that can decide the tier is the
  * vector that gets a column.
  *
- * The em-dash itself moved too (#4). The matrix reserves it for a pair NOTHING
+ * The em-dash itself moved too. The matrix reserves it for a pair NOTHING
  * measured and says "no fail data" for a lazy failure counter; two different
  * facts, and this table used one glyph for both.
  */
@@ -269,7 +271,7 @@ function BreakdownTable({
         {pager.visible.map((c) => (
           <Tr key={peerOf(c)}>
             {/* The destination was the other dead end on this card: the row
-                named a pair and led nowhere (QA scope 2, finding #14). */}
+                named a pair and led nowhere. */}
             <Td className="max-w-[16rem] pl-4 pr-4">
               <a
                 href={withAtParam(`/pairs/${encodeURIComponent(c.source)}/${encodeURIComponent(c.destination)}`)}
@@ -279,7 +281,7 @@ function BreakdownTable({
                 {peerOf(c)}
               </a>
             </Td>
-            {/* Values read in the foreground (M4-2); only trouble is tinted. */}
+            {/* Values read in the foreground; only trouble is tinted. */}
             <Td
               numeric
               className={cn("pr-4", c.failRatio !== null && c.failRatio >= DEGRADED_AT && "text-health-bad")}
@@ -304,7 +306,7 @@ function BreakdownTable({
                 className={cn(
                   "pr-4",
                   pmtuReading(c) === "blackhole" && "text-health-bad",
-                  pmtuReading(c) === "reduced" && "text-health-warn",
+                  (pmtuReading(c) === "reduced" || pmtuReading(c) === "recovering") && "text-health-warn",
                 )}
               >
                 {fmtMtu(c)}
@@ -357,13 +359,13 @@ function OverviewTab({
   const t = useT(cardsDict);
   return (
     <div className="flex flex-col gap-5">
-      <Card className="p-5">
-        <h2 className="type-section">{t("node.identity")}</h2>
+      <Card className="p-4">
+        <h2 className="text-sm font-semibold">{t("node.identity")}</h2>
         {/* Four em-dashes are the answer to "the topology knows nothing about
             this node". They are NOT the answer to "the topology request
             failed" — that reads as a node that exists and has no identity,
-            when in fact nobody was asked and the server said why (QA round 2,
-            finding #3). One honest line, carrying the problem verbatim. */}
+            when in fact nobody was asked and the server said why. One honest
+            line, carrying the problem verbatim. */}
         {topologyProblem !== undefined ? (
           <p data-testid="identity-problem" className="mt-3 text-xs leading-relaxed text-muted-foreground">
             {topologyProblem}
@@ -388,7 +390,7 @@ function OverviewTab({
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.agentId")}</dt>
-              {/* Machine identifiers wear the data face (M4-1); the dash that
+              {/* Machine identifiers wear the data face; the dash that
                   stands in for one is not an identifier, and in mono it drew
                   narrower than its three siblings. */}
               <dd className={cn("mt-0.5 truncate", agentId !== undefined && "mono-data")} title={agentId}>
@@ -401,7 +403,7 @@ function OverviewTab({
               <dt className="text-xs text-muted-foreground">{t(external ? "node.identity.address" : "node.identity.podIP")}</dt>
               {/* `?? "—"` never fired for the historical shape, which carries
                   podIP as "" rather than as an absent field — so the cell went
-                  blank instead of saying it had no answer (QA scope 2, #6). An
+                  blank instead of saying it had no answer. An
                   explicit empty check, because "" IS the absence here. */}
               <dd className={cn("mt-0.5", podIP !== undefined && podIP !== "" && "mono-data")}>
                 {podIP === undefined || podIP === "" ? "—" : podIP}
@@ -455,7 +457,7 @@ function OverviewTab({
       <Card asChild className="overflow-hidden p-0">
         <section>
           <div className="border-b border-border px-4 py-3">
-            <h2 className="type-section">{t("node.breakdown")}</h2>
+            <h2 className="text-sm font-semibold">{t("node.breakdown")}</h2>
           </div>
           <BreakdownTable nodeName={nodeName} cells={cells} unscraped={unscraped} />
         </section>
@@ -522,7 +524,7 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
     <Card asChild className="overflow-hidden p-0">
       <section>
         <div className="border-b border-border px-4 py-3">
-          <h2 className="type-section">{t("node.runs.heading")}</h2>
+          <h2 className="text-sm font-semibold">{t("node.runs.heading")}</h2>
           {/* The engaged half of the same limitation — the endpoint has no time
               filter either, so the page it returns is the newest page NOW and
               the cut to `t` happens here — is a CLAUSE of the same sentence
@@ -561,10 +563,13 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
           <>
           <ul className="divide-y divide-border">
             {runsPager.visible.map((r) => {
-              const touching = r.results.filter((res) => res.sourceNode === nodeName || res.destinationNode === nodeName);
+              /* An interval run stores one result per sample, so pairs are the distinct groups. */
+              const touching = groupSamplesByPair(
+                r.results.filter((res) => res.sourceNode === nodeName || res.destinationNode === nodeName),
+              );
               return (
                 <li key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
-                  {/* A run id is a machine identifier — the data face (M4-1). */}
+                  {/* A run id is a machine identifier — the data face. */}
                   <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="mono-data font-medium text-primary hover:underline">
                     {r.id}
                   </a>
@@ -606,7 +611,7 @@ const NODE_ANNOTATION_RANGE_SECONDS = 24 * 60 * 60;
  * The declared MAINTENANCE windows sit under it, over the same 24 hours and the
  * same scope. The pair and target cards have carried that bar since M6 and this
  * one never got it, so a node under a declared change looked exactly like a node
- * that was simply broken (QA scope 2, finding #21). Same component, node scope —
+ * that was simply broken. Same component, node scope —
  * the bar hides itself without maintenance:read, so nothing is added for a
  * reader who cannot see windows anyway.
  */
@@ -619,9 +624,9 @@ function NodeAnnotations({ nodeName }: { nodeName: string }) {
     refresh: refreshMaintenance,
   } = useMaintenance(nodeName, NODE_ANNOTATION_RANGE_SECONDS);
   return (
-    <Card asChild className="p-5">
+    <Card asChild className="p-4">
       <section>
-        <h2 className="type-section">{t("node.annotations")}</h2>
+        <h2 className="text-sm font-semibold">{t("node.annotations")}</h2>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t("node.annotations.blurb")}</p>
         {/* ownScope: a note filed under this very node needs no chip saying so; a global one keeps its. */}
         <AnnotationBar
@@ -642,14 +647,10 @@ function NodeAnnotations({ nodeName }: { nodeName: string }) {
   );
 }
 
-function NotFound({ nodeName }: { nodeName: string }) {
+function NotFound() {
   const t = useT(cardsDict);
   return (
-    <PageShell
-      timeMachine
-      title={t("node.title")}
-      description={nodeName ? t("node.notFound.withName", { name: nodeName }) : t("node.notFound.bare")}
-    >
+    <PageShell timeMachine title={t("node.title")} description={t("node.notFound.bare")}>
       <Card role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
         {t("node.notFound.body")}
       </Card>
@@ -664,9 +665,8 @@ export function NodeCardPage() {
   const { at } = useTimeContext();
   const topo = useTopology();
   /* The switch is a VIEW of this card, and a view worth sharing — read from
-     and written back to ?protocol=, through pages/matrix.tsx's own reader and
-     writer so the two surfaces cannot spell the key differently (QA scope 2,
-     finding #18). */
+     and written back to ?protocol=, through lib/protocol-param's reader and
+     writer so the two surfaces cannot spell the key differently. */
   const [protocol, setProtocolState] = useState<Protocol>(() => readProtocolFromLocation(window.location.search));
   const setProtocol = (p: Protocol) => {
     setProtocolState(p);
@@ -687,7 +687,20 @@ export function NodeCardPage() {
     [topo.data, matrix.data, protocol],
   );
 
-  if (nodeName === "") return <NotFound nodeName={nodeName} />;
+  if (nodeName === "") return <NotFound />;
+
+  /* Judged only while live, as on the pair card: a historical inventory is a reconstruction, and
+     `null` (nothing answered yet) is no basis for a not-found either. */
+  const known = at === null ? knownNodes(topo.data, matrix.data) : null;
+  if (known !== null && known.size > 0 && !known.has(nodeName)) {
+    return (
+      <NotInFleet
+        title={t("node.notFound.unknown")}
+        description={t("pair.notFound.oneUnknown", { name: nodeName })}
+        body={t("node.notFound.unknownBody")}
+      />
+    );
+  }
 
   const node = topo.data?.nodes.find((n) => n.name === nodeName);
   const agent = topo.data?.agents.find((a) => a.nodeName === nodeName);
@@ -745,22 +758,22 @@ export function NodeCardPage() {
           <span data-testid="node-verdict" className="flex flex-nowrap items-center gap-2">
             {/* No percentage, no sentence. "— healthy" read as a claim with a
                 missing number in front of it; the badge beside it already says
-                the state in words, and it is the honest one (QA round 2, #16).
+                the state in words, and it is the honest one.
                 And where the figure exists but rests on part of the evidence, it
                 carries its own denominator rather than being withheld: "100.0%
                 healthy" off one scored pair of nine was a true statement about
-                one ninth of this node, presented as a statement about the node
-                (QA scope 2, #3). Withholding it would throw away the only
+                one ninth of this node, presented as a statement about the node.
+                Withholding it would throw away the only
                 measurement there is; disclosing the coverage keeps both. */}
             {health.percent === null ? null : (
               <span data-testid="node-health-percent" className="nums text-sm text-muted-foreground">
                 {health.scored < health.total
                   ? t("health.percent.scoped", {
-                      percent: health.percent.toFixed(1),
+                      percent: fixedDecimal(health.percent, 1, locale),
                       scored: health.scored,
                       total: health.total,
                     })
-                  : t("health.percent", { percent: health.percent.toFixed(1) })}
+                  : t("health.percent", { percent: fixedDecimal(health.percent, 1, locale) })}
               </span>
             )}
             <Badge variant={TIER_VARIANT[health.tier]} dot>
@@ -837,7 +850,7 @@ export function NodeCardPage() {
             {/* scopeNode, not scope: an equality filter on the bare node name
                 never saw the pair-scoped rows ("node-a→node-b") that every
                 check run and path change writes, so the rail looked idle on a
-                busy node (QA scope 2 #21). */}
+                busy node. */}
             <RecentChanges scopeNode={nodeName} />
             <NodeAnnotations nodeName={nodeName} />
           </div>

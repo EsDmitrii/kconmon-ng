@@ -160,19 +160,22 @@ export function toTable(res: PromResult, formatTime?: (ms: number) => string): P
   })();
   const timeColumn = withTime ? [timeName] : [];
 
+  /* The value leads and the labels follow: it is the answer the query was run for, and behind a
+     dozen label columns it would sit past the right edge of a desktop. */
+  const labelCells = (e: VectorEntry) => labels.map((l) => e?.metric?.[l] ?? "");
   if (resultType === "vector") {
     return {
-      columns: [...labels, ...timeColumn, VALUE_COL],
-      rows: entries.map((e, i) => [...labels.map((l) => e?.metric?.[l] ?? ""), ...timeCell(i), e?.value?.[1] ?? ""]),
+      columns: [VALUE_COL, ...timeColumn, ...labels],
+      rows: entries.map((e, i) => [e?.value?.[1] ?? "", ...timeCell(i), ...labelCells(e)]),
       at,
       kind,
     };
   }
   return {
-    columns: [...labels, POINTS_COL, ...timeColumn, LAST_COL],
+    columns: [LAST_COL, ...timeColumn, POINTS_COL, ...labels],
     rows: entries.map((e, i) => {
       const vs = e?.values ?? [];
-      return [...labels.map((l) => e?.metric?.[l] ?? ""), String(vs.length), ...timeCell(i), vs.at(-1)?.[1] ?? ""];
+      return [vs.at(-1)?.[1] ?? "", ...timeCell(i), String(vs.length), ...labelCells(e)];
     }),
     at,
     kind,

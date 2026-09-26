@@ -23,7 +23,7 @@ export class FakeSocket {
   readyState = 0;
   onopen: (() => void) | null = null;
   onmessage: ((ev: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((ev: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
 
   constructor(public readonly url: string) {
@@ -35,7 +35,7 @@ export class FakeSocket {
   }
 
   close(): void {
-    this.emitClose();
+    this.emitClose(1000);
   }
 
   emitOpen(): void {
@@ -43,10 +43,11 @@ export class FakeSocket {
     this.onopen?.();
   }
 
-  emitClose(): void {
+  /** 1006 by default: the code a browser reports for a connection that dropped without a close frame. */
+  emitClose(code = 1006, reason = ""): void {
     if (this.readyState === 3) return;
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
   }
 
   emitEnvelope(env: WsEnvelope): void {

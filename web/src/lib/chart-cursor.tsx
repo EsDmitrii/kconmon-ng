@@ -203,6 +203,8 @@ export interface ReadoutSeries {
   points: readonly (readonly [number, number])[];
   /** This series' own median sampling interval; 0 when it has none. */
   step: number;
+  /** The series' index in the option, kept because empty series are dropped from the model. */
+  optionIndex: number;
 }
 
 /** A reading a series ACTUALLY has, with the instant it was taken at. */
@@ -303,7 +305,7 @@ export function readoutSeries(option: echarts.EChartsOption): ReadoutSeries[] {
   const list: unknown[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
 
   const built = list
-    .map((entry) => {
+    .map((entry, optionIndex) => {
       const record = (entry ?? {}) as Record<string, unknown>;
       const data = Array.isArray(record.data) ? record.data : [];
       const points = data
@@ -315,6 +317,7 @@ export function readoutSeries(option: echarts.EChartsOption): ReadoutSeries[] {
         color: declaredColor(record),
         points,
         step: medianStep(points),
+        optionIndex,
       } satisfies ReadoutSeries;
     })
     .filter((series) => series.points.length > 0);
@@ -399,10 +402,16 @@ export function pickReadoutRows(
   if (at === null) return { rows: [], hidden: 0 };
 
   const candidates: ReadoutRow[] = [];
-  model.forEach((series, index) => {
+  model.forEach((series) => {
     const sample = nearestSample(series, at);
     if (sample === null) return;
-    candidates.push({ index, series, sample, seriesName: series.name, value: [sample.t, sample.v] });
+    candidates.push({
+      index: series.optionIndex,
+      series,
+      sample,
+      seriesName: series.name,
+      value: [sample.t, sample.v],
+    });
   });
 
   const { rows, hidden } = capTooltipRows(candidates, null, cap);

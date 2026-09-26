@@ -15,7 +15,9 @@ const TableVariantContext = React.createContext<TableVariant>("default");
 export interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
   variant?: TableVariant;
   /* Skip the built-in overflow-x-auto wrapper for call sites that own their
-     scroll container (mtr-hop-table measures its own scroll position). */
+     scroll container (mtr-hop-table measures its own scroll position). The
+     wrapper is `relative` so an absolutely positioned cell child (an sr-only
+     header label) is clipped by it instead of widening the page. */
   bare?: boolean;
   /* Extra classes for the scroll wrapper (ignored when bare). */
   containerClassName?: string;
@@ -42,12 +44,12 @@ export const Table = React.forwardRef<HTMLTableElement, TableProps>(
             tabIndex={0}
             role="region"
             aria-label={scrollLabel}
-            className={cn("overflow-x-auto", scrollRegionClass, containerClassName)}
+            className={cn("relative overflow-x-auto", scrollRegionClass, containerClassName)}
           >
             {table}
           </div>
         ) : (
-          <div className={cn("overflow-x-auto", containerClassName)}>{table}</div>
+          <div className={cn("relative overflow-x-auto", containerClassName)}>{table}</div>
         )}
       </TableVariantContext.Provider>
     );

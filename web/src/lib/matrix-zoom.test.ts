@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CELL_GAP,
   elideForHeaders,
+  headerLabel,
   COLUMN_WIDTH,
   heightBudget,
   LABEL_MIN_WIDTH,
@@ -252,13 +253,14 @@ describe("fitScale bounds BOTH axes", () => {
 /*
  * The grid opened at half size on a screen with room to spare.
  *
- * The viewport is `max-h-[...] min-h-64`, so its clientHeight is the height its CONTENT made. A
- * fresh render measured the 256px min, fitScale decided a seven-node grid did not fit, dropped to
- * 50%, and the smaller grid then kept the box at 256px -- a loop with no way out, on every fleet.
+ * The viewport is `max-h-[...]`, floored at 16rem, or at the grid's own height when that is less,
+ * so its clientHeight is the height its CONTENT made. A fresh render measured the 256px min,
+ * fitScale decided a seven-node grid did not fit, dropped to 50%, and the smaller grid then kept the
+ * box at 256px -- a loop with no way out, on every fleet.
  */
 describe("heightBudget", () => {
   it("takes the max-height over a content-driven clientHeight", () => {
-    // 256 = the min-h-64 a fresh viewport reports; 640 = the resolved max-h.
+    // 256 = the 16rem floor a fresh viewport reports; 640 = the resolved max-h.
     expect(heightBudget(256, 640)).toBe(640);
   });
 
@@ -350,6 +352,30 @@ describe("elideForHeaders", () => {
 
   it("has nothing to elide without a shared prefix", () => {
     expect(elideForHeaders(fleet, "", 40, 11)).toBe("");
+  });
+});
+
+/*
+ * A remainder that nearly fits must not lose a real character to the browser's own ellipsis. At
+ * 1440px a column is 96px of 11px type: "…control-plane" ran 5px over, and CSS text-overflow put
+ * its "…" over the leading "…" AND the "c", so the header read "…ontrol-plane".
+ */
+describe("headerLabel", () => {
+  const column = gridMetrics(1);
+
+  it("drops the leading ellipsis when it would not fit, so the remainder is drawn whole", () => {
+    expect(headerLabel("kc-accept-control-plane", "kc-accept-", column.columnWidth, column.fontLabel)).toBe("control-plane");
+  });
+
+  it("keeps the leading ellipsis where there is room for it", () => {
+    expect(headerLabel("kc-accept-control-plane", "kc-accept-", column.labelWidth, column.fontLabel)).toBe("…control-plane");
+    expect(headerLabel("kconmon-prod.node-01", "kconmon-prod.node-", column.columnWidth, column.fontLabel)).toBe("…01");
+  });
+
+  it("leaves a name alone when nothing is elided", () => {
+    expect(headerLabel("kc-accept-worker", "", column.columnWidth, column.fontLabel)).toBe("kc-accept-worker");
+    expect(headerLabel("other-node", "kc-accept-", column.columnWidth, column.fontLabel)).toBe("other-node");
+    expect(headerLabel("kc-accept-", "kc-accept-", column.columnWidth, column.fontLabel)).toBe("kc-accept-");
   });
 });
 

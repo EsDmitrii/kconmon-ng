@@ -7,6 +7,14 @@ export interface ChartColors {
   axis: string;
   grid: string;
   surface: string;
+  /* ECharts draws its tooltip as a DOM box with a light default of its own, so it is themed by value too. */
+  tooltip: TooltipColors;
+}
+
+export interface TooltipColors {
+  background: string;
+  border: string;
+  text: string;
 }
 
 /* Documented values of the index.css tokens; NOTE the comma syntax: canvas accepts modern space-separated hsl. */
@@ -23,6 +31,7 @@ export const CHART_FALLBACK: Record<"dark" | "light", ChartColors> = {
     axis: "hsl(224, 12%, 64%)",
     grid: "hsl(230, 11%, 15%)",
     surface: "hsl(231, 14%, 9.5%)",
+    tooltip: { background: "hsl(230, 12%, 13%)", border: "hsl(230, 11%, 17%)", text: "hsl(220, 25%, 96%)" },
   },
   light: {
     series: [
@@ -36,6 +45,7 @@ export const CHART_FALLBACK: Record<"dark" | "light", ChartColors> = {
     axis: "hsl(226, 11%, 46%)",
     grid: "hsl(222, 22%, 93%)",
     surface: "hsl(0, 0%, 100%)",
+    tooltip: { background: "hsl(0, 0%, 100%)", border: "hsl(222, 22%, 91%)", text: "hsl(228, 22%, 15%)" },
   },
 };
 
@@ -53,6 +63,9 @@ function readVar(styles: CSSStyleDeclaration, name: string): string | null {
 export function chartColors(theme: "dark" | "light"): ChartColors {
   const fallback = CHART_FALLBACK[theme];
   if (typeof document === "undefined") return fallback;
+  /* Charts rebuild during the render that switches the theme, before ThemeProvider's effect moves
+     the class on <html>; the live variables still belong to the other theme then. */
+  if (document.documentElement.classList.contains(theme === "dark" ? "light" : "dark")) return fallback;
   const styles = getComputedStyle(document.documentElement);
   return {
     series: [1, 2, 3, 4, 5].map(
@@ -62,6 +75,11 @@ export function chartColors(theme: "dark" | "light"): ChartColors {
     axis: readVar(styles, "--chart-axis") ?? fallback.axis,
     grid: readVar(styles, "--chart-grid") ?? fallback.grid,
     surface: readVar(styles, "--surface") ?? fallback.surface,
+    tooltip: {
+      background: readVar(styles, "--popover") ?? fallback.tooltip.background,
+      border: readVar(styles, "--border") ?? fallback.tooltip.border,
+      text: readVar(styles, "--popover-foreground") ?? fallback.tooltip.text,
+    },
   };
 }
 

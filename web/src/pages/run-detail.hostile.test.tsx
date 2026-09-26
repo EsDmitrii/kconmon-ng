@@ -181,23 +181,7 @@ describe("a run whose own fields did not arrive", () => {
     expectNoGarbageOnScreen();
   });
 
-  /**
-   * SKIPPED — the throw is not on this page.
-   *
-   * `results: {}` (anything non-null that is not an array) reaches
-   * hooks/use-run.ts's mergeRunPairs, whose `for (const r of results)` raises
-   * "results is not iterable" during THIS page's render: a white screen with
-   * the permalink still in the address bar. run-detail.tsx now guards its own
-   * two readers of the field (`Array.isArray(run.results) ? … : []`, feeding
-   * groupSamplesByPair and aggregateSamples), so the aggregate and the timeline
-   * survive it; the pair rows come out of the hook and cannot be defended from
-   * here.
-   *
-   * The fix belongs in src/hooks/use-run.ts — mergeRunPairs should take the same
-   * `Array.isArray` view of its first argument that this page now takes of the
-   * field it reads it from. Un-skip when it does.
-   */
-  it.skip("takes a results field that is not a list at all without throwing", async () => {
+  it("takes a results field that is not a list at all without throwing", async () => {
     renderPage(["events"], runBody({ status: "succeeded", results: {} as unknown as [] }));
     expect(await screen.findByText("No pairs dispatched yet.")).toBeInTheDocument();
     expectNoGarbageOnScreen();

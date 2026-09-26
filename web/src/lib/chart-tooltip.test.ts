@@ -13,6 +13,7 @@ import {
   type AxisTooltipRow,
 } from "./chart-tooltip";
 import { stampClock } from "./i18n";
+import { CHART_FALLBACK } from "./chart-theme";
 
 /**
  * The clipping the owner reported: hovering a worst-5 panel near the left of the
@@ -466,5 +467,32 @@ describe("the y pills of a two-axis chart", () => {
     );
     expect(pills[0]?.({ value: 0.008 })).toBe("8ms");
     expect(pills[1]?.({ value: 0.5 })).toBe("50%");
+  });
+});
+
+/* Owner screenshot: on the dark theme the Metrics tooltip was a white box, because nothing told
+   ECharts the theme and it fell back to its own light default. */
+describe("sharedTooltipOption theme colours", () => {
+  const base: echarts.EChartsOption = {
+    xAxis: { type: "time" },
+    yAxis: { type: "value" },
+    tooltip: { trigger: "axis" },
+    series: [],
+  };
+  const opts = { cursorValue: () => null, more: (n: number) => `+${n} more` };
+
+  it.each(["dark", "light"] as const)("paints the %s tooltip in that theme's popover colours", (theme) => {
+    const colors = CHART_FALLBACK[theme].tooltip;
+    const out = sharedTooltipOption(base, () => null, { ...opts, tooltipColors: colors });
+    const tooltip = out.tooltip as echarts.TooltipComponentOption;
+    expect(tooltip.backgroundColor).toBe(colors.background);
+    expect(tooltip.borderColor).toBe(colors.border);
+    expect((tooltip.textStyle as { color?: string } | undefined)?.color).toBe(colors.text);
+  });
+
+  it("keeps a colour the chart set itself", () => {
+    const own: echarts.EChartsOption = { ...base, tooltip: { trigger: "axis", backgroundColor: "#123456" } };
+    const out = sharedTooltipOption(own, () => null, { ...opts, tooltipColors: CHART_FALLBACK.dark.tooltip });
+    expect((out.tooltip as echarts.TooltipComponentOption).backgroundColor).toBe("#123456");
   });
 });

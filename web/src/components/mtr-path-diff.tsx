@@ -54,7 +54,7 @@ function lcsAnchors(a: MTRHop[], b: MTRHop[]): [number, number][] {
 /** diffPaths aligns two snapshots' hop lists and says what happened between them. */
 export function diffPaths(aHops: MTRHop[], bHops: MTRHop[]): DiffRow[] {
   /* Both sides are LISTS or they are nothing; a `null` hops field reaching the
-     alignment threw out of the whole page (hostile-QA probe E). */
+     alignment would throw out of the whole page. */
   const a = Array.isArray(aHops) ? aHops : [];
   const b = Array.isArray(bHops) ? bHops : [];
   const rows: DiffRow[] = [];
@@ -148,8 +148,8 @@ export function fmtRttDeltaNs(ns: number | undefined): string {
   if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
   const shown = (ns / 1e6).toFixed(1);
   /* A delta of a few microseconds ROUNDS to nothing, and "-0.0ms" is the same
-     claim about a direction that "+0.0" was already refused for (hostile-QA
-     probe N). Read the sign off the number that will actually be printed. */
+     claim about a direction that "+0.0" was already refused for. Read the sign
+     off the number that will actually be printed. */
   if (Number(shown) === 0) return "0.0ms";
   return `${ns > 0 ? "+" : ""}${shown}ms`;
 }
@@ -192,8 +192,8 @@ function HopCell({ hop }: { hop: MTRHop | undefined }) {
   return (
     /* Address over RTT rather than beside it: the two columns have to sit side
        by side inside the narrowest pane on the page, and a single line of
-       "2 10.244.9.17 1.2ms" twice over is what used to push the newer path off
-       the right edge. The address is the thing being compared, so it leads. */
+       "2 10.244.9.17 1.2ms" twice over would push the newer path off the right
+       edge. The address is the thing being compared, so it leads. */
     <td className="px-1.5 py-1.5 align-top">
       <span className="flex items-baseline gap-1">
         <span className="nums font-mono text-[10px] text-muted-foreground">{hop.number}</span>
@@ -239,7 +239,7 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
   return (
     /* The four-column diff has a min-width and lives in the narrowest pane, so
        it is the likeliest table in the console to run off its card — same
-       affordance as the hop table (QA scope 4, finding #6). */
+       affordance as the hop table. */
     <div className="mt-4">
       {identical ? (
         <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("diff.identical")}</p>

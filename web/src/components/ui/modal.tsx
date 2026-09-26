@@ -1,28 +1,28 @@
-import { useCallback, useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { sharedDict } from "@/lib/i18n/dict/shared";
 import { cn } from "@/lib/utils";
+import { cycleTab } from "./focus-trap";
 
 /**
  * Modal — the kit's dialog primitive, and the reason detail panes stop competing for the page.
  *
- * The console kept putting everything side by side: on the MTR Explorer three panes shared one row,
- * so on a laptop the route history was a column too narrow to read a route in and the trace detail
- * was a column too narrow to read a hop in (owner report). A detail is not a thing you scan next to
- * the list — it is a thing you open, read, and close. That is what this is for.
+ * Side by side on a laptop, a route history is a column too narrow to read a route in and a trace
+ * detail a column too narrow to read a hop in. A detail is not a thing you scan next to the list —
+ * it is a thing you open, read, and close. That is what this is for.
  *
  * WHEN NOT TO USE IT: anything the reader must see AT THE SAME TIME as what is behind it. A modal
  * hides its context by design, so it is the wrong shape for "watch this while I change that". The
  * comparison view is a legitimate modal because the two things being compared are BOTH inside it.
  *
- * The contract is the WAI-ARIA dialog one, implemented rather than claimed — this kit shipped no
- * dialog primitive, and two surfaces had already dropped the `dialog` role rather than assert
- * behaviour they did not have:
+ * The contract is the WAI-ARIA dialog one, implemented rather than claimed (the Tab trap is
+ * ./focus-trap, shared with the navigation drawer):
  *   - role="dialog" aria-modal, labelled by its own title
- *   - focus moves inside on open and returns to the opener on close
- *   - Escape closes; so does a click on the backdrop
+ *   - focus moves inside on open and returns to the opener on close, or to the page when the opener
+ *     is gone or hidden by then
+ *   - Escape closes; so does a click on the backdrop, unless the dialog is not dismissible right now
  *   - Tab and Shift+Tab cycle within the panel
  *   - the page behind it does not scroll
  */
@@ -33,6 +33,7 @@ export function Modal({
   description,
   size = "md",
   footer,
+  dismissible = true,
   children,
 }: {
   open: boolean;
@@ -44,6 +45,8 @@ export function Modal({
   /** `wide` is for content that is a TABLE or a diff — the cases that were unreadable in a column. */
   size?: "md" | "wide";
   footer?: ReactNode;
+  /** False while the dialog must stay: Escape, the backdrop and Close then do nothing. */
+  dismissible?: boolean;
   children: ReactNode;
 }) {
   const t = useT(sharedDict);
@@ -53,16 +56,6 @@ export function Modal({
   const openerRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const descriptionId = useId();
-
-  const focusables = useCallback((): HTMLElement[] => {
-    const panel = panelRef.current;
-    if (!panel) return [];
-    return [
-      ...panel.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    ].filter((el) => el.offsetParent !== null || el === document.activeElement);
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -76,35 +69,22 @@ export function Modal({
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = previousOverflow;
-      openerRef.current?.focus();
+      /* The opener may be gone or hidden by now: the drawer a dialog was opened from closes when a
+         phone rotates past md, and the sidebar column is display:none below it. Focusing either does
+         nothing and leaves focus on <body>, so focus goes where the skip link sends it. */
+      const opener = openerRef.current;
+      if (opener?.isConnected && opener.checkVisibility?.() !== false) opener.focus();
+      else document.getElementById("main-content")?.focus();
     };
   }, [open]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       event.stopPropagation();
-      onClose();
+      if (dismissible) onClose();
       return;
     }
-    if (event.key !== "Tab") return;
-    const items = focusables();
-    if (items.length === 0) {
-      // Nothing to cycle through: keep focus on the panel rather than letting
-      // Tab walk out into the page the dialog is covering.
-      event.preventDefault();
-      panelRef.current?.focus();
-      return;
-    }
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    } else if (event.shiftKey && (active === first || active === panelRef.current)) {
-      event.preventDefault();
-      last.focus();
-    }
+    if (panelRef.current) cycleTab(panelRef.current, event);
   };
 
   if (!open) return null;
@@ -112,16 +92,15 @@ export function Modal({
   /* PORTALLED to the document body, and not for tidiness: `position: fixed` is relative to the
      nearest ancestor carrying a transform, filter or perspective — not to the viewport — and this
      console's page shell animates in under `.page-enter` (a fade-up that holds a transform while it
-     runs). A dialog rendered inside that subtree anchored itself to the PAGE instead of the screen,
-     so a tall one hung past the bottom edge with its header pushed off the top: the title and the
-     Close button were simply not on screen (owner report). At the top of the document there is
-     nothing to be relative to but the viewport. */
+     runs). A dialog rendered inside that subtree would anchor itself to the PAGE instead of the
+     screen, and a tall one would hang past the bottom edge with its title and Close button off
+     screen. At the top of the document there is nothing to be relative to but the viewport. */
   return createPortal(
-    /* No scrolling on THIS element. It used to carry overflow-y-auto, and a dialog taller than the
-       viewport then overflowed a centred flex child in both directions at once: the top — the title
-       and the Close button — ended up above the scroll origin, unreachable at any scroll position
-       (owner report, a trace with fifty rows). The panel below bounds its own height instead, so it
-       can never be taller than this box and centring stays safe. */
+    /* No scrolling on THIS element. With overflow-y-auto here, a dialog taller than the viewport
+       overflows a centred flex child in both directions at once, and the top — the title and the
+       Close button — ends up above the scroll origin, unreachable at any scroll position. The panel
+       below bounds its own height instead, so it can never be taller than this box and centring
+       stays safe. */
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8">
       {/* The backdrop is a button so a pointer can dismiss, and aria-hidden with
           no tab stop because Escape and the Close control are the keyboard's two
@@ -134,7 +113,7 @@ export function Modal({
         type="button"
         aria-hidden="true"
         tabIndex={-1}
-        onClick={onClose}
+        onClick={dismissible ? onClose : undefined}
         data-testid="modal-backdrop"
         className="fixed inset-0 bg-background/60 backdrop-blur-md"
       />
@@ -166,7 +145,7 @@ export function Modal({
               {title}
             </h2>
             {description ? (
-              <p id={descriptionId} className="mt-0.5 truncate text-xs text-muted-foreground" title={description}>
+              <p id={descriptionId} className="mt-0.5 break-words text-xs leading-relaxed text-muted-foreground">
                 {description}
               </p>
             ) : null}
@@ -175,8 +154,9 @@ export function Modal({
             type="button"
             aria-label={t("modal.close")}
             onClick={onClose}
+            disabled={!dismissible}
             className={cn(
-              "-mr-1 -mt-1 shrink-0 rounded-md p-1.5 text-muted-foreground",
+              "-mr-1 -mt-1 shrink-0 rounded-md p-1.5 text-muted-foreground disabled:pointer-events-none disabled:opacity-65",
               "transition-colors duration-(--dur-fast) hover:bg-accent hover:text-foreground",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             )}

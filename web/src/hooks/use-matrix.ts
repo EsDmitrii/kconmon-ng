@@ -24,10 +24,13 @@ export function matrixTopic(protocol: Protocol): string {
 export function useMatrix(protocol: Protocol) {
   const { at } = useTimeContext();
   const engaged = at !== null;
-  const { realtime } = useCapabilities();
+  const { realtime, resolved } = useCapabilities();
   const queryClient = useQueryClient();
   const push = useWsTopic<Matrix>(matrixTopic(protocol), { enabled: realtime && !engaged });
   const live = realtime && !engaged && push.connected;
+  /* Whether the grid is pushed is not known yet (the capability probe is in flight, or the socket is
+     being dialled): the header shows no badge rather than a "Delayed data" flash. */
+  const connecting = !engaged && (!resolved || (realtime && push.connecting));
 
   useEffect(() => {
     // The protocol check is belt-and-braces on top of useWsTopic's topic tag.
@@ -47,5 +50,12 @@ export function useMatrix(protocol: Protocol) {
   /* isPending as well as isLoading: a query whose retry is PAUSED (the tab lost focus after a
      failure) is pending-but-not-fetching, so isLoading is false while there is nothing to draw and
      no error to show — the surface rendered a heading and blank space, indefinitely. */
-  return { data: query.data, isLoading: query.isLoading, isPending: query.isPending, error: query.error, live };
+  return {
+    data: query.data,
+    isLoading: query.isLoading,
+    isPending: query.isPending,
+    error: query.error,
+    live,
+    connecting,
+  };
 }

@@ -2,19 +2,17 @@ import { AlertTriangle } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
 
-// ran anonymous-only, so the banner was always shown.
-export function AnonymousBanner({ mode = "anonymous", role }: { mode?: string; role?: string }) {
-  // Before the early return: `mode` is a prop.
+export function AnonymousBanner({ mode, role }: { mode: string; role?: string }) {
   const t = useT(chromeDict);
   if (mode !== "anonymous") return null;
   /* The role NAME is a config value (console.auth.anonymous.role) and goes in
      verbatim; without one the banner says less rather than guessing. */
   const named = role !== undefined && role !== "";
-  const body = named ? t("banner.anonymous.body.role", { role: role as string }) : t("banner.anonymous.body");
-  /* Below sm the full sentence took four lines of a 375px viewport before the page title. One
-     clause fits; the sentence rides on title. Two spans toggled by class, so the role/text
+  const body = named ? t("banner.anonymous.body.role", { role }) : t("banner.anonymous.body");
+  /* Below sm the full sentence would take four lines of a phone before the page title, so one
+     clause shows and the sentence rides on title. Two spans toggled by class, so the role/text
      assertions see the same DOM at every width. */
-  const short = named ? t("banner.anonymous.body.short.role", { role: role as string }) : t("banner.anonymous.body.short");
+  const short = named ? t("banner.anonymous.body.short.role", { role }) : t("banner.anonymous.body.short");
   return (
     <div
       role="status"

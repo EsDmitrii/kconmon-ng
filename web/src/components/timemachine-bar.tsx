@@ -1,4 +1,5 @@
 import { History } from "lucide-react";
+import { TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-control";
 import { Button } from "@/components/ui/button";
 import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
@@ -8,9 +9,8 @@ import { useTimeMachine } from "@/lib/timemachine";
  * TimeMachineBar is the ENGAGED state's banner and nothing else: "you are in the past, writes are
  * off" is a fact about the whole console, so it belongs in the chrome.
  *
- * Live it renders nothing. The trigger moved to components/timemachine-control.tsx, into the page
- * header beside the range presets — as a permanent top strip it was two words with no context and
- * the reader never connected it to the time filters he was actually looking at (owner report).
+ * Live it renders nothing. The trigger is components/timemachine-control.tsx, in the page header
+ * beside the range presets it belongs with.
  */
 
 /** Both stamps land INSIDE a translated sentence, so they take the interface
@@ -48,7 +48,14 @@ export function TimeMachineBar() {
         variant="outline"
         size="sm"
         className="col-span-2 h-7 justify-self-end sm:col-auto sm:ml-auto"
-        onClick={() => returnToLive()}
+        onClick={() => {
+          /* This button goes away with the banner, so focus moves first: to the page's own Time
+             Machine trigger, or to the page when it has none. */
+          const next =
+            document.querySelector<HTMLElement>(TIME_MACHINE_TRIGGER_SELECTOR) ?? document.getElementById("main-content");
+          next?.focus({ preventScroll: true });
+          returnToLive();
+        }}
       >
         {t("timemachine.returnToLive")}
       </Button>

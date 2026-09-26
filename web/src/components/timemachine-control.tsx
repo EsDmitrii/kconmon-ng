@@ -24,10 +24,8 @@ function stamp(d: Date, locale: Locale): string {
  * TimeMachineControl is the Time Machine's trigger, and it lives in the PAGE HEADER beside the
  * range presets rather than in the chrome.
  *
- * As a strip across the top it was the same two words on every page, next to nothing, and the
- * reader who wanted a deeper window did not connect it to the 15m/1h/6h/24h he was looking at
- * (owner report). The presets pick how long the window is; this picks where it ends, so the two
- * belong in one row.
+ * The presets pick how long the window is; this picks where it ends, so the two belong in one
+ * row, where the reader who wants a deeper window is already looking.
  */
 export function TimeMachineControl() {
   const tm = useTimeMachineControls();

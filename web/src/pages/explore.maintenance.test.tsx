@@ -40,7 +40,11 @@ function stubFetch(opts: { permissions?: string[]; windows?: MaintenanceWindow[]
     const method = (init?.method ?? "GET").toUpperCase();
     if (href.includes("/api/v1/auth/me")) {
       return Promise.resolve(
-        json({ subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions }),
+        json({
+          subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] },
+          /* The charts under test need promql:query (pages/explore.tsx). */
+          permissions: [...permissions, "promql:query"],
+        }),
       );
     }
     if (href.startsWith("/api/v1/maintenance") && method === "POST") {

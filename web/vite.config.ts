@@ -1,34 +1,14 @@
-import { defineConfig, type Plugin } from "vitest/config";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
-import fs from "node:fs";
+import { restoreDistPlaceholder } from "./build/dist-placeholder";
 
 const distDir = path.resolve(import.meta.dirname, "../internal/console/ui/dist");
 
-// emptyOutDir wipes the tracked .gitignore whitelist that keeps generated
-// assets out of git (only the placeholder index.html is tracked); rewrite it
-// after every build so the invariant survives rebuilds.
-const restoreDistGitignore: Plugin = {
-  name: "restore-dist-gitignore",
-  closeBundle() {
-    fs.writeFileSync(
-      path.join(distDir, ".gitignore"),
-      [
-        "# Vite build output is generated; only the placeholder index.html is tracked so",
-        "# `go build`/`go test` compile the embed without requiring a node build.",
-        "*",
-        "!.gitignore",
-        "!index.html",
-        "",
-      ].join("\n"),
-    );
-  },
-};
-
 // The Go binary embeds internal/console/ui/dist, so build there directly.
 export default defineConfig({
-  plugins: [react(), tailwindcss(), restoreDistGitignore],
+  plugins: [react(), tailwindcss(), restoreDistPlaceholder(distDir)],
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },

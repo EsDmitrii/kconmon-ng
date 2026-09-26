@@ -6,6 +6,7 @@ import {
   fmtMicrosNs,
   fmtNsCompact,
   formatCadenceNs,
+  formatDurationNs,
   groupSamplesByPair,
   isIntervalRun,
   MAX_SAMPLES_PER_PAIR,
@@ -13,10 +14,11 @@ import {
   MTR_PER_PAIR_BUDGET_NS,
   pairProgress,
   percentileNs,
+  perPairBudgetNs,
   plannedCadenceFromSpec,
   plannedSamplesPerPair,
   runCadence,
-  snapshotForSample,
+  coveringSnapshots,
   runDurationNs,
   sampleIntervalNs,
 } from "./run-samples";
@@ -262,6 +264,16 @@ describe("effective cadence for slow check types", () => {
     expect(effectivePlannedSamplesPerPair(15 * m, "mtr", 90, 10)).toBe(1);
   });
 
+  it("stretches pmtu to its per-pair timeout, as checks.perPairBudget does", () => {
+    // Over a black hole a pmtu probe waits out a deadline per lost datagram, so the server plans
+    // it around checks.pmtuMinPerPairTimeout (15s) like mtr around its trace budget.
+    expect(perPairBudgetNs("pmtu")).toBe(15 * s);
+    expect(effectiveSampleIntervalNs(m, "pmtu", 4, 4)).toBe(15 * s);
+    expect(effectivePlannedSamplesPerPair(m, "pmtu", 4, 4)).toBe(4);
+    // 90 pairs over 10 sources: 12 batches of 15s.
+    expect(effectiveSampleIntervalNs(15 * m, "pmtu", 90, 10)).toBe(12 * 15 * s);
+  });
+
   it("never plans less than one sample", () => {
     for (const duration of [10 * s, m, 15 * m, 24 * 60 * m]) {
       for (const pairs of [1, 4, 90, 400]) {
@@ -384,20 +396,36 @@ describe("formatCadenceNs", () => {
     expect(formatCadenceNs(90 * s, "ru")).toBe("90 с");
     expect(formatCadenceNs(120 * s, "ru")).toBe("2 мин");
   });
+
+  it("says a whole-minute cadence past an hour in minutes, not a rounded hour", () => {
+    // 44 MTR batches × 90 s: "every 1h" would hide six minutes of every round.
+    expect(formatCadenceNs(3960 * s, "en")).toBe("66m");
+    expect(formatCadenceNs(7200 * s, "en")).toBe("2h");
+  });
+});
+
+describe("formatDurationNs past an hour", () => {
+  it("keeps the minutes instead of rounding to a whole hour", () => {
+    expect(formatDurationNs(90 * 60 * s, "en")).toBe("1h 30m");
+    expect(formatDurationNs(89 * 60 * s, "en")).toBe("1h 29m");
+    expect(formatDurationNs(150 * 60 * s, "ru")).toBe("2 ч 30 мин");
+    expect(formatDurationNs(6 * 3600 * s, "en")).toBe("6h");
+  });
+
+  it("says 1h, not 60m, once the minutes round up to an hour", () => {
+    expect(formatDurationNs(3569 * s, "en")).toBe("59m");
+    expect(formatDurationNs(3570 * s, "en")).toBe("1h");
+    expect(formatDurationNs(3599 * s, "ru")).toBe("1 ч");
+    expect(formatDurationNs(3600 * s, "en")).toBe("1h");
+  });
 });
 
 /* ── which recorded ROUTE a probe belongs to ─────────────────────────────── */
 
-/**
- * The owner on the run permalink: «вся суть MTR — это путь», and «ничего не
- * кликабельно». A run's results carry a duration and an outcome but no hops —
- * the path lives in the MTR projection, keyed by pair — so linking a probe to
- * the route it walked is a matter of matching its instant against the windows
- * the stored paths cover.
- */
-describe("snapshotForSample", () => {
+describe("coveringSnapshots", () => {
   const snap = (id: string, firstSeen: string, lastSeen: string) =>
-    ({ id, firstSeen, lastSeen }) as Parameters<typeof snapshotForSample>[0][number];
+    ({ id, firstSeen, lastSeen }) as Parameters<typeof coveringSnapshots>[0][number];
+  const ids = (list: { id: string }[]) => list.map((x) => x.id);
 
   // Newest first, which is the order the store returns.
   const snapshots = [
@@ -405,35 +433,54 @@ describe("snapshotForSample", () => {
     snap("old", "2026-08-09T11:00:00Z", "2026-08-09T11:59:00Z"),
   ];
 
-  it("picks the path whose window CONTAINS the probe", () => {
-    expect(snapshotForSample(snapshots, "2026-08-09T11:30:00Z")?.id).toBe("old");
-    expect(snapshotForSample(snapshots, "2026-08-09T12:10:00Z")?.id).toBe("new");
+  it("picks the path whose window contains the probe", () => {
+    expect(ids(coveringSnapshots(snapshots, "2026-08-09T11:30:00Z"))).toEqual(["old"]);
+    expect(ids(coveringSnapshots(snapshots, "2026-08-09T12:10:00Z"))).toEqual(["new"]);
   });
 
   it("counts both ends of the window as inside it", () => {
-    expect(snapshotForSample(snapshots, "2026-08-09T12:00:00Z")?.id).toBe("new");
-    expect(snapshotForSample(snapshots, "2026-08-09T11:59:00Z")?.id).toBe("old");
+    expect(ids(coveringSnapshots(snapshots, "2026-08-09T12:00:00Z"))).toEqual(["new"]);
+    expect(ids(coveringSnapshots(snapshots, "2026-08-09T11:59:00Z"))).toEqual(["old"]);
   });
 
-  it("is undefined for a probe no stored path covers, rather than the nearest one", () => {
-    // Showing a DIFFERENT trace under a tick the reader clicked would be a lie
-    // about which route that probe took.
-    expect(snapshotForSample(snapshots, "2026-08-09T10:00:00Z")).toBeUndefined();
-    expect(snapshotForSample(snapshots, "2026-08-09T13:00:00Z")).toBeUndefined();
+  it("answers nothing for a probe no stored path covers, rather than the nearest one", () => {
+    expect(coveringSnapshots(snapshots, "2026-08-09T10:00:00Z")).toEqual([]);
+    expect(coveringSnapshots(snapshots, "2026-08-09T13:00:00Z")).toEqual([]);
   });
 
-  it("is undefined for an unparsable or missing stamp rather than guessing", () => {
-    expect(snapshotForSample(snapshots, "not a date")).toBeUndefined();
-    expect(snapshotForSample(snapshots, undefined)).toBeUndefined();
-    expect(snapshotForSample([], "2026-08-09T12:10:00Z")).toBeUndefined();
+  it("answers nothing for a missing or unparsable stamp rather than guessing", () => {
+    for (const ts of [undefined, "", "not-a-time", "0000", "%%%"]) {
+      expect(coveringSnapshots(snapshots, ts), String(ts)).toEqual([]);
+    }
+    expect(coveringSnapshots([], "2026-08-09T12:10:00Z")).toEqual([]);
   });
 
-  it("prefers the NEWEST match when two windows overlap the same instant", () => {
-    const overlapping = [
-      snap("newer", "2026-08-09T11:00:00Z", "2026-08-09T13:00:00Z"),
-      snap("older", "2026-08-09T10:00:00Z", "2026-08-09T12:00:00Z"),
-    ];
-    expect(snapshotForSample(overlapping, "2026-08-09T11:30:00Z")?.id).toBe("newer");
+  it("skips a stored window whose own bounds are unparsable", () => {
+    const broken = [snap("bad", "nope", "nope"), ...snapshots];
+    expect(ids(coveringSnapshots(broken, "2026-08-09T12:10:00Z"))).toEqual(["new"]);
+  });
+
+  it("returns every route whose window covers the probe, so alternating paths are visible as such", () => {
+    const ecmp = [snap("b", "2026-08-09T10:05:00Z", "2026-08-09T10:30:00Z"), snap("a", "2026-08-09T10:00:00Z", "2026-08-09T10:29:30Z")];
+    expect(ids(coveringSnapshots(ecmp, "2026-08-09T10:29:30Z"))).toEqual(["b", "a"]);
+    expect(ids(coveringSnapshots(ecmp, "2026-08-09T10:02:00Z"))).toEqual(["a"]);
+  });
+
+  /* Routes stored before the projection used the result row's recorded_at were stamped a few
+     hundred microseconds after the trace that created them. Five seconds of grace covers that skew
+     and nothing more: ten seconds early is still nothing. */
+  it("still covers the probe that created the route, stamped just before it", () => {
+    const one = [snap("s1", "2026-07-28T10:00:00Z", "2026-07-28T10:05:00Z")];
+    expect(ids(coveringSnapshots(one, "2026-07-28T09:59:59.9Z"))).toEqual(["s1"]);
+    expect(ids(coveringSnapshots(one, "2026-07-28T09:59:56Z"))).toEqual(["s1"]);
+    expect(coveringSnapshots(one, "2026-07-28T09:59:50Z")).toEqual([]);
+  });
+
+  it("uses the leading-edge grace only when no window covers the probe outright", () => {
+    // A route change: the last probe on A falls inside B's grace, and is still A's.
+    const change = [snap("b", "2026-08-09T10:05:03Z", "2026-08-09T10:30:00Z"), snap("a", "2026-08-09T10:00:00Z", "2026-08-09T10:05:00Z")];
+    expect(ids(coveringSnapshots(change, "2026-08-09T10:05:00Z"))).toEqual(["a"]);
+    expect(ids(coveringSnapshots(change, "2026-08-09T10:05:02.999Z"))).toEqual(["b"]);
   });
 });
 
@@ -461,6 +508,16 @@ describe("fmtNsCompact / fmtMicrosNs", () => {
     expect(fmtNsCompact(Number.NaN)).toBe("—");
     expect(fmtNsCompact(Number.POSITIVE_INFINITY)).toBe("—");
     expect(fmtNsCompact("fast" as unknown as number)).toBe("—");
+  });
+
+  /* A Russian run permalink printed «1 мин» and «5 с» beside "73µs" and "0.3ms". */
+  it("speaks the page's language when given one, and English without", () => {
+    expect(fmtNsCompact(73_000, "ru")).toBe("73 мкс");
+    expect(fmtNsCompact(300_000, "ru")).toBe("0,3 мс");
+    expect(fmtNsCompact(12_400_000, "ru")).toBe("12 мс");
+    expect(fmtNsCompact(Number.NaN, "ru")).toBe("—");
+    expect(fmtMicrosNs(-4_000, "ru")).toBe("-4 мкс");
+    expect(fmtNsCompact(300_000, "en")).toBe("0.3ms");
   });
 
   it("is the same floor the hop table's fmtRttNs reads", () => {

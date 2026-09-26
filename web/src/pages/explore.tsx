@@ -11,6 +11,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTheme } from "@/components/theme-provider";
+import { useAuth } from "@/hooks/use-auth";
 import { promqlQueryRange } from "@/lib/api";
 import { chartColors } from "@/lib/chart-theme";
 import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
@@ -621,6 +622,9 @@ function ComparePanel({
 
 export function ExplorePage() {
   const t = useT(exploreDict);
+  /* Every card and the compare panel query on mount, so they wait for the subject: a role
+     without promql:query got five 403s in red instead of the one card saying why. */
+  const { me, can } = useAuth();
   const { locale } = useLocale();
   const { theme } = useTheme();
   const { at } = useTimeContext();
@@ -642,7 +646,7 @@ export function ExplorePage() {
       help={{ body: t("help.body"), slug: "metrics" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language and the house clock — lib/i18n's stampFull. Computed here and
-         passed in, never formatted by the dictionary (QA scope 2, finding #8). */
+         passed in, never formatted by the dictionary. */
       description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
       actions={
         <Segmented
@@ -677,27 +681,41 @@ export function ExplorePage() {
         <span aria-hidden="true" className="flex-1" />
       </div>
 
-      <ComparePanel
-        rangeSeconds={range.seconds}
-        dark={theme === "dark"}
-        annotations={annotations}
-        maintenance={windows}
-      />
-
-      <div className="grid gap-5 md:grid-cols-2">
-        {CURATED_CHARTS.map((chart, i) => (
-          <ExploreCard
-            key={chart.id}
-            chart={chart}
+      {me === undefined ? (
+        <Card role="status" aria-live="polite" className="p-6">
+          <span className="sr-only">{t("chart.loading")}</span>
+          <Skeleton className="h-10 w-full" />
+        </Card>
+      ) : !can("promql:query") ? (
+        <Card role="status" className="p-4 sm:p-6">
+          <p className="text-sm font-medium">{t("permission.requires", { permission: "promql:query" })}</p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("permission.body")}</p>
+        </Card>
+      ) : (
+        <>
+          <ComparePanel
             rangeSeconds={range.seconds}
             dark={theme === "dark"}
             annotations={annotations}
             maintenance={windows}
-            /* An odd fifth card spans the row instead of leaving a hole beside it. */
-            className={i === CURATED_CHARTS.length - 1 && CURATED_CHARTS.length % 2 === 1 ? "md:col-span-2" : undefined}
           />
-        ))}
-      </div>
+
+          <div className="grid gap-5 md:grid-cols-2">
+            {CURATED_CHARTS.map((chart, i) => (
+              <ExploreCard
+                key={chart.id}
+                chart={chart}
+                rangeSeconds={range.seconds}
+                dark={theme === "dark"}
+                annotations={annotations}
+                maintenance={windows}
+                /* An odd fifth card spans the row instead of leaving a hole beside it. */
+                className={i === CURATED_CHARTS.length - 1 && CURATED_CHARTS.length % 2 === 1 ? "md:col-span-2" : undefined}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </PageShell>
   );
 }

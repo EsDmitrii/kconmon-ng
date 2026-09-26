@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeSocket } from "@/lib/fake-websocket";
 import type { RunDetail, RunProgressFrame } from "@/lib/types";
 import { isTerminalRunStatus, mergeRunPairs, RUN_POLL_MS, runTopic, useRun } from "./use-run";
-import { resetWsClient } from "./use-ws-topic";
+import { getWsClient, resetWsClient } from "./use-ws-topic";
 
 const RUN_ID = "run-1";
 
@@ -290,6 +290,42 @@ describe("useRun with realtime on", () => {
   });
 });
 
+/* The server admits run:{id} only for runs:read, the permission GET /api/v1/runs/{id} requires. The
+   subscription waits for that REST read, so a subject holding events:read alone gets its 403 and never
+   asks for the topic. */
+describe("useRun without runs:read", () => {
+  it("subscribes to nothing when the run read answers 403, even with realtime on", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const href = String(url);
+      if (href.includes("/api/v1/version")) {
+        return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: ["events"] }));
+      }
+      if (href.startsWith("/api/v1/runs/")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ type: "about:blank", title: "forbidden", status: 403, detail: "missing permission: runs:read" }),
+            { status: 403, headers: { "Content-Type": "application/problem+json" } },
+          ),
+        );
+      }
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "x", capabilities: ["events"] });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.run).toBeUndefined();
+    expect(result.current.live).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+});
+
 describe("useRun permalink guarantee", () => {
   it("a direct load of an already-finished run renders from the REST payload alone -- no socket", async () => {
     const { wrapper } = setup(
@@ -347,5 +383,115 @@ describe("useRun with an unknown run id", () => {
     }
     // No repeated polling against a 404 that a timer cannot fix.
     expect(runFetchCount(fetchMock)).toBe(before);
+  });
+});
+
+describe("useRun and a transient poll error", () => {
+  it("keeps polling after a 503 and picks up the finished run", async () => {
+    let call = 0;
+    const fetchMock = vi.fn((url: string) => {
+      const href = String(url);
+      if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+      if (href.startsWith("/api/v1/runs/")) {
+        call += 1;
+        if (call === 2) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ type: "about:blank", title: "Service Unavailable", status: 503 }), {
+              status: 503,
+              headers: { "Content-Type": "application/problem+json" },
+            }),
+          );
+        }
+        return Promise.resolve(json(runBody({ status: call === 1 ? "running" : "succeeded" })));
+      }
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "x", capabilities: [] });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+      await waitFor(() => expect(result.current.run?.status).toBe("running"));
+      for (let i = 0; i < 4; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(RUN_POLL_MS + 100);
+        });
+      }
+      expect(runFetchCount(fetchMock)).toBeGreaterThan(2);
+      expect(result.current.run?.status).toBe("succeeded");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("useRun on a socket another page already opened", () => {
+  it("reports live at once instead of waiting for an open transition that already happened", async () => {
+    const { wrapper } = setup(["events"], runBody({ status: "running" }));
+    const off = getWsClient().subscribe("matrix:tcp", () => {});
+    act(() => FakeSocket.last().emitOpen());
+    off();
+
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+    await waitFor(() => expect(result.current.run?.status).toBe("running"));
+    expect(FakeSocket.instances).toHaveLength(1);
+    await waitFor(() => expect(result.current.live).toBe(true));
+  });
+});
+
+describe("useRun on a live interval run", () => {
+  const progress = (seq: number, state: string, success?: boolean) => ({
+    topic: runTopic(RUN_ID),
+    type: "event" as const,
+    seq,
+    data: { runId: RUN_ID, source: "a", destination: "b", state, success, completed: 0, total: 2 },
+  });
+
+  it("keeps a pair's settled probe while its next sample is in flight, so the ok count does not dip", async () => {
+    const { wrapper } = setup(["events"], runBody({ status: "running" }));
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+    await waitFor(() => expect(result.current.run?.status).toBe("running"));
+    act(() => FakeSocket.last().emitOpen());
+
+    act(() => FakeSocket.last().emitEnvelope(progress(1, "succeeded", true)));
+    await waitFor(() => expect(result.current.pairs[0]).toMatchObject({ state: "succeeded" }));
+    act(() => FakeSocket.last().emitEnvelope(progress(2, "dispatched")));
+    expect(result.current.pairs.find((p) => p.source === "a")).toMatchObject({ state: "succeeded", success: true });
+  });
+
+  it("re-reads the run soon after a probe settles instead of waiting out the poll", async () => {
+    const { wrapper, fetchMock } = setup(["events"], runBody({ status: "running" }));
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+    await waitFor(() => expect(result.current.run?.status).toBe("running"));
+    act(() => FakeSocket.last().emitOpen());
+    const before = runFetchCount(fetchMock);
+
+    act(() => FakeSocket.last().emitEnvelope(progress(1, "succeeded", true)));
+    await waitFor(() => expect(runFetchCount(fetchMock)).toBe(before + 1), { timeout: RUN_POLL_MS - 1_000 });
+  });
+
+  it("says nothing about the transport until the socket has answered, rather than flashing delayed", async () => {
+    const { wrapper } = setup(["events"], runBody({ status: "running" }));
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+    await waitFor(() => expect(result.current.run?.status).toBe("running"));
+    expect(result.current.connecting).toBe(true);
+    expect(result.current.live).toBe(false);
+    act(() => FakeSocket.last().emitOpen());
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.live).toBe(true);
+  });
+
+  it("reports a socket that failed to open as delayed, not as still connecting", async () => {
+    const { wrapper } = setup(["events"], runBody({ status: "running" }));
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+    await waitFor(() => expect(result.current.run?.status).toBe("running"));
+    act(() => FakeSocket.last().emitClose(1006));
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.live).toBe(false);
   });
 });

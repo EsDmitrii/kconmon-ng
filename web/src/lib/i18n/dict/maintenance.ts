@@ -45,6 +45,9 @@ const en = {
   "form.aria": "New maintenance window",
   "form.scope.before": "Scope",
   "form.scope.after": "— fixed to this view.",
+  "form.webhooks.global":
+    "While it is open, a global window holds back every console alert webhook, cluster-wide, not only this view's.",
+  "form.webhooks.scoped": "While it is open, the window holds back console alert webhooks for {scope}.",
   "form.start": "Start",
   "form.end": "End",
   /* Says WHO refuses, not just that it is refused: the client test mirrors the
@@ -89,6 +92,9 @@ export const maintenanceDict: Dictionary<MaintenanceKey> = defineDict(en, {
   "form.aria": "Новое окно работ",
   "form.scope.before": "Область",
   "form.scope.after": "задана этим экраном.",
+  "form.webhooks.global":
+    "Пока глобальное окно открыто, оно придерживает все вебхуки оповещений консоли по всему кластеру, а не только этого экрана.",
+  "form.webhooks.scoped": "Пока окно открыто, оно придерживает вебхуки оповещений консоли для {scope}.",
   "form.start": "Начало",
   "form.end": "Конец",
   "form.end.hint": "Должен быть позже начала, иначе сервер откажет.",
