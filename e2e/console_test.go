@@ -3107,10 +3107,11 @@ func bundleItemNamed(t *testing.T, items []any, name string) map[string]any {
 
 // importCollection is one collection's outcome in an import response.
 type importCollection struct {
-	Created int `json:"created"`
-	Updated int `json:"updated"`
-	Skipped int `json:"skipped"`
-	Errors  []struct {
+	Created   int `json:"created"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	Skipped   int `json:"skipped"`
+	Errors    []struct {
 		Name   string `json:"name"`
 		Reason string `json:"reason"`
 	} `json:"errors"`
@@ -3297,16 +3298,22 @@ func TestConsoleExportImportRoundTrip(t *testing.T) {
 			t.Errorf("expected no errors in %s on a round-tripped bundle, got %+v", c.name, c.res.Errors)
 		}
 	}
-	if dry.Targets.Updated == 0 || dry.CheckDefinitions.Updated == 0 || dry.Webhooks.Updated == 0 {
-		t.Errorf("expected targets/checkDefinitions/webhooks to be UPDATED by a re-import of their own bundle, "+
-			"got %d/%d/%d", dry.Targets.Updated, dry.CheckDefinitions.Updated, dry.Webhooks.Updated)
+	// A row that already matches the bundle is UNCHANGED and never written.
+	for _, c := range []struct {
+		name string
+		res  importCollection
+	}{{"targets", dry.Targets}, {"checkDefinitions", dry.CheckDefinitions}, {"webhooks", dry.Webhooks}} {
+		if c.res.Unchanged == 0 || c.res.Updated != 0 {
+			t.Errorf("expected %s to be UNCHANGED by a re-import of their own bundle, got unchanged=%d updated=%d",
+				c.name, c.res.Unchanged, c.res.Updated)
+		}
 	}
-	// Windows are SKIPPED and never updated: the store has no update for one
-	// by design (a window is two timestamps and a reason, so delete-and-
-	// recreate is the whole of the correction path).
-	if dry.MaintenanceWindows.Skipped == 0 || dry.MaintenanceWindows.Updated != 0 {
-		t.Errorf("expected an identical maintenance window to be SKIPPED and never updated, got "+
-			"skipped=%d updated=%d", dry.MaintenanceWindows.Skipped, dry.MaintenanceWindows.Updated)
+	// Windows are never updated either: the store has no update for one by design (a window is two
+	// timestamps and a reason, so delete-and-recreate is the whole of the correction path).
+	if dry.MaintenanceWindows.Unchanged == 0 || dry.MaintenanceWindows.Updated != 0 || dry.MaintenanceWindows.Skipped != 0 {
+		t.Errorf("expected an identical maintenance window to be UNCHANGED, never updated or skipped, got "+
+			"unchanged=%d updated=%d skipped=%d", dry.MaintenanceWindows.Unchanged, dry.MaintenanceWindows.Updated,
+			dry.MaintenanceWindows.Skipped)
 	}
 
 	applied := postImport(t, base, false, bundle)
