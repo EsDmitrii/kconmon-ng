@@ -37,9 +37,9 @@ func newPrunerDB(t *testing.T) (*store.DB, string) {
 	return db, dsn
 }
 
-// seedTopologyEventsAtAges inserts one row per element of agesDays; it bulk-inserts via UNNEST in a
-// single round trip rather than one store.EventStore.InsertEvent call per row.
-func seedTopologyEventsAtAges(t *testing.T, dsn string, seqBase int64, agesDays []int) {
+// seedTopologyEventsAtAges inserts one row per element of agesDays, with event_seq 1, 2, ...; it
+// bulk-inserts via UNNEST in a single round trip rather than one store.EventStore.InsertEvent call per row.
+func seedTopologyEventsAtAges(t *testing.T, dsn string, agesDays []int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
@@ -55,7 +55,7 @@ func seedTopologyEventsAtAges(t *testing.T, dsn string, seqBase int64, agesDays 
 	times := make([]time.Time, n)
 	now := time.Now()
 	for i, age := range agesDays {
-		seqs[i] = seqBase + int64(i)
+		seqs[i] = int64(i) + 1
 		times[i] = now.Add(-time.Duration(age) * 24 * time.Hour)
 	}
 
@@ -106,7 +106,7 @@ func agesSpanning200Days() []int {
 func TestPruneOnceDeletesRowsPastRetention(t *testing.T) {
 	db, dsn := newPrunerDB(t)
 	p := store.NewPruner(db, retention90d, newTestMetrics())
-	seedTopologyEventsAtAges(t, dsn, 1, agesSpanning200Days())
+	seedTopologyEventsAtAges(t, dsn, agesSpanning200Days())
 
 	ctx := context.Background()
 
@@ -142,7 +142,7 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	// topology_events (by event_time) and audit_log are covered by the other
 	// tests in this file; seed topology_events here too so the returned map
 	// carries a non-zero entry for it as well.
-	seedTopologyEventsAtAges(t, dsn, 1, []int{200, 1})
+	seedTopologyEventsAtAges(t, dsn, []int{200, 1})
 
 	// check_runs (by created_at). created_at has a column DEFAULT of now(), so
 	// the expired run is aged with one direct UPDATE -- the store API has no
@@ -266,7 +266,7 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAlertRule: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
+	if _, err = pool.Exec(ctx,
 		`UPDATE alert_rules SET created_at = $1, updated_at = $1, last_synced_at = $1 WHERE id = $2`,
 		expired, rule.ID); err != nil {
 		t.Fatalf("backdate the alert rule: %v", err)
@@ -394,7 +394,7 @@ func TestPruneOnceCrossesBatchBoundary(t *testing.T) {
 	for i := range ages {
 		ages[i] = 200 // comfortably past the 90d cutoff
 	}
-	seedTopologyEventsAtAges(t, dsn, 1, ages)
+	seedTopologyEventsAtAges(t, dsn, ages)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -442,7 +442,7 @@ func TestPruneOnceConcurrentReplicasDoNotDoubleWork(t *testing.T) {
 	for i := range ages {
 		ages[i] = 200
 	}
-	seedTopologyEventsAtAges(t, dsn, 1, ages)
+	seedTopologyEventsAtAges(t, dsn, ages)
 
 	p1 := store.NewPruner(db1, retention90d, newTestMetrics())
 	p2 := store.NewPruner(db2, retention90d, newTestMetrics())

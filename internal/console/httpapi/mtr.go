@@ -34,7 +34,7 @@ var _ MTRService = (*store.DB)(nil)
 // mtrUnavailableDetail is served whenever s.mtr is nil, in targetsUnavailableDetail's shape; path
 // history has no in-memory fallback for a stronger reason than targets do.
 const mtrUnavailableDetail = "MTR path history lives in the database and has no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/mtr"
+	databaseKnob + " to enable /api/v1/mtr"
 
 // Page-limit bounds shared by the two new listings.
 const (
@@ -196,7 +196,10 @@ func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cursor := q.Get("cursor")
 	if cursor != "" {
-		if _, _, _, err := store.DecodePairCursor(cursor); err != nil {
+		// The decoded pair goes into the store's keyset predicate, so a crafted cursor carrying a NUL
+		// or invalid UTF-8 would come back from Postgres as a 502.
+		source, destination, _, err := store.DecodePairCursor(cursor)
+		if err != nil || invalidParamText(source) || invalidParamText(destination) {
 			writeProblem(w, http.StatusBadRequest, "invalid cursor", "cursor is malformed or does not match this server")
 			return
 		}

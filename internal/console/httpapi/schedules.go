@@ -25,7 +25,7 @@ var _ ScheduleService = (*store.DB)(nil)
 // schedulesUnavailableDetail is served whenever s.schedules is nil; same reasoning as targets and
 // definitions.
 const schedulesUnavailableDetail = "schedules are persisted configuration with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/schedules"
+	databaseKnob + " to enable /api/v1/schedules"
 
 // minScheduleInterval is the floor an interval cadence is CLAMPED UP to; a one-second schedule
 // against a definition that fans out to hundreds of pairs is a self-DoS with no legitimate use.
@@ -91,10 +91,9 @@ type scheduleRequest struct {
 // applied.
 func decodeScheduleRequest(w http.ResponseWriter, r *http.Request, defID string) (store.ScheduleInput, bool) {
 	var req scheduleRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`body must be JSON with "definitionId", "kind" ("once", "interval" or "continuous"), `+
-				`"intervalNs" in nanoseconds for kind interval, "runAt" for kind once, and an optional "enabled" flag`))
+	if !decodeMutationBody(w, r, &req,
+		`body must be JSON with "definitionId", "kind" ("once", "interval" or "continuous"), `+
+			`"intervalNs" in nanoseconds for kind interval, "runAt" for kind once, and an optional "enabled" flag`) {
 		return store.ScheduleInput{}, false
 	}
 	if req.Kind == "cron" {
@@ -242,7 +241,7 @@ func (s *Server) handleSchedulesCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in, ok := decodeScheduleRequest(w, r, "")
-	if !ok {
+	if !ok || s.refuseUnrunnableSchedule(w, r, &in) {
 		return
 	}
 
@@ -292,6 +291,10 @@ func (s *Server) handleSchedulesUpdate(w http.ResponseWriter, r *http.Request) {
 
 	in, ok := decodeScheduleRequest(w, r, existing.DefinitionID)
 	if !ok {
+		return
+	}
+	// A disabled schedule never fires, so pausing one the guard would refuse stays possible.
+	if in.Enabled && s.refuseUnrunnableSchedule(w, r, &in) {
 		return
 	}
 

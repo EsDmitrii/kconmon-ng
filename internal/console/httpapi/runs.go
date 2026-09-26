@@ -137,6 +137,15 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 		if rejectControlChars(w, "sources/destinations", n) {
 			return
 		}
+		if len(n) > checks.MaxNodeNameLen {
+			writeProblem(w, http.StatusBadRequest, "invalid sources/destinations",
+				"a node name is at most "+strconv.Itoa(checks.MaxNodeNameLen)+" bytes")
+			return
+		}
+	}
+	if err := checks.ValidatePlane(req.Plane); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid plane", err.Error())
+		return
 	}
 
 	spec := checks.Spec{
@@ -191,12 +200,25 @@ func plannedCadence(spec json.RawMessage) checks.Spec {
 	return out
 }
 
+// externalRunRefusal says why a run of checkType cannot probe a target or ad-hoc destination; udp
+// gets the reason a definition or schedule toward one is refused with.
+func externalRunRefusal(checkType string) string {
+	const externalOnly = "external destinations support tcp, icmp and mtr checks only; "
+	switch {
+	case checkType == "udp":
+		return errUDPNodesOnly.Error()
+	case externalParseableCheckTypes[checkType]:
+		return externalOnly + checkType + " is not a one-off external check; use a node destination, " +
+			"or a continuous external check for an external resolver or URL"
+	}
+	return externalOnly + "check type " + strconv.Quote(checkType) + " cannot run toward one"
+}
+
 // resolveRunDestination turns runCreateRequest's destination fields into spec's.
 func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, req *runCreateRequest, spec *checks.Spec) bool {
 	switch req.DestinationKind {
 	case "", "node":
-		// The contract, byte-identical: Destinations are node names; the external-only fields are refused
-		// rather than ignored.
+		// Destinations are node names; the external-only fields are refused rather than ignored.
 		if req.DestinationTargetID != "" || req.DestinationAddress != "" {
 			writeProblem(w, http.StatusBadRequest, "invalid destination",
 				"destinationTargetId and destinationAddress require destinationKind target or adhoc")
@@ -207,6 +229,20 @@ func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, r
 	default:
 		writeProblem(w, http.StatusBadRequest, "invalid destination",
 			"destinationKind must be node, target or adhoc")
+		return false
+	}
+
+	// The same rule a saved definition is held to (store.DefinitionInput.Validate): only an agent answers
+	// the pmtu echo, so any other destination would fail every pair.
+	if req.Type == "pmtu" {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid destination",
+			"check type pmtu probes kconmon nodes only, not destination kind "+strconv.Quote(req.DestinationKind))
+		return false
+	}
+	// checks.RunsTowardExternal mirrors the agent's externalCapableChecks: any other type fails every
+	// pair.
+	if !checks.RunsTowardExternal(req.Type) {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid destination", externalRunRefusal(req.Type))
 		return false
 	}
 
@@ -253,6 +289,12 @@ func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, r
 	if req.DestinationAddress == "" {
 		writeProblem(w, http.StatusBadRequest, "invalid destination",
 			"destinationAddress is required when destinationKind is adhoc")
+		return false
+	}
+	// The address is the ad-hoc destination's label as well, repeated on every result row.
+	if len(req.DestinationAddress) > checks.MaxAddressLen {
+		writeProblem(w, http.StatusBadRequest, "invalid destination",
+			"destinationAddress is at most "+strconv.Itoa(checks.MaxAddressLen)+" bytes")
 		return false
 	}
 	// The same rule a SAVED definition's destination_address is held to: a well-formed field carrying

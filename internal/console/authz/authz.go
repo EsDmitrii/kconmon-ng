@@ -101,6 +101,9 @@ type Subject struct {
 	DisplayName string
 	Groups      []string // OIDC/header groups; RBAC binding subjects
 	Roles       []string // resolved role names (built-in or custom)
+	// ClientAddr is the address the request came from, as the HTTP layer resolved it. It is not part
+	// of the identity; it only splits budgets that anonymous visitors would otherwise share.
+	ClientAddr string
 }
 
 // Policy answers permission questions for a set of roles; the role→permission map lives behind an

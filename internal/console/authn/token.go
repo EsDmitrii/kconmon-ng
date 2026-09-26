@@ -128,7 +128,7 @@ func (t *tokenAuthenticator) authenticateToken(r *http.Request) (authz.Subject, 
 		if errors.Is(err, store.ErrNotFound) {
 			return authz.Subject{}, ErrInvalid
 		}
-		return authz.Subject{}, fmt.Errorf("authn: token: get token by hash: %w", err)
+		return authz.Subject{}, fmt.Errorf("authn: token: get token by hash: %w: %w", ErrUnavailable, err)
 	}
 
 	now := time.Now()
@@ -168,7 +168,7 @@ func (t *tokenAuthenticator) checkOwnerDisabled(ctx context.Context, tokenID, ow
 			// token, or a pre-inheritance token-minted-by-token row) means "not this store's call to make".
 			return nil //nolint:nilerr // intentional: ErrNotFound here means "allow", not "no error occurred"
 		}
-		return fmt.Errorf("authn: token: check owner disabled: %w", err)
+		return fmt.Errorf("authn: token: check owner disabled: %w: %w", ErrUnavailable, err)
 	}
 	if user.Disabled {
 		slog.Warn("authn: rejected token of a disabled user", "token_id", tokenID, "owner", owner) //nolint:gosec // G706: structured slog fields, not string-built log injection

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // protocolsPerDefinitionMirror is the "protocols" half.
@@ -46,6 +47,9 @@ type Definition struct {
 	CheckType          string
 	DestinationAddress string
 	Enabled            bool
+	// CreatedAt decides which definitions the reconciler leaves out first when the assignment would
+	// not fit the controller's body limit: the newest.
+	CreatedAt time.Time
 }
 
 // AssignedSpec is one thing an agent must continuously probe. It carries the

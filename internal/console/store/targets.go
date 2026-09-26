@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -141,9 +143,16 @@ func (in *TargetInput) Validate() error {
 	return nil
 }
 
+// addressMaxLen bounds a target's or an ad-hoc definition's address, a URL at its longest: the same
+// bound checks.MaxAddressLen puts on a run's ad-hoc address.
+const addressMaxLen = 2048
+
 // validateTargetAddress rejects an address the agent could never dial FOR THE KIND IT WAS FILED
 // UNDER.
 func validateTargetAddress(kind, address string) error {
+	if len(address) > addressMaxLen {
+		return fmt.Errorf("address is %d bytes, limit is %d", len(address), addressMaxLen)
+	}
 	if kind == "url" {
 		return validateHTTPAddress("address", address)
 	}
@@ -180,19 +189,16 @@ func validateHostAddress(field, address string) error {
 	return fmt.Errorf("%s %q must be a host, an IP, or host:port", field, address)
 }
 
-// validateName applies the shared name rule targets and check_definitions
-// both carry.
 /*
-validateNoControlChars refuses a control character in a free-text field.
+validateNoControlChars refuses a control character in a single-line text field.
 
-PostgreSQL cannot store a NUL in a text column (SQLSTATE 22021) and the driver refuses the whole
-statement, so one byte in a request body came back as a driver error — and the handlers map any
-store error that is not a validation error to 502 "<subsystem> unavailable". A client's own input
-therefore told the operator that maintenance windows, incidents or webhooks were DOWN. Every text
-FILTER in httpapi is already guarded this way (rejectControlChars); this is the write side, and it
-belongs here so every caller of a Validate gets it, not only the HTTP one.
+PostgreSQL cannot store a NUL in a text column (SQLSTATE 22021) and the driver fails the whole
+statement, which the handlers report as 502 "<subsystem> unavailable": a client's own input shown as
+an outage. The check lives here so every caller of a Validate gets it, not only the HTTP one;
+httpapi's rejectControlChars is the same guard on text filters.
 
-Nothing legitimate carries one: these are names, titles, reasons and URLs.
+Nothing legitimate in a name, title, scope or URL carries one; multi-line fields use
+ValidateFreeText instead.
 */
 func validateNoControlChars(field, v string) error {
 	if idx := strings.IndexFunc(v, unicode.IsControl); idx >= 0 {
@@ -201,6 +207,22 @@ func validateNoControlChars(field, v string) error {
 	return nil
 }
 
+// ValidateFreeText is validateNoControlChars for fields the Console edits in a multi-line textarea
+// (incident notes, annotation text, maintenance reason): line breaks and tabs are ordinary input
+// there, every other control character is still refused. Exported so httpapi's pre-checks apply
+// this same rule.
+func ValidateFreeText(field, v string) error {
+	if idx := strings.IndexFunc(v, isDisallowedFreeTextRune); idx >= 0 {
+		return fmt.Errorf("%s contains a control character at byte %d", field, idx)
+	}
+	return nil
+}
+
+func isDisallowedFreeTextRune(r rune) bool {
+	return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
+}
+
+// validateName applies the shared name rule targets and check_definitions both carry.
 func validateName(name string) error {
 	if name == "" {
 		return errors.New("name must not be empty")
@@ -445,8 +467,9 @@ func (in *DefinitionInput) Validate() error {
 	if in.CheckType == "pmtu" && in.DestinationKind != "node" {
 		return fmt.Errorf("store: definition: check type pmtu probes kconmon nodes only, not destination kind %q", in.DestinationKind)
 	}
-	if in.Plane == "" {
-		return errors.New("store: definition: plane must not be empty")
+	// checks.ValidatePlane's rule; the value is never quoted back, as it may be megabytes long.
+	if in.Plane != definitionPlane {
+		return errors.New(`store: definition: plane must be "pod": agents probe the pod network only`)
 	}
 	if in.DestinationKind == "target" && in.DestinationTargetID == "" {
 		return errors.New("store: definition: destination kind target requires a destination target id")
@@ -462,11 +485,22 @@ func (in *DefinitionInput) Validate() error {
 			return fmt.Errorf("store: definition: %w", err)
 		}
 	}
+	if len(in.Params) > definitionParamsMaxBytes {
+		return fmt.Errorf("store: definition: params is %d bytes, limit is %d", len(in.Params), definitionParamsMaxBytes)
+	}
 	if err := validateJSON("params", in.Params); err != nil {
 		return fmt.Errorf("store: definition: %w", err)
 	}
 	return nil
 }
+
+// definitionParamsMaxBytes bounds a definition's params, which the reconciler copies into every
+// agent's spec; httpapi applies the same bound on the routes.
+const definitionParamsMaxBytes = 4 << 10
+
+// definitionPlane is the only network plane the agents probe (checks.PodPlane, which store cannot
+// import).
+const definitionPlane = "pod"
 
 // hostLabelRE bounds ONE label of a DNS name. Underscores are permitted
 // because Go's own resolver permits them (net.isDomainName): this rule must
@@ -485,6 +519,9 @@ func ValidateAdhocAddress(address string) error {
 	value := strings.TrimSpace(address)
 	if value == "" {
 		return errors.New("destination address must not be blank")
+	}
+	if len(value) > addressMaxLen {
+		return fmt.Errorf("destination address is %d bytes, limit is %d", len(value), addressMaxLen)
 	}
 
 	lower := strings.ToLower(value)
@@ -1138,22 +1175,120 @@ const (
 )
 
 /*
-validateNoJSONNUL refuses a NUL anywhere inside a JSONB payload.
+validateJSONBStorable refuses what json.Valid accepts but a JSONB column cannot store.
 
-PostgreSQL rejects a NUL in a jsonb value (SQLSTATE 22P05) and the driver fails the statement, so
-one escaped \u0000 in a target's labels, a definition's params, an alert rule's annotations or an
-incident's notes came back as 502 "<subsystem> unavailable" — a client's own input reported as an
-outage. Every one of those routes had size and shape validation already; this is the byte that shape
-validation cannot see, because \u0000 IS valid JSON.
+PostgreSQL rejects a NUL in a jsonb value (SQLSTATE 22P05), an unpaired UTF-16 surrogate escape such
+as \ud800 (22P02), text that is not UTF-8 and a number numeric cannot hold (22003, see
+jsonbNumberStorable), and the driver fails the statement, so one of them in a target's labels, a
+definition's params, an alert rule's annotations or an incident's pinned findings came back as 502
+"<subsystem> unavailable": a client's own input reported as an outage. Every one of those routes had
+size and shape validation already; these are what shape validation cannot see.
 
-The escape is the only reachable form: a literal NUL byte cannot appear in valid JSON, and
-json.Valid has already run above.
+raw must already be valid JSON. A literal NUL byte cannot appear in valid JSON, so the escapes are
+the only form of NUL and of a surrogate to look for, and outside strings a '-' or a digit can only
+start a number.
 */
-func validateNoJSONNUL(field string, raw json.RawMessage) error {
-	if bytes.Contains(bytes.ToLower(raw), []byte(`\u0000`)) {
-		return fmt.Errorf("%s must not contain a NUL character", field)
+func validateJSONBStorable(field string, raw json.RawMessage) error {
+	if !utf8.Valid(raw) {
+		return fmt.Errorf("%s must be valid UTF-8", field)
+	}
+	inString := false
+	pendingHigh := false // the previous character was a high surrogate escape
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			switch {
+			case c == '"':
+				inString = true
+			case c == '-' || (c >= '0' && c <= '9'):
+				end := i + 1
+				for end < len(raw) && strings.IndexByte("0123456789.eE+-", raw[end]) >= 0 {
+					end++
+				}
+				if !jsonbNumberStorable(raw[i:end]) {
+					return fmt.Errorf("%s must not contain a number PostgreSQL cannot store "+
+						"(more than %d digits before the decimal point or %d after it)", field, numericMaxIntDigits, numericMaxScale)
+				}
+				i = end - 1
+			}
+			continue
+		}
+		high, low := false, false
+		if c == '\\' {
+			i++ // the escaped character; valid JSON always has one
+			if i >= len(raw) {
+				return fmt.Errorf("%s must be valid JSON", field)
+			}
+			if raw[i] == 'u' {
+				if i+5 > len(raw) {
+					return fmt.Errorf("%s must be valid JSON", field)
+				}
+				cu, err := strconv.ParseUint(string(raw[i+1:i+5]), 16, 16)
+				if err != nil {
+					return fmt.Errorf("%s must be valid JSON", field)
+				}
+				i += 4
+				if cu == 0 {
+					return fmt.Errorf("%s must not contain a NUL character", field)
+				}
+				high, low = cu >= 0xD800 && cu <= 0xDBFF, cu >= 0xDC00 && cu <= 0xDFFF
+			}
+		} else {
+			inString = c != '"'
+		}
+		// A low surrogate must follow a high one, and nothing else may.
+		if low != pendingHigh {
+			return fmt.Errorf("%s must not contain an unpaired UTF-16 surrogate escape", field)
+		}
+		pendingHigh = high
+	}
+	if pendingHigh {
+		return fmt.Errorf("%s must not contain an unpaired UTF-16 surrogate escape", field)
 	}
 	return nil
+}
+
+// PostgreSQL's numeric limits (NUMERIC_WEIGHT_MAX and NUMERIC_DSCALE_MAX in numeric.c), and the
+// exponent its input parser refuses outright whatever the digits are.
+const (
+	numericMaxIntDigits = 131072
+	numericMaxScale     = 16383
+	numericMaxExponent  = math.MaxInt32/2 - 1
+)
+
+/*
+jsonbNumberStorable reports whether PostgreSQL can hold the JSON number literal num. jsonb keeps a
+number as numeric, which refuses a value whose most significant digit lies numericMaxIntDigits or
+more places before the decimal point, or whose written scale (fraction digits minus the exponent,
+trailing zeros included: 1.0e-16383 has scale 16384) exceeds numericMaxScale. Go decodes such a
+literal without complaint, 1e-20000 as 0, so no typed check upstream sees it.
+*/
+func jsonbNumberStorable(num []byte) bool {
+	num = bytes.TrimPrefix(num, []byte("-"))
+	mantissa, expPart := num, []byte(nil)
+	if i := bytes.IndexAny(num, "eE"); i >= 0 {
+		mantissa, expPart = num[:i], num[i+1:]
+	}
+	exp := 0
+	if len(expPart) > 0 {
+		e, err := strconv.Atoi(string(expPart))
+		if err != nil || e > numericMaxExponent || e < -numericMaxExponent {
+			return false
+		}
+		exp = e
+	}
+	intPart, frac, _ := bytes.Cut(mantissa, []byte("."))
+	if len(frac)-exp > numericMaxScale {
+		return false
+	}
+	// The decimal exponent of the most significant digit; a zero has none, only its scale is bounded.
+	if sig := bytes.TrimLeft(intPart, "0"); len(sig) > 0 {
+		return len(sig)-1+exp < numericMaxIntDigits
+	}
+	if sig := bytes.TrimLeft(frac, "0"); len(sig) > 0 {
+		return len(sig)-len(frac)-1+exp < numericMaxIntDigits
+	}
+	return true
 }
 
 func validateJSON(field string, raw json.RawMessage) error {
@@ -1174,7 +1309,7 @@ func validateJSON(field string, raw json.RawMessage) error {
 	if !json.Valid(raw) {
 		return fmt.Errorf("%s must be valid JSON", field)
 	}
-	if err := validateNoJSONNUL(field, raw); err != nil {
+	if err := validateJSONBStorable(field, raw); err != nil {
 		return err
 	}
 	/* An OBJECT, which is what the schema declares and what every consumer indexes into: an array

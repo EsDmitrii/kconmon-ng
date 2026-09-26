@@ -54,8 +54,8 @@ func TestEventsWithoutListerReturns503(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
 		t.Errorf("Content-Type = %q, want application/problem+json", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "console.database.mode") {
-		t.Errorf("detail should name console.database.mode: %s", rec.Body)
+	if !strings.Contains(rec.Body.String(), "database.dsnFile") {
+		t.Errorf("detail should name database.dsnFile: %s", rec.Body)
 	}
 }
 

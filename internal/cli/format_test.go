@@ -408,3 +408,83 @@ func TestFormatCheckPMTUBlackhole(t *testing.T) {
 		}
 	}
 }
+
+// The DNS and HTTP checkers report one detail per host or URL, as an array; the table must print a
+// line for each so a failing host or URL can be told apart without -o json.
+func TestFormatCheckPrintsEveryDNSAndHTTPTarget(t *testing.T) {
+	cases := []struct {
+		typ     model.CheckType
+		success bool
+		details any
+		want    []string
+	}{
+		{model.CheckDNS, false,
+			[]map[string]any{
+				{"host": "kubernetes.default", "resolver": "system", "duration": float64(2 * time.Millisecond),
+					"resolvedIps": []string{"10.96.0.1"}},
+				{"host": "nx.example", "resolver": "system", "duration": float64(5 * time.Millisecond)},
+			},
+			[]string{
+				"sent=1 recv=1 loss=0% rtt=2ms host=kubernetes.default resolver=system ips=10.96.0.1",
+				"sent=1 recv=0 loss=100% rtt=5ms host=nx.example resolver=system",
+			}},
+		{model.CheckHTTP, false,
+			[]map[string]any{
+				{"url": "http://a.example/", "statusCode": 200, "totalTime": float64(9 * time.Millisecond),
+					"ttfbTime": float64(5 * time.Millisecond), "connectTime": float64(time.Millisecond)},
+				{"url": "http://b.example/", "statusCode": 503, "statusMismatch": true,
+					"totalTime": float64(4 * time.Millisecond)},
+			},
+			[]string{
+				"sent=1 recv=1 loss=0% rtt=9ms ttfb=5ms connect=1ms status=200 url=http://a.example/",
+				"sent=1 recv=0 loss=100% rtt=4ms ttfb=0s connect=0s status=503 url=http://b.example/",
+			}},
+	}
+	for _, tc := range cases {
+		res := &model.CheckResult{Type: tc.typ, Success: tc.success, Source: "a", Details: tc.details}
+		var buf bytes.Buffer
+		if err := formatCheck(&buf, res); err != nil {
+			t.Fatalf("%s: formatCheck: %v", tc.typ, err)
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(buf.String(), "  "+want+"\n") {
+				t.Errorf("%s: want detail line %q in output:\n%s", tc.typ, want, buf.String())
+			}
+		}
+	}
+}
+
+// The controller's snapshot comes out of a map, so its order changes per call; the tables sort, so
+// two runs print the same rows in the same order.
+func TestFormatTopologyAndAgentsSortRows(t *testing.T) {
+	shuffled := sampleTopology()
+	shuffled.Nodes = []model.NodeInfo{shuffled.Nodes[2], shuffled.Nodes[0], shuffled.Nodes[1]}
+	shuffled.Agents = append(shuffled.Agents, model.AgentInfo{ID: "bastion-agent", NodeName: "bastion",
+		Labels: map[string]string{model.LabelExternal: "true"}})
+	shuffled.Agents = []model.AgentInfo{shuffled.Agents[2], shuffled.Agents[1], shuffled.Agents[3], shuffled.Agents[0]}
+
+	firstColumn := func(out string) string {
+		var col []string
+		for i, l := range strings.Split(strings.TrimSpace(out), "\n") {
+			if i > 0 {
+				col = append(col, strings.Fields(l)[0])
+			}
+		}
+		return strings.Join(col, " ")
+	}
+	var buf bytes.Buffer
+	if err := formatTopology(&buf, shuffled); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := firstColumn(buf.String()), "node-1 node-2 node-3 bastion edge-01"; got != want {
+		t.Errorf("topology rows = %q, want %q", got, want)
+	}
+	buf.Reset()
+	if err := formatAgents(&buf, shuffled); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := firstColumn(buf.String()),
+		"bastion-agent edge-01-agent node-1-kconmon-ng-agent-aaaaa node-2-kconmon-ng-agent-bbbbb"; got != want {
+		t.Errorf("agents rows = %q, want %q", got, want)
+	}
+}

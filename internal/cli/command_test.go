@@ -22,43 +22,31 @@ func (f fakeConnector) Connect(_ context.Context) (*Connection, error) {
 	return &Connection{BaseURL: f.baseURL, Close: func() {}}, nil
 }
 
-// withFakeController spins up an httptest.Server, points connectorFactory at
-// it, runs the given command args, and returns stdout plus the exit code from
-// Execute-equivalent error mapping. The original factory is restored on cleanup.
+// runCLI serves handler from an httptest.Server, runs the command args against it and returns
+// stdout, stderr and the exit code Execute would return.
 func runCLI(t *testing.T, handler http.Handler, args ...string) (string, string, int) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
+	stdout, stderr, err := runRoot(t, fakeConnector{baseURL: srv.URL}, args...)
+	return stdout, stderr, exitCode(err)
+}
+
+// runRoot runs the root command with args through c and returns its output and error.
+func runRoot(t *testing.T, c Connector, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	orig := connectorFactory
-	connectorFactory = func(_ *globalOptions) Connector { return fakeConnector{baseURL: srv.URL} }
+	connectorFactory = func(*globalOptions) Connector { return c }
 	t.Cleanup(func() { connectorFactory = orig })
 
 	root := newRootCmd()
-	var stdout, stderr bytes.Buffer
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
+	var out, errOut bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errOut)
 	root.SetArgs(args)
-
-	err := root.Execute()
-	code := exitCodeFor(err)
-	return stdout.String(), stderr.String(), code
-}
-
-// exitCodeFor mirrors Execute's error-to-code mapping for tests.
-func exitCodeFor(err error) int {
-	switch {
-	case err == nil:
-		return exitOK
-	case isCheckFailed(err):
-		return exitCheck
-	default:
-		return exitError
-	}
-}
-
-func isCheckFailed(err error) bool {
-	return err != nil && strings.Contains(err.Error(), errCheckFailed.Error())
+	err = root.Execute()
+	return out.String(), errOut.String(), err
 }
 
 const topologyFixture = `{
@@ -178,6 +166,29 @@ func TestCheckCommandAPIErrorExit1(t *testing.T) {
 	}
 }
 
+// Agents probe the pod plane only, so --plane host would run a pod probe that the console's event
+// history records as a host-plane result. It is refused before the controller is asked.
+func TestCheckCommandRefusesAPlaneAgentsDoNotProbe(t *testing.T) {
+	asked := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/diagnostics", func(w http.ResponseWriter, _ *http.Request) {
+		asked = true
+		w.WriteHeader(http.StatusOK)
+	})
+	if _, _, code := runCLI(t, mux, "check", "node-1", "node-2", "--plane", "host"); code != exitError {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if asked {
+		t.Error("the CLI sent a request for a plane agents do not probe")
+	}
+
+	root := newRootCmd()
+	root.SetArgs([]string{"check", "node-1", "node-2", "--plane", "host"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "--plane") {
+		t.Errorf("error = %v, want one naming --plane", err)
+	}
+}
+
 func TestCheckCommandJSONExit2(t *testing.T) {
 	// JSON output still yields exit 2 on success=false.
 	body := `{"type":"icmp","success":false,"source":"node-1","destination":"node-2","duration":0,"error":"timeout"}`
@@ -274,5 +285,8 @@ func TestRootHelpPointsAtDocs(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Docs: https://esdmitrii.github.io/kconmon-ng/") {
 		t.Fatalf("--help does not mention the docs site:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\n  pmtu ") {
+		t.Errorf("--help check type list has no pmtu entry:\n%s", stdout)
 	}
 }

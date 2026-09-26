@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,10 +27,17 @@ const (
 	udpHeaderLen  = 8
 )
 
-var errPMTUUnsupported = fmt.Errorf("pmtu probe is not supported on %s", runtime.GOOS)
+var (
+	errPMTUUnsupported     = fmt.Errorf("pmtu probe is not supported on %s", runtime.GOOS)
+	errRouteMTUUnsupported = fmt.Errorf("route MTU lookup is not supported on %s", runtime.GOOS)
+)
 
-// interfaceMTUFor is a seam: tests pin the MTU the probe believes its interface has.
-var interfaceMTUFor = interfaceMTU
+// routeMTUFor and interfaceMTUFor are seams: tests pin the MTU the probe believes the route to the
+// peer and the interface owning its address have.
+var (
+	routeMTUFor     = routeMTU
+	interfaceMTUFor = interfaceMTU
+)
 
 // PMTUChecker sends DF-marked UDP datagrams to a peer's echo port and bisects the size on loss. The
 // echo contract is the udp checker's: the first four bytes carry a sequence number and the peer
@@ -43,6 +51,8 @@ type PMTUChecker struct {
 	// clampWarned holds the peers already warned about a size above the device MTU: one warning
 	// per peer for the life of the agent, not one per interval.
 	clampWarned sync.Map
+	// routeWarned is set once the route lookup has failed and been warned about.
+	routeWarned atomic.Bool
 }
 
 func NewPMTUChecker(timeout, interval time.Duration, size, port int) *PMTUChecker {
@@ -93,7 +103,7 @@ func (c *PMTUChecker) Check(ctx context.Context, target Target) model.CheckResul
 		result.Error = "probe socket has no UDP local address"
 		return result
 	}
-	probeMTU, err := c.probeSize(local.IP, target.NodeName)
+	probeMTU, err := c.probeSize(raddr.IP, local.IP, target.NodeName)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -121,15 +131,22 @@ func (c *PMTUChecker) Check(ctx context.Context, target Target) model.CheckResul
 			result.Error += " (the search stopped at its time budget: the path carries at least that much)"
 		}
 	case model.PMTUVerdictUnreachable:
-		result.Error = "pmtu: the peer's echo did not answer a 64-byte datagram; reachability is the udp plane's verdict"
+		result.Error = "pmtu: " + search.reason
 	}
 	return result
 }
 
+// ForgetPeer drops what the checker keeps about a peer that left the mesh, so node churn does not
+// grow it for the life of the agent. A peer that comes back is warned about once more.
+func (c *PMTUChecker) ForgetPeer(nodeName string) {
+	c.clampWarned.Delete(nodeName)
+}
+
 // probeSize resolves the IP-level size this probe tests: the configured size, else the MTU of the
-// interface that owns the socket's local address, clamped to what one IPv4 datagram can be.
-func (c *PMTUChecker) probeSize(local net.IP, peer string) (int, error) {
-	device, err := interfaceMTUFor(local)
+// route to the peer (the interface owning the socket's address where the route cannot be read),
+// clamped to what one IPv4 datagram can be.
+func (c *PMTUChecker) probeSize(remote, local net.IP, peer string) (int, error) {
+	device, err := c.localMTU(remote, local)
 	if err != nil && c.size == 0 {
 		return 0, fmt.Errorf("pmtu: cannot read the MTU of the interface owning %s: %w", local, err)
 	}
@@ -138,15 +155,36 @@ func (c *PMTUChecker) probeSize(local net.IP, peer string) (int, error) {
 	case size == 0:
 		size = device
 	case err == nil && size > device:
-		// Above the device MTU every send fails locally and would read as a broken network; the
-		// operator asked a question this host cannot put on the wire.
+		// Above the route MTU the probe asks about datagrams this host never sends to the peer, and
+		// above the device MTU every send fails locally and would read as a broken network.
 		if _, warned := c.clampWarned.LoadOrStore(peer, struct{}{}); !warned {
-			slog.Warn("checkers.pmtu.size is above the interface MTU; probing at the interface MTU",
-				"configured", size, "interfaceMtu", device, "peer", peer)
+			slog.Warn("checkers.pmtu.size is above the MTU of the route to the peer; probing at the route MTU",
+				"configured", size, "routeMtu", device, "peer", peer)
 		}
 		size = device
 	}
 	return min(max(size, pmtuMinSize), pmtuMaxIPSize), nil
+}
+
+// localMTU is the largest datagram this host sends to remote: the route's MTU on Linux, else the MTU
+// of the interface that owns local. PROBE mode sizes against the device and ignores a route MTU, so
+// a CNI that keeps the pod's link at 1500 and sets the tunnel MTU on its routes would be probed at a
+// size its pods never send.
+func (c *PMTUChecker) localMTU(remote, local net.IP) (int, error) {
+	mtu, err := routeMTUFor(remote, local)
+	if err == nil {
+		return mtu, nil
+	}
+	if !errors.Is(err, errRouteMTUUnsupported) {
+		if c.routeWarned.CompareAndSwap(false, true) {
+			slog.Warn("pmtu: cannot read the route to the peer; sizing the probe from the interface MTU",
+				"peer", remote, "error", err)
+		} else {
+			slog.Debug("pmtu: cannot read the route to the peer; sizing the probe from the interface MTU",
+				"peer", remote, "error", err)
+		}
+	}
+	return interfaceMTUFor(local)
 }
 
 func interfaceMTU(local net.IP) (int, error) {

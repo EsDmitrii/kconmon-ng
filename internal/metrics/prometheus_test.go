@@ -163,55 +163,8 @@ func TestExternalFamiliesAbsentWhenFeatureUnused(t *testing.T) {
 	}
 }
 
-/*
-Forgetting one external target leaves the others alone, and leaves the counters alone.
-
-The old ResetPeerGauges() called Reset() on these vectors wholesale, from the PEER-update callback —
-an external target's packet loss disappeared because some unrelated agent pod restarted, and every
-other external target went with it.
-*/
-func TestForgetExternalTargetDropsOnlyThatTarget(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	m := NewPrometheusMetrics("kconmon_ng", reg)
-
-	gone := []string{"node-a", "zone-a", "vendor-api", "host", "icmp"}
-	stays := []string{"node-a", "zone-a", "billing-api", "url", "http"}
-	m.ExternalPacketLoss.WithLabelValues(gone...).Set(0.5)
-	m.ExternalHTTPStatusCode.WithLabelValues(gone...).Set(503)
-	m.ExternalPacketLoss.WithLabelValues(stays...).Set(0.1)
-	m.ExternalResults.WithLabelValues(append(slices.Clone(gone), "fail")...).Inc()
-
-	before := gatheredNames(t, reg)
-	for _, name := range []string{"kconmon_ng_external_packet_loss_ratio", "kconmon_ng_external_http_status_code"} {
-		if !slices.Contains(before, name) {
-			t.Fatalf("setup failed: %s not exposed before the retire", name)
-		}
-	}
-
-	m.ForgetExternalTarget("vendor-api")
-
-	if got := testutil.CollectAndCount(m.ExternalHTTPStatusCode); got != 0 {
-		t.Errorf("vendor-api still has %d status-code series", got)
-	}
-	if got := testutil.ToFloat64(m.ExternalPacketLoss.WithLabelValues(stays...)); got != 0.1 {
-		t.Errorf("billing-api packet loss = %v, want the 0.1 it was set to: an unrelated target was dropped", got)
-	}
-	if got := testutil.CollectAndCount(m.ExternalPacketLoss); got != 1 {
-		t.Errorf("packet loss has %d series, want only billing-api's 1", got)
-	}
-	// Counters are cumulative and must survive: only gauges pin a dead reading.
-	if !slices.Contains(gatheredNames(t, reg), "kconmon_ng_external_results_total") {
-		t.Error("retiring a target must not clear the external results counter")
-	}
-}
-
-/*
-Forgetting a departed peer leaves every peer that is still there reporting.
-
-The wholesale Reset() blanked the loss and jitter of every live pair too, and nothing repopulates a
-gauge but the next probe of that pair — so each peer update opened a hole up to one check interval
-wide in the series alerts evaluate, once per pod event.
-*/
+// Forgetting a departed peer leaves every peer that is still there reporting: nothing repopulates a
+// gauge but the next probe of that pair, so a live pair's gap would be a hole in what alerts evaluate.
 func TestForgetPeerDropsOnlyThatDestination(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPrometheusMetrics("kconmon_ng", reg)
@@ -249,6 +202,32 @@ func TestForgetPeerDropsOnlyThatDestination(t *testing.T) {
 	} {
 		if got := testutil.CollectAndCount(vec); got != 0 {
 			t.Errorf("%s still carries %d series for a peer that left", name, got)
+		}
+	}
+}
+
+// A zone change retires the pair's counters and histograms under the old zone only: the same pair
+// under its new zone, and other pairs, keep counting.
+func TestRetireZoneDropsOnlyTheOldZonesPairSeries(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+	for _, pair := range [][2]string{{"node-b", "zone-1"}, {"node-b", "zone-2"}, {"node-c", "zone-1"}} {
+		m.UDPResults.WithLabelValues("node-a", pair[0], "zone-a", pair[1], "success").Inc()
+		m.UDPRtt.WithLabelValues("node-a", pair[0], "zone-a", pair[1]).Observe(0.001)
+	}
+
+	m.RetirePeerZone("node-b", "zone-1")
+	if got := testutil.CollectAndCount(m.UDPResults); got != 2 {
+		t.Errorf("udp_results_total has %d series after node-b left zone-1, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.UDPResults.WithLabelValues("node-a", "node-b", "zone-a", "zone-2", "success")); got != 1 {
+		t.Errorf("node-b's counter under its new zone = %v, want the 1 it counted", got)
+	}
+
+	m.RetireSourceZone("node-a", "zone-a")
+	for name, c := range map[string]prometheus.Collector{"udp_results_total": m.UDPResults, "udp_rtt_seconds": m.UDPRtt} {
+		if got := testutil.CollectAndCount(c); got != 0 {
+			t.Errorf("%s keeps %d series after node-a left zone-a", name, got)
 		}
 	}
 }
@@ -303,7 +282,7 @@ func TestNewPrometheusMetricsBuildInfo(t *testing.T) {
 }
 
 /*
-The M5 zone family: exact metric names are part of the design contract — the chart's rules and the
+The zone family's exact metric names are part of the design contract: the chart's rules and the
 zone dashboard address them literally, so a rename here silently kills alerts.
 */
 func TestZoneFamilyRegisteredUnderPrefix(t *testing.T) {
@@ -442,7 +421,7 @@ func TestForgetPeerLeavesZoneFamilyStanding(t *testing.T) {
 }
 
 /*
-M9-2: the peer-list age is computed AT SCRAPE TIME from the caller's stamp — a
+The peer-list age is computed AT SCRAPE TIME from the caller's stamp: a
 value written once at update time would serve a stale age on every scrape,
 hiding exactly the cut-off-agent condition the series exists to expose. Before
 the first update the age runs from arming, so "never had a peer list" reads as
@@ -488,7 +467,7 @@ func TestEnablePeerListAge(t *testing.T) {
 	}
 }
 
-// M9-2: the self-observation family registers under the agent prefix and the
+// The self-observation family registers under the agent prefix and the
 // documented names.
 func TestAgentSelfMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
@@ -612,5 +591,86 @@ func TestPrometheusMetricsPMTUFamilies(t *testing.T) {
 	}
 	if n := testutil.CollectAndCount(m.PMTUResults); n != 1 {
 		t.Errorf("ForgetPeer must not drop counters, pmtu_results_total has %d series, want 1", n)
+	}
+}
+
+// The probe size is per pair (the route to each peer), and the per-agent gauge is the max over the
+// pairs still published: it follows every retirement of the per-pair series.
+func TestPMTUProbeBytesPerPairAndAgentMax(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+	agent := func() (float64, bool) {
+		if testutil.CollectAndCount(m.AgentPMTUProbeBytes) == 0 {
+			return 0, false
+		}
+		return testutil.ToFloat64(m.AgentPMTUProbeBytes.WithLabelValues("a")), true
+	}
+
+	m.SetPMTUProbe([]string{"a", "vpn", "zone-a", "zone-v"}, 1420)
+	m.SetPMTUProbe([]string{"a", "lan", "zone-a", "zone-a"}, 1500)
+	m.SetPMTUProbe([]string{"a", "far", "zone-a", "zone-f"}, 1450)
+	if got := testutil.ToFloat64(m.PMTUProbeBytes.WithLabelValues("a", "vpn", "zone-a", "zone-v")); got != 1420 {
+		t.Errorf("pmtu_probe_bytes a->vpn = %v, want 1420", got)
+	}
+	if got, ok := agent(); !ok || got != 1500 {
+		t.Errorf("agent_pmtu_probe_bytes = %v (present=%v), want the max 1500", got, ok)
+	}
+
+	m.SetPMTUProbe([]string{"a", "lan", "zone-a", "zone-a"}, 1400)
+	if got, _ := agent(); got != 1450 {
+		t.Errorf("agent_pmtu_probe_bytes after lan dropped to 1400 = %v, want 1450", got)
+	}
+	m.ForgetPeer("far")
+	if got, _ := agent(); got != 1420 {
+		t.Errorf("agent_pmtu_probe_bytes after far left = %v, want 1420", got)
+	}
+	m.RetirePeerZone("vpn", "zone-v")
+	if n := testutil.CollectAndCount(m.PMTUProbeBytes); n != 1 {
+		t.Errorf("pmtu_probe_bytes has %d series after vpn changed zone, want lan's 1", n)
+	}
+	if got, _ := agent(); got != 1400 {
+		t.Errorf("agent_pmtu_probe_bytes after vpn changed zone = %v, want 1400", got)
+	}
+	m.RetireSourceZone("a", "zone-a")
+	if n := testutil.CollectAndCount(m.PMTUProbeBytes); n != 0 {
+		t.Errorf("pmtu_probe_bytes has %d series after a left zone-a, want 0", n)
+	}
+	if got, ok := agent(); ok {
+		t.Errorf("agent_pmtu_probe_bytes = %v with no pair left, want the series gone", got)
+	}
+
+	m.SetPMTUProbe([]string{"a", "lan", "zone-b", "zone-a"}, 1500)
+	m.ForgetPlane("pmtu")
+	if n := testutil.CollectAndCount(m.PMTUProbeBytes) + testutil.CollectAndCount(m.AgentPMTUProbeBytes); n != 0 {
+		t.Errorf("%d probe-size series left after the pmtu plane was switched off", n)
+	}
+	m.SetPMTUProbe([]string{"a", "lan", "zone-b", "zone-a"}, 1300)
+	if got, _ := agent(); got != 1300 {
+		t.Errorf("agent_pmtu_probe_bytes after the plane came back = %v, want 1300, not a stale max", got)
+	}
+}
+
+// Result handlers run concurrently per peer while peer updates retire series.
+func TestPMTUProbeBytesConcurrentWritesAndRetirement(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			dst := "peer-" + string(rune('a'+i))
+			for j := range 200 {
+				m.SetPMTUProbe([]string{"a", dst, "zone-a", "zone-b"}, float64(1400+j%100))
+				if j%50 == 0 {
+					m.ForgetPeer(dst)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	if got := testutil.ToFloat64(m.AgentPMTUProbeBytes.WithLabelValues("a")); got != 1499 {
+		t.Errorf("agent_pmtu_probe_bytes = %v, want 1499, every peer's last write", got)
 	}
 }

@@ -64,8 +64,37 @@ type Scheduler struct {
 	mtrSem chan struct{}
 	// selfMetrics carries the agent self-observation series; nil (tests) records nothing.
 	selfMetrics *metrics.PrometheusMetrics
-	// peersUpdatedAt is when UpdatePeers last ran, feeding agent_peer_list_age_seconds.
+	// peersUpdatedAt is when ReplacePeers last swapped the list, feeding agent_peer_list_age_seconds.
 	peersUpdatedAt time.Time
+	peerGen        uint64            // bumped on every peer-list swap
+	peerZones      map[string]string // current peers, node name -> zone
+
+	// deliverMu is held for reading by every result delivery and for writing by peer-list and
+	// assignment swaps, so a probe in flight during a swap cannot write back what the swap retired.
+	deliverMu sync.RWMutex
+
+	quietMu       sync.Mutex
+	quietFailures map[string]struct{}
+
+	// loopMu serialises Run and SetCheckers over loops, the running checker loops by check type.
+	loopMu  sync.Mutex
+	runCtx  context.Context //nolint:containedctx // the Run context, the parent of every checker loop
+	stopped bool
+	loops   map[model.CheckType]*checkerLoop
+}
+
+// checkerLoop is one checker's schedule; cancel stops it and done closes once its round has exited.
+type checkerLoop struct {
+	c      checker.Checker
+	cfg    SchedulerConfig
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// ScheduledChecker is one entry of the set SetCheckers installs.
+type ScheduledChecker struct {
+	Checker checker.Checker
+	Config  SchedulerConfig
 }
 
 func NewScheduler(source checker.Target, handler ResultHandler) *Scheduler { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
@@ -149,8 +178,70 @@ func (s *Scheduler) AddChecker(c checker.Checker, cfg SchedulerConfig) {
 	s.configs[c.Name()] = cfg
 }
 
-// SetSourceZone updates the source zone reported on every emitted result.
-// Intended to be called once after registration, before Run starts.
+func (s *Scheduler) configFor(name model.CheckType) SchedulerConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configs[name]
+}
+
+/*
+SetCheckers replaces the checker set of a running (or not yet started) scheduler, which is what a
+config reload does. A loop whose checker or config changed is stopped first: its in-flight round is
+cancelled, its results are dropped, and it is waited for, so its successor never overlaps it. Loops
+whose entry is unchanged keep running untouched. Peers, pause state and delivery are not affected.
+It must not be called with deliverMu held: a stopping round may be waiting to deliver.
+*/
+func (s *Scheduler) SetCheckers(entries []ScheduledChecker) {
+	s.loopMu.Lock()
+	defer s.loopMu.Unlock()
+
+	next := make(map[model.CheckType]ScheduledChecker, len(entries))
+	for _, e := range entries {
+		next[e.Checker.Name()] = e
+	}
+	for name, l := range s.loops {
+		if e, ok := next[name]; ok && e.Checker == l.c && e.Config == l.cfg {
+			continue
+		}
+		l.cancel()
+		<-l.done
+		delete(s.loops, name)
+	}
+
+	s.mu.Lock()
+	s.checkers = make([]checker.Checker, 0, len(entries))
+	s.configs = make(map[model.CheckType]SchedulerConfig, len(entries))
+	for _, e := range entries {
+		s.checkers = append(s.checkers, e.Checker)
+		s.configs[e.Checker.Name()] = e.Config
+	}
+	s.mu.Unlock()
+
+	if s.runCtx == nil || s.stopped {
+		return
+	}
+	for _, e := range entries {
+		if _, running := s.loops[e.Checker.Name()]; !running {
+			s.startLoopLocked(e.Checker, e.Config)
+		}
+	}
+}
+
+func (s *Scheduler) startLoopLocked(c checker.Checker, cfg SchedulerConfig) {
+	ctx, cancel := context.WithCancel(s.runCtx)
+	l := &checkerLoop{c: c, cfg: cfg, cancel: cancel, done: make(chan struct{})}
+	if s.loops == nil {
+		s.loops = make(map[model.CheckType]*checkerLoop)
+	}
+	s.loops[c.Name()] = l
+	go func() {
+		defer close(l.done)
+		s.runChecker(ctx, c, cfg)
+	}()
+}
+
+// SetSourceZone changes the source zone stamped on every result; adoptZone calls it with no delivery
+// in flight.
 func (s *Scheduler) SetSourceZone(zone string) {
 	s.mu.Lock()
 	s.source.Zone = zone
@@ -163,7 +254,14 @@ func (s *Scheduler) sourceZone() string {
 	return s.source.Zone
 }
 
-func (s *Scheduler) UpdatePeers(peers []checker.Target) {
+// ReplacePeers runs retire against the old list and swaps in peers, with no delivery in flight.
+func (s *Scheduler) ReplacePeers(peers []checker.Target, retire func()) {
+	s.deliverMu.Lock()
+	defer s.deliverMu.Unlock()
+	if retire != nil {
+		retire()
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -180,6 +278,84 @@ func (s *Scheduler) UpdatePeers(peers []checker.Target) {
 	}
 	s.peers = filtered
 	s.peersUpdatedAt = time.Now()
+	s.peerGen++
+	s.peerZones = make(map[string]string, len(filtered))
+	for i := range filtered {
+		s.peerZones[filtered[i].NodeName] = filtered[i].Zone
+	}
+}
+
+// whileNoDelivery runs fn with no result delivery in flight; see deliverMu.
+func (s *Scheduler) whileNoDelivery(fn func()) {
+	s.deliverMu.Lock()
+	defer s.deliverMu.Unlock()
+	fn()
+}
+
+// deliverPeer stamps a peer result and hands it to the handler, unless the peer list changed since
+// gen and no longer holds this peer under the same zone. It reports whether it delivered.
+func (s *Scheduler) deliverPeer(result *model.CheckResult, peer *checker.Target, gen uint64) bool {
+	s.deliverMu.RLock()
+	defer s.deliverMu.RUnlock()
+
+	s.mu.RLock()
+	assigned := s.peerGen == gen
+	if !assigned {
+		zone, ok := s.peerZones[peer.NodeName]
+		assigned = ok && zone == peer.Zone
+	}
+	sourceZone := s.source.Zone
+	s.mu.RUnlock()
+	if !assigned {
+		return false
+	}
+
+	result.Source = s.source.NodeName
+	result.SourceZone = sourceZone
+	result.Destination = peer.NodeName
+	result.DestZone = peer.Zone
+	if s.handler != nil {
+		s.handler(*result)
+	}
+	return true
+}
+
+// deliverLocal is deliverPeer for a NodeLocal result, which has no peer to check.
+func (s *Scheduler) deliverLocal(result *model.CheckResult) {
+	s.deliverMu.RLock()
+	defer s.deliverMu.RUnlock()
+	result.Source = s.source.NodeName
+	result.SourceZone = s.sourceZone()
+	if s.handler != nil {
+		s.handler(*result)
+	}
+}
+
+// maxQuietFailures bounds the set of pmtu errors already reported once.
+const maxQuietFailures = 64
+
+// logFailure warns about a failed probe. A pmtu probe that failed before sending (no interface MTU,
+// no DF) fails identically toward every peer each round, so each such error warns once, then debugs.
+func (s *Scheduler) logFailure(result *model.CheckResult) {
+	level := slog.LevelWarn
+	if result.Type == model.CheckPMTU && result.Details == nil {
+		s.quietMu.Lock()
+		if _, seen := s.quietFailures[result.Error]; seen {
+			level = slog.LevelDebug
+		} else if len(s.quietFailures) < maxQuietFailures {
+			if s.quietFailures == nil {
+				s.quietFailures = make(map[string]struct{})
+			}
+			s.quietFailures[result.Error] = struct{}{}
+		}
+		s.quietMu.Unlock()
+	}
+	attrs := []any{"type", result.Type, "source", result.Source}
+	if result.Destination != "" {
+		attrs = append(attrs, "destination", result.Destination)
+	}
+	attrs = append(attrs, "error", redactURLs(result.Error))
+	slog.Log(context.Background(), level, "check failed", attrs...)
 }
 
 // Peers returns a copy of the peer list actually probed, which is the registered set minus this
@@ -190,33 +366,40 @@ func (s *Scheduler) Peers() []checker.Target {
 	return append([]checker.Target(nil), s.peers...)
 }
 
+// Run starts one loop per checker and returns once ctx is done and every loop, including those a
+// reload started, has exited.
 func (s *Scheduler) Run(ctx context.Context) {
+	s.loopMu.Lock()
+	s.runCtx = ctx
 	s.mu.RLock()
 	checkersCopy := make([]checker.Checker, len(s.checkers))
 	copy(checkersCopy, s.checkers)
 	s.mu.RUnlock()
-
-	var wg sync.WaitGroup
 	for _, c := range checkersCopy {
-		wg.Add(1)
-		go func(c checker.Checker) {
-			defer wg.Done()
-			s.runChecker(ctx, c)
-		}(c)
+		s.startLoopLocked(c, s.configFor(c.Name()))
 	}
-	wg.Wait()
+	s.loopMu.Unlock()
+
+	<-ctx.Done()
+
+	s.loopMu.Lock()
+	s.stopped = true
+	loops := s.loops
+	s.loops = nil
+	s.loopMu.Unlock()
+	for _, l := range loops {
+		<-l.done
+	}
 }
 
-func (s *Scheduler) runChecker(ctx context.Context, c checker.Checker) {
-	cfg := s.configs[c.Name()]
+func (s *Scheduler) runChecker(ctx context.Context, c checker.Checker, cfg SchedulerConfig) { //nolint:gocritic // hugeParam: the loop keeps its own copy of the config it was started with
 	jitter := cfg.Jitter
 	if jitter == 0 {
 		jitter = cfg.Interval / 10
 	}
 
-	initialDelay := time.Duration(rand.Int64N(int64(jitter))) //nolint:gosec // G404: non-security jitter
 	select {
-	case <-time.After(initialDelay):
+	case <-time.After(randomDelay(jitter)):
 	case <-ctx.Done():
 		return
 	}
@@ -228,13 +411,12 @@ func (s *Scheduler) runChecker(ctx context.Context, c checker.Checker) {
 		if !s.waitIfPaused(ctx) {
 			return
 		}
-		s.runCheckerOnce(ctx, c)
+		s.runRound(ctx, c, cfg)
 
 		select {
 		case <-ticker.C:
-			jitterDelay := time.Duration(rand.Int64N(int64(jitter))) //nolint:gosec // G404: non-security jitter
 			select {
-			case <-time.After(jitterDelay):
+			case <-time.After(randomDelay(jitter)):
 			case <-ctx.Done():
 				return
 			}
@@ -244,9 +426,17 @@ func (s *Scheduler) runChecker(ctx context.Context, c checker.Checker) {
 	}
 }
 
-func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
-	cfg := s.configs[c.Name()]
+// randomDelay is up to upTo; none when an interval under 10ns leaves no room for jitter.
+func randomDelay(upTo time.Duration) time.Duration {
+	if upTo <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(upTo))) //nolint:gosec // G404: non-security jitter
+}
 
+// runRound is one round of c. A probe that returns after ctx ended (shutdown, or a reload stopping
+// this loop) is dropped: its failure is the cancellation, not the network.
+func (s *Scheduler) runRound(ctx context.Context, c checker.Checker, cfg SchedulerConfig) { //nolint:gocritic // hugeParam: see runChecker
 	/* Self-observation: the round's wall clock, and whether it blew its own interval. An overrun is
 	   the cadence-collapse signal M9-1 exists to prevent — a counter an operator can alert on
 	   instead of inferring it from probe-result gaps. A round truncated by shutdown is not a
@@ -267,19 +457,12 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 
 	if cfg.NodeLocal {
 		result := c.Check(ctx, checker.Target{})
-		result.Source = s.source.NodeName
-		result.SourceZone = s.sourceZone()
-
-		if s.handler != nil {
-			s.handler(result)
+		if ctx.Err() != nil {
+			return
 		}
-
+		s.deliverLocal(&result)
 		if !result.Success {
-			slog.Warn("check failed",
-				"type", result.Type,
-				"source", result.Source,
-				"error", result.Error,
-			)
+			s.logFailure(&result)
 		}
 		return
 	}
@@ -287,6 +470,7 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 	s.mu.RLock()
 	peers := make([]checker.Target, len(s.peers))
 	copy(peers, s.peers)
+	gen := s.peerGen
 	s.mu.RUnlock()
 
 	/* Bounded fan-out, the shape of externalProbeConcurrency in internal/checker/external.go.
@@ -311,23 +495,15 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 
 			peer := peers[i]
 			result := c.Check(ctx, peer)
-			result.Source = s.source.NodeName
-			result.SourceZone = s.sourceZone()
-			result.Destination = peer.NodeName
-			result.DestZone = peer.Zone
-
-			if s.handler != nil {
-				s.handler(result)
+			if ctx.Err() != nil {
+				return
 			}
-
+			if !s.deliverPeer(&result, &peer, gen) {
+				return
+			}
 			if !result.Success {
-				slog.Warn("check failed",
-					"type", result.Type,
-					"source", result.Source,
-					"destination", result.Destination,
-					"error", result.Error,
-				)
-				s.triggerMTR(ctx, peer, &result)
+				s.logFailure(&result)
+				s.triggerMTRAt(ctx, peer, &result, gen)
 			}
 		}(i)
 	}
@@ -339,7 +515,9 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 // top of that. A trace that has not finished inside this is not going to say anything useful.
 const mtrTraceBudget = 90 * time.Second
 
-func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedResult *model.CheckResult) { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
+// triggerMTRAt starts a reactive trace to peer after failedResult, a probe of peer-list generation
+// gen; the trace outlives the round, and its result is dropped if the peer left meanwhile.
+func (s *Scheduler) triggerMTRAt(ctx context.Context, peer checker.Target, failedResult *model.CheckResult, gen uint64) { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	s.mu.RLock()
 	mtr := s.mtrChecker
 	trace := s.traceFn
@@ -412,13 +590,6 @@ func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedR
 		defer cancel()
 
 		mtrResult := trace(traceCtx, peer)
-		mtrResult.Source = s.source.NodeName
-		mtrResult.SourceZone = s.sourceZone()
-		mtrResult.Destination = peer.NodeName
-		mtrResult.DestZone = peer.Zone
-
-		if s.handler != nil {
-			s.handler(mtrResult)
-		}
+		s.deliverPeer(&mtrResult, &peer, gen)
 	}()
 }

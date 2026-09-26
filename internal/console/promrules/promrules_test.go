@@ -253,16 +253,48 @@ func (f *fakeStore) ListAlertRules(_ context.Context, enabledOnly bool) ([]store
 	return out, nil
 }
 
-func (f *fakeStore) UpdateAlertRuleSyncStatus(
-	_ context.Context, id, status, message string, lastSyncedAt *time.Time,
-) (store.AlertRule, error) {
+// UpdateAlertRuleSyncStatusIfUnchanged records every attempt, and like the store changes the row
+// only while its UpdatedAt is still the one the pass read.
+func (f *fakeStore) UpdateAlertRuleSyncStatusIfUnchanged(
+	_ context.Context, id string, updatedAt time.Time, status, message string, lastSyncedAt *time.Time,
+) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.writes = append(f.writes, statusWrite{ID: id, Status: status, Message: message, At: lastSyncedAt})
 	if f.writeErr != nil {
-		return store.AlertRule{}, f.writeErr
+		return false, f.writeErr
 	}
-	return store.AlertRule{ID: id, SyncStatus: status, SyncMessage: message, LastSyncedAt: lastSyncedAt}, nil
+	for i := range f.rules {
+		if f.rules[i].ID == id && f.rules[i].UpdatedAt.Equal(updatedAt) {
+			f.rules[i].SyncStatus = status
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// edit does what UpdateAlertRule does to the row: a new updated_at and 'unsynced'.
+func (f *fakeStore) edit(id string, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.rules {
+		if f.rules[i].ID == id {
+			f.rules[i].UpdatedAt = at
+			f.rules[i].SyncStatus = store.AlertSyncStatusUnsynced
+		}
+	}
+}
+
+// statusOf returns the sync status the row holds now.
+func (f *fakeStore) statusOf(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.rules {
+		if f.rules[i].ID == id {
+			return f.rules[i].SyncStatus
+		}
+	}
+	return ""
 }
 
 func (f *fakeStore) snapshot() []statusWrite {
@@ -602,16 +634,29 @@ func TestReconcileWithoutALockerStillRuns(t *testing.T) {
 	}
 }
 
+// deletedAfterListStore loses its rules right after listing them, which is how a rule deleted
+// mid-pass looks to setStatus: the conditional write matches no row and answers (false, nil).
+type deletedAfterListStore struct{ *fakeStore }
+
+func (d deletedAfterListStore) ListAlertRules(ctx context.Context, enabledOnly bool) ([]store.AlertRule, error) {
+	rows, err := d.fakeStore.ListAlertRules(ctx, enabledOnly)
+	d.mu.Lock()
+	d.rules = nil
+	d.mu.Unlock()
+	return rows, err
+}
+
 // TestSetStatusStaysQuietForADeletedRule covers the log noise: a rule deleted between the list and
 // the status write is the normal outcome of a delete, not a failure worth a warning.
 func TestSetStatusStaysQuietForADeletedRule(t *testing.T) {
 	tests := []struct {
 		name      string
+		deleted   bool
 		statusErr error
 		wantWarn  bool
 	}{
-		{"deleted mid-pass", fmt.Errorf("store: update alert rule sync status: %w", store.ErrNotFound), false},
-		{"real failure", errors.New("connection refused"), true},
+		{"deleted mid-pass", true, nil, false},
+		{"real failure", false, errors.New("connection refused"), true},
 	}
 
 	for _, tc := range tests {
@@ -621,13 +666,20 @@ func TestSetStatusStaysQuietForADeletedRule(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 			defer slog.SetDefault(restore)
 
-			st := &fakeStore{
+			fs := &fakeStore{
 				rules:    []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")},
 				writeErr: tc.statusErr,
+			}
+			var st Store = fs
+			if tc.deleted {
+				st = deletedAfterListStore{fs}
 			}
 			r := newReconciler(t, newAppliableFake(t), st)
 			if err := r.Reconcile(context.Background()); err != nil {
 				t.Fatalf("Reconcile: %v", err)
+			}
+			if len(fs.snapshot()) == 0 {
+				t.Fatal("the pass wrote no status, so the test proves nothing")
 			}
 
 			logged := strings.Contains(buf.String(), "could not record an alert rule sync outcome")
@@ -844,13 +896,10 @@ func TestReconcileMarksEveryRuleWithTheCauseClass(t *testing.T) {
 /*
 One rule the cluster refuses must not take the whole bundle with it.
 
-Nothing validates PromQL on the way in, so a kind='raw' rule with an unparseable expression is
-accepted by the API and lands in the bundle; the admission webhook then rejects the OBJECT. Every
-rule used to be stamped `error` with a message naming none of them, and — the sharp part — the
-console-managed alert set froze: deleting or disabling a rule answered 204 while Prometheus went on
-evaluating it, because no apply ever reached the cluster again.
-
-The rule added since the last accepted apply is quarantined and the rest go back out.
+Nothing validates PromQL on the way in, so a kind='raw' rule with an unparseable expression lands in
+the bundle and the admission webhook rejects the whole object. The rule added since the last
+accepted apply is quarantined and the rest go back out, so deletes and disables keep reaching
+Prometheus.
 */
 func TestReconcileQuarantinesTheRuleTheClusterRefused(t *testing.T) {
 	c := newAppliableFake(t)
@@ -908,16 +957,9 @@ func TestReconcileQuarantinesTheRuleTheClusterRefused(t *testing.T) {
 }
 
 /*
-And the quarantine has to survive a RESTART, which is when it is needed most.
-
-lastApplied is per-process. A console that starts with a rule the cluster already refuses never gets
-a successful apply, so it never populates lastApplied, so the quarantine guard is never true — one
-bad expression froze the whole bundle exactly as it did before the quarantine existed, and disabling
-or deleting a rule answered 2xx while Prometheus kept evaluating the stale set. Reproduced on the
-stand by restarting both console replicas.
-
-The accepted id set is on the live object all along (RuleIDsAnnotation), and reconcileLocked already
-reads that object.
+The quarantine survives a restart. lastApplied is per-process, and a console that starts with a rule
+the cluster already refuses never gets a successful apply of its own; the live object's rule ids are
+the accepted set, so the first pass seeds from them.
 */
 func TestQuarantineSurvivesARestartBySeedingFromTheLiveBundle(t *testing.T) {
 	// The cluster already holds a bundle carrying id-1 and id-2 — the state a previous process left.
@@ -1143,27 +1185,97 @@ func TestReconcileIsolatesAnUnrenderableRule(t *testing.T) {
 	}
 }
 
-// TestReconcileMarksEveryRuleOnABundleLevelFailure: an alert-name collision is
-// a relationship BETWEEN rules, so it cannot be blamed on one of them.
-func TestReconcileMarksEveryRuleOnABundleLevelFailure(t *testing.T) {
+/*
+Rules whose names sanitize to one alert name ('pair-loss' and 'pair.loss', left by an older version
+or a write race) do not freeze the bundle: the deployed rule, else the least recently updated, keeps
+the name, the other is refused on its own, and the rest of the bundle still applies.
+*/
+func TestReconcileRefusesOnlyTheRuleThatTakesAnotherRulesAlertName(t *testing.T) {
 	c := newAppliableFake(t)
-	st := &fakeStore{rules: []store.AlertRule{row("id-1", "pair loss"), row("id-2", "Pair-Loss")}}
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "zone-latency")}}
 	r := newReconciler(t, c, st)
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
 
-	if err := r.Reconcile(context.Background()); err == nil {
-		t.Fatal("Reconcile = nil error, want the collision")
+	disabled := row("id-1", "zone-latency")
+	disabled.Enabled = false
+	older, newer := row("id-3", "pair-loss"), row("id-2", "pair.loss")
+	older.UpdatedAt = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	newer.UpdatedAt = older.UpdatedAt.Add(time.Hour)
+	st.mu.Lock()
+	st.rules = []store.AlertRule{disabled, newer, older, row("id-4", "udp-loss")}
+	st.mu.Unlock()
+	st.reset()
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile with two colliding names: %v", err)
+	}
+	live, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := live.GetAnnotations()[alerting.RuleIDsAnnotation]; got != "id-3,id-4" {
+		t.Errorf("live bundle ids = %q, want id-3,id-4: the disabled rule gone, the refused one never deployed", got)
 	}
 	writes := st.snapshot()
-	if len(writes) != 2 {
-		t.Fatalf("status writes = %d, want 2", len(writes))
+	for id, wantApplied := range map[string]bool{"id-2": false, "id-3": true, "id-4": true} {
+		w, ok := writeFor(writes, id)
+		if !ok {
+			t.Errorf("%s: no status written", id)
+			continue
+		}
+		// The live bundle changed under the pass (id-1 left it), so an applied rule reads drift.
+		if applied := w.Status != store.AlertSyncStatusError && w.At != nil; applied != wantApplied {
+			t.Errorf("%s status = %q (%.80s), applied %v, want %v", id, w.Status, w.Message, applied, wantApplied)
+		}
 	}
-	for _, w := range writes {
-		if w.Status != store.AlertSyncStatusError {
-			t.Errorf("%s status = %q, want error", w.ID, w.Status)
-		}
-		if !strings.Contains(w.Message, "collision") {
-			t.Errorf("%s message = %q, want it to name the collision", w.ID, w.Message)
-		}
+	if w, _ := writeFor(writes, "id-2"); !strings.Contains(w.Message, "collision") || !strings.Contains(w.Message, `"pair-loss"`) {
+		t.Errorf("id-2 message = %q, want it to name the collision and the rule holding the name", w.Message)
+	}
+}
+
+// The rule already deployed under an alert name keeps it even when it is the one edited last, so
+// touching the winner does not flip which of the two reaches Prometheus. A restarted console (or the
+// other replica) knows what is deployed only from the live bundle, and must reach the same answer.
+func TestReconcileKeepsTheDeployedRuleOnAnAlertNameCollision(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%v", restart), func(t *testing.T) {
+			c := newAppliableFake(t)
+			deployed := row("id-1", "pair-loss")
+			st := &fakeStore{rules: []store.AlertRule{deployed}}
+			r := newReconciler(t, c, st)
+			if err := r.Reconcile(context.Background()); err != nil {
+				t.Fatalf("first pass: %v", err)
+			}
+			deployed.UpdatedAt = time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+			newcomer := row("id-0", "PairLoss")
+			newcomer.UpdatedAt = deployed.UpdatedAt.Add(-time.Hour)
+			st.mu.Lock()
+			st.rules = []store.AlertRule{newcomer, deployed}
+			st.mu.Unlock()
+			st.reset()
+
+			if restart {
+				r = newReconciler(t, c, st)
+			}
+			if err := r.Reconcile(context.Background()); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if got := st.statusOf("id-0"); got != store.AlertSyncStatusError {
+				t.Errorf("newcomer status = %q, want error", got)
+			}
+			if got := st.statusOf("id-1"); got != store.AlertSyncStatusSynced {
+				t.Errorf("deployed rule status = %q, want synced", got)
+			}
+			live, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got := live.GetAnnotations()[alerting.RuleIDsAnnotation]; got != "id-1" {
+				t.Errorf("live bundle ids = %q, want id-1", got)
+			}
+		})
 	}
 }
 
@@ -1451,13 +1563,9 @@ func TestQuarantineCatchesAnEditToAnAlreadyDeployedRule(t *testing.T) {
 }
 
 /*
-A fallback set DISJOINT from the current rules must still offer each rule to the cluster.
-
-retryWithLastApplied used to short-circuit when nothing in the current set was in lastApplied: it
-deleted the bundle, stamped every rule "the cluster refused it" -- about a cluster that had never
-been shown it -- and latched lastApplied to the empty non-nil map, which made every later pass
-compute the same empty fallback. One bad rule in the table therefore made every OTHER rule
-permanently undeployable, with no log line at all.
+A fallback set DISJOINT from the current rules must still offer each rule to the cluster: a rule is
+reported refused only after the cluster saw it, and one bad rule in the table must not leave every
+other rule undeployable.
 */
 func TestQuarantineProbesEvenWhenTheFallbackSetIsDisjoint(t *testing.T) {
 	ctx := context.Background()
@@ -1568,5 +1676,258 @@ func TestQuarantineDeletesTheBundleWhenEveryRuleWasOfferedAndRefused(t *testing.
 
 	if !deleted {
 		t.Error("the bundle survived a pass in which every rule was offered and refused: the cluster still evaluates rules this console no longer deploys")
+	}
+}
+
+/*
+ * A transient failure is not a content rejection: an apiserver timeout, a 429, a 5xx or an
+ * unreachable admission webhook says nothing about the rule, so it neither quarantines the edited
+ * rule nor lets a pass whose probe failed that way delete the live bundle.
+ */
+func TestTransientApplyFailureNeitherQuarantinesNorDeletes(t *testing.T) {
+	for name, applyErr := range map[string]error{
+		"webhook unreachable": apierrors.NewInternalError(errors.New(`failed calling webhook ` +
+			`"prometheusrulemutate.monitoring.coreos.com": dial tcp 10.96.0.10:443: connect: connection refused`)),
+		"timeout":           apierrors.NewTimeoutError("request timed out", 1),
+		"throttled":         apierrors.NewTooManyRequests("slow down", 1),
+		"apiserver starved": apierrors.NewServiceUnavailable("etcd leader changed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			c := newAppliableFake(t, renderedBundle(t, "id-1"))
+			st := &fakeStore{rules: []store.AlertRule{row("id-1", "Edited")}}
+			r := newReconciler(t, c, st)
+
+			c.PrependReactor("patch", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, applyErr
+			})
+			deleted := false
+			c.PrependReactor("delete", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				deleted = true
+				return false, nil, nil
+			})
+
+			if err := r.Reconcile(ctx); err == nil {
+				t.Error("Reconcile = nil, want the transient apply error returned so the pass is retried")
+			}
+			if deleted {
+				t.Error("the live bundle was deleted over a transient failure; its rules stopped evaluating")
+			}
+			for _, w := range st.snapshot() {
+				if w.ID != "id-1" {
+					continue
+				}
+				if w.Status != store.AlertSyncStatusError {
+					t.Errorf("id-1 = %q, want error", w.Status)
+				}
+				if strings.Contains(w.Message, "refused by the cluster") {
+					t.Errorf("id-1 message blames the rule's content for a transient failure: %s", w.Message)
+				}
+			}
+		})
+	}
+}
+
+// A probe that fails transiently proved nothing about its rule, so the pass must not delete the
+// live bundle as if every suspect had been refused; a webhook denial (400) still counts as one.
+func TestQuarantineDeletesOnlyOnContentRefusals(t *testing.T) {
+	for name, tc := range map[string]struct {
+		probeErr   error
+		wantDelete bool
+	}{
+		"probe hit a transient failure": {
+			probeErr:   apierrors.NewInternalError(errors.New(`failed calling webhook "prometheusrulemutate.monitoring.coreos.com": context deadline exceeded`)),
+			wantDelete: false,
+		},
+		"probe denied by the admission webhook": {
+			probeErr: apierrors.NewBadRequest(`admission webhook "prometheusrulevalidate.monitoring.coreos.com" ` +
+				`denied the request: Rules are not valid`),
+			wantDelete: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			c := newAppliableFake(t, renderedBundle(t, "old-1"))
+			st := &fakeStore{rules: []store.AlertRule{row("new-1", "Bad")}}
+			r := newReconciler(t, c, st)
+
+			var patches int
+			c.PrependReactor("patch", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				patches++
+				if patches == 1 {
+					return true, nil, apierrors.NewInvalid(
+						schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+				}
+				return true, nil, tc.probeErr
+			})
+			deleted := false
+			c.PrependReactor("delete", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				deleted = true
+				return false, nil, nil
+			})
+
+			_ = r.Reconcile(ctx)
+
+			if deleted != tc.wantDelete {
+				t.Errorf("bundle deleted = %v, want %v", deleted, tc.wantDelete)
+			}
+		})
+	}
+}
+
+// A rule edited while a pass is applying keeps 'unsynced': the pass rendered the old version, so
+// writing 'synced' over the edit would report an expression the cluster has never seen.
+func TestReconcileLeavesARuleEditedMidPassUnsynced(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One"), row("id-2", "Two")}}
+	for i := range st.rules {
+		st.rules[i].UpdatedAt = frozen.Add(-time.Hour)
+	}
+	// The edit commits between the pass's read and its status write-back.
+	c.PrependReactor("patch", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		st.edit("id-1", frozen.Add(-time.Minute))
+		return false, nil, nil
+	})
+	r := newReconciler(t, c, st)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := st.statusOf("id-1"); got != store.AlertSyncStatusUnsynced {
+		t.Errorf("rule edited mid-pass has status %q, want %q until a pass applies the edit", got, store.AlertSyncStatusUnsynced)
+	}
+	if got := st.statusOf("id-2"); got != store.AlertSyncStatusSynced {
+		t.Errorf("untouched rule has status %q, want %q", got, store.AlertSyncStatusSynced)
+	}
+}
+
+/*
+console.alerting.bundleName is plain config and can name a PrometheusRule the console did not create
+(the chart's own rules, or kube-prometheus-stack's). The reconciler writes or deletes only an object
+carrying its own managed-by label, with or without rules to deploy.
+*/
+func TestReconcileLeavesAPrometheusRuleItDoesNotOwnAlone(t *testing.T) {
+	foreign := func() *unstructured.Unstructured {
+		return foreignObject(testBundleName, map[string]any{alerting.ManagedByLabel: "Helm"})
+	}
+	assertUntouched := func(t *testing.T, c *dynamicfake.FakeDynamicClient) {
+		t.Helper()
+		live, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("the foreign PrometheusRule is gone: %v", err)
+		}
+		if got := live.GetLabels()[alerting.ManagedByLabel]; got != "Helm" {
+			t.Errorf("managed-by = %q, want Helm: the console wrote over an object it does not own", got)
+		}
+		if groups, rules := countGroups(live); groups != 2 || rules != 3 {
+			t.Errorf("foreign object now has %d groups / %d rules, want 2 / 3", groups, rules)
+		}
+	}
+
+	t.Run("no enabled rules does not delete it", func(t *testing.T) {
+		c := newAppliableFake(t, foreign())
+		r := newReconciler(t, c, &fakeStore{})
+		if err := r.Reconcile(context.Background()); err == nil {
+			t.Error("a bundle name that collides with a foreign object must be reported")
+		}
+		assertUntouched(t, c)
+	})
+
+	t.Run("enabled rules are not applied over it", func(t *testing.T) {
+		c := newAppliableFake(t, foreign())
+		st := &fakeStore{rules: []store.AlertRule{row("id-1", "One")}}
+		r := newReconciler(t, c, st)
+		if err := r.Reconcile(context.Background()); err == nil {
+			t.Error("a bundle name that collides with a foreign object must be reported")
+		}
+		assertUntouched(t, c)
+		w, _ := writeFor(st.snapshot(), "id-1")
+		if w.Status != store.AlertSyncStatusError || !strings.HasPrefix(w.Message, CauseOther+":") ||
+			!strings.Contains(w.Message, "bundleName") {
+			t.Errorf("status = %q %q, want an error that names the collision and bundleName", w.Status, w.Message)
+		}
+	})
+
+	t.Run("its own bundle is still managed", func(t *testing.T) {
+		c := newAppliableFake(t, bundleObject(t, "vector(1)"))
+		r := newReconciler(t, c, &fakeStore{})
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if _, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("the console's own empty bundle was not deleted: %v", err)
+		}
+	})
+}
+
+/*
+Two console replicas take the lock in turn, and lastApplied is per process. Replica A applied {id-1};
+replica B then applied id-1 plus nine good rules. When a rule the cluster refuses arrives on A's pass,
+A's quarantine fell back to its own stale set: all nine good rules became suspects, the fallback
+removed them from the live bundle and only quarantineProbeLimit of them were probed back, so a good
+rule was reported refused and undeployed. The live bundle is the last set the cluster accepted,
+whoever wrote it, so every pass that reads it takes its baseline from it.
+*/
+func TestReconcileQuarantineUsesTheLiveBundleAnotherReplicaWrote(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One")}}
+	a := newReconciler(t, c, st)
+	b := newReconciler(t, c, st)
+	ctx := context.Background()
+	if err := a.Reconcile(ctx); err != nil {
+		t.Fatalf("A pass 1: %v", err)
+	}
+	st.mu.Lock()
+	for i := 1; i <= quarantineProbeLimit+1; i++ {
+		st.rules = append(st.rules, row(fmt.Sprintf("g%d", i), fmt.Sprintf("Good%d", i)))
+	}
+	st.mu.Unlock()
+	if err := b.Reconcile(ctx); err != nil {
+		t.Fatalf("B pass: %v", err)
+	}
+
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if p, ok := action.(k8stesting.PatchAction); ok && strings.Contains(string(p.GetPatch()), "Bad") {
+			return true, nil, apierrors.NewInvalid(schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+	st.mu.Lock()
+	st.rules = append(st.rules, row("id-bad", "Bad"))
+	st.mu.Unlock()
+	st.reset()
+	_ = a.Reconcile(ctx)
+
+	for _, w := range st.snapshot() {
+		if (w.Status == store.AlertSyncStatusError) != (w.ID == "id-bad") {
+			t.Errorf("%s status = %q (%.80s); only id-bad should be refused", w.ID, w.Status, w.Message)
+		}
+	}
+	live, err := c.Resource(GVR).Namespace(testNamespace).Get(ctx, testBundleName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	ids := live.GetAnnotations()[alerting.RuleIDsAnnotation]
+	for i := 1; i <= quarantineProbeLimit+1; i++ {
+		if !slices.Contains(strings.Split(ids, ","), fmt.Sprintf("g%d", i)) {
+			t.Errorf("g%d is missing from the live bundle %q", i, ids)
+		}
+	}
+}
+
+// An import copies only the alerting entries, so a confirmation that promises "creates N rules" needs
+// that number, not the total: foreignObject holds 2 alerting entries and 1 recording entry.
+func TestListForeignCountsTheAlertingRulesAnImportCopies(t *testing.T) {
+	c := newAppliableFake(t, foreignObject("mixed", nil))
+	client, _ := NewClient(c, testNamespace)
+	got, err := client.ListForeign(context.Background())
+	if err != nil {
+		t.Fatalf("ListForeign: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListForeign = %+v, want one object", got)
+	}
+	if got[0].Rules != 3 || got[0].AlertRules != 2 {
+		t.Errorf("counts = %d rules / %d alerting, want 3 / 2", got[0].Rules, got[0].AlertRules)
 	}
 }

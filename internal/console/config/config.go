@@ -28,27 +28,23 @@ const OIDCCallbackPath = "/api/v1/auth/oidc/callback"
 // anonymous, local, header, or oidc (SECURITY.md §10.1).
 type Config struct {
 	HTTPPort int `yaml:"httpPort"`
-	/* MetricsPort carries /metrics and the health endpoints on a listener of their OWN.
-
-	   httpPort serves the whole Console API and the SPA. /metrics used to ride there too, which
-	   meant a NetworkPolicy rule admitting a scraper admitted it to the API as well: the rule cannot
-	   name a single pod (a scraper is whatever the operator runs), so on a real cluster the
-	   monitoring namespace also holds Grafana, node-exporter, kube-state-metrics and the operator,
-	   and every one of them landed inside whatever console.networkPolicy.ingressFrom was narrowed
-	   to. Letting a scraper in and letting a caller reach the API are two different decisions, and
-	   two ports is the only shape a NetworkPolicy can express. The agent and controller made the
-	   same split -- see internal/metrics/listener.go, which this reuses. */
+	// MetricsPort carries /metrics and the health endpoints on a listener of their own, so a
+	// NetworkPolicy can admit a scraper without admitting it to the API on httpPort
+	// (internal/metrics/listener.go, as the agent and controller do).
 	MetricsPort   int        `yaml:"metricsPort"`
 	LogLevel      string     `yaml:"logLevel"`
 	LogFormat     string     `yaml:"logFormat"`
 	MetricsPrefix string     `yaml:"metricsPrefix"`
 	Auth          AuthConfig `yaml:"auth"`
+	// ClientAddress decides where a request's client address comes from; see ForwardingProxyCIDRs.
+	ClientAddress ClientAddressConfig `yaml:"clientAddress"`
 
 	Controller ControllerConfig `yaml:"controller"`
 	Prometheus PrometheusConfig `yaml:"prometheus"`
 	Redis      RedisConfig      `yaml:"redis"`
 	Database   DatabaseConfig   `yaml:"database"`
 	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
+	WebSocket  WebSocketConfig  `yaml:"websocket"`
 	Scheduler  SchedulerConfig  `yaml:"scheduler"`
 	Sweeper    SweeperConfig    `yaml:"sweeper"`
 	MTR        MTRConfig        `yaml:"mtr"`
@@ -56,6 +52,27 @@ type Config struct {
 	KubernetesContext KubernetesContextConfig `yaml:"kubernetesContext"`
 	Webhooks          WebhooksConfig          `yaml:"webhooks"`
 	Alerting          AlertingConfig          `yaml:"alerting"`
+}
+
+// ClientAddressConfig names the proxies whose X-Forwarded-For the console believes for a request's
+// client address: the per-address rate limits, the websocket address cap and the audit log's
+// remoteAddr. It never authenticates anyone; header mode trusts identity headers only from
+// auth.header.trustedProxyCIDRs.
+type ClientAddressConfig struct {
+	TrustedProxyCIDRs []string `yaml:"trustedProxyCIDRs"`
+}
+
+// ForwardingProxyCIDRs is the list the client address is read through: clientAddress.trustedProxyCIDRs,
+// or auth.header.trustedProxyCIDRs while that is empty, which is what configs written before the split
+// rely on.
+func (c *Config) ForwardingProxyCIDRs() []string {
+	if c == nil {
+		return nil
+	}
+	if len(c.ClientAddress.TrustedProxyCIDRs) > 0 {
+		return c.ClientAddress.TrustedProxyCIDRs
+	}
+	return c.Auth.Header.TrustedProxyCIDRs
 }
 
 // WebhooksConfig carries the ONE thing the outbound webhook dispatcher cannot derive for itself.
@@ -382,15 +399,15 @@ func (s *SweeperConfig) validate() error {
 }
 
 // RateLimitConfig configures the console's fixed-window request limits
-// (internal/console/httpapi/ratelimit.go); that is weaker than configured.
+// (internal/console/httpapi/ratelimit.go). They fail open while the KV store is unreachable.
 type RateLimitConfig struct {
 	// RunsPerMinute caps POST /api/v1/runs per SUBJECT per minute (default
 	// 10): a diagnostics run fans out to up to 400 agent pairs, so an
 	// unbounded caller is a controller-load amplifier.
 	RunsPerMinute int `yaml:"runsPerMinute"`
-	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME per minute (default 5). The per-SOURCE
-	// IP budget is counted independently and is loginIPBurstFactor times this, because behind an
-	// Ingress one address is the whole cluster -- see handleAuthLogin for the reasoning.
+	// LoginPerMinute caps POST /api/v1/auth/login and POST /api/v1/auth/password per USERNAME per
+	// minute (default 5). Login and the OIDC start and callback are also counted per source address,
+	// at loginIPBurstFactor times this, because behind an Ingress one address is the whole cluster.
 	LoginPerMinute int `yaml:"loginPerMinute"`
 	/* PromQLPerMinute caps the PromQL proxy per SUBJECT per minute (default 60).
 	   /api/v1/promql/query[_range] forwards arbitrary PromQL to the cluster's Prometheus, and
@@ -412,6 +429,37 @@ func (rl *RateLimitConfig) validate() error {
 	}
 	if rl.PromQLPerMinute < 0 {
 		return fmt.Errorf("rateLimit.promqlPerMinute must be >= 0 (0 disables the limit), got %d", rl.PromQLPerMinute)
+	}
+	return nil
+}
+
+// WebSocketConfig caps the open /ws connections of one console replica; 0 turns a cap off. Every
+// socket costs two goroutines and a send queue, so without a cap one client could open sockets until
+// the pod ran out of memory.
+type WebSocketConfig struct {
+	// MaxConnections caps every socket on the replica (default 1024).
+	MaxConnections int `yaml:"maxConnections"`
+	// MaxConnectionsPerAddress caps the sockets from one client address (default 256). Behind a proxy
+	// the address is its own unless clientAddress.trustedProxyCIDRs (or, while that is empty,
+	// auth.header.trustedProxyCIDRs) names it.
+	MaxConnectionsPerAddress int `yaml:"maxConnectionsPerAddress"`
+	// MaxConnectionsPerSubject caps the sockets of one user or token (default 32); anonymous callers
+	// are held by the per-address cap.
+	MaxConnectionsPerSubject int `yaml:"maxConnectionsPerSubject"`
+}
+
+func (w *WebSocketConfig) validate() error {
+	for _, f := range []struct {
+		key string
+		v   int
+	}{
+		{"websocket.maxConnections", w.MaxConnections},
+		{"websocket.maxConnectionsPerAddress", w.MaxConnectionsPerAddress},
+		{"websocket.maxConnectionsPerSubject", w.MaxConnectionsPerSubject},
+	} {
+		if f.v < 0 {
+			return fmt.Errorf("%s must be >= 0 (0 disables the cap), got %d", f.key, f.v)
+		}
 	}
 	return nil
 }
@@ -596,6 +644,7 @@ func defaults() *Config {
 		Redis:      RedisConfig{DialTimeout: 5 * time.Second},
 		Database:   DatabaseConfig{MaxConns: 10, ConnectTimeout: 10 * time.Second, MigrateOnStart: true, RetentionDays: 90},
 		RateLimit:  RateLimitConfig{RunsPerMinute: 10, LoginPerMinute: 5, PromQLPerMinute: 60},
+		WebSocket:  WebSocketConfig{MaxConnections: 1024, MaxConnectionsPerAddress: 256, MaxConnectionsPerSubject: 32},
 		// enabled stays false (see SchedulerConfig); the interval is still
 		// defaulted so switching the loop on is a one-line change.
 		Scheduler: SchedulerConfig{TickInterval: 5 * time.Second},
@@ -700,6 +749,17 @@ func (c *Config) validateAuth() error {
 		return fmt.Errorf("auth.mode must be one of anonymous|local|header|oidc, got %q", c.Auth.Mode)
 	}
 
+	// The client address is read through these lists in every mode, and an entry that does not parse
+	// would be dropped without a word.
+	if c.Auth.Mode != "header" {
+		if err := validateTrustedProxyCIDRs("auth.header.trustedProxyCIDRs", c.Auth.Header.TrustedProxyCIDRs); err != nil {
+			return err
+		}
+	}
+	if err := validateTrustedProxyCIDRs("clientAddress.trustedProxyCIDRs", c.ClientAddress.TrustedProxyCIDRs); err != nil {
+		return err
+	}
+
 	if c.Auth.DefaultRole != "" && !authz.IsBuiltinRole(c.Auth.DefaultRole) {
 		return fmt.Errorf("auth.defaultRole must be a known built-in role (viewer|operator|alert-editor|admin), got %q",
 			c.Auth.DefaultRole)
@@ -748,9 +808,13 @@ func (h *HeaderConfig) validate() error {
 		return errors.New("auth.header.trustedProxyCIDRs must be non-empty in header mode " +
 			"(SECURITY.md §10.1: explicit opt-in)")
 	}
-	for _, cidr := range h.TrustedProxyCIDRs {
+	return validateTrustedProxyCIDRs("auth.header.trustedProxyCIDRs", h.TrustedProxyCIDRs)
+}
+
+func validateTrustedProxyCIDRs(field string, cidrs []string) error {
+	for _, cidr := range cidrs {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("auth.header.trustedProxyCIDRs entry %q is not a valid CIDR: %w", cidr, err)
+			return fmt.Errorf("%s entry %q is not a valid CIDR: %w", field, cidr, err)
 		}
 	}
 	return nil
@@ -862,6 +926,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.RateLimit.validate(); err != nil {
+		return err
+	}
+	if err := c.WebSocket.validate(); err != nil {
 		return err
 	}
 	if err := c.Scheduler.validate(); err != nil {

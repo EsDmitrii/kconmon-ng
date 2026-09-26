@@ -30,7 +30,7 @@ func TestWSTopicPermissionMirrorsTheRESTSplit(t *testing.T) {
 		ws.MatrixTopic("udp"):   authz.PermMatrixRead,
 		ws.MatrixTopic("icmp"):  authz.PermMatrixRead,
 		"matrix:something-new":  authz.PermMatrixRead,
-		ws.RunTopic("run-1234"): "",
+		ws.RunTopic("run-1234"): authz.PermRunsRead,
 	}
 	for topic, want := range tests {
 		if got := wsTopicPermission(topic); got != want {
@@ -72,7 +72,7 @@ func TestWSTopologyReadAloneMaySubscribeToTopology(t *testing.T) {
 	if err := authorize(ws.TopicLive); err == nil {
 		t.Error("a subject without events:read was given the live feed")
 	}
-	// run:{id} is covered by the upgrade gate itself and by nothing narrower.
+	// run:{id} asks runs:read, the same question GET /api/v1/runs/{id} asks.
 	if err := authorize(ws.RunTopic("r1")); err != nil {
 		t.Errorf("runs:read was refused its own run topic: %v", err)
 	}

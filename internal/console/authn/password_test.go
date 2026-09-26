@@ -3,6 +3,7 @@ package authn_test
 import (
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/argon2"
@@ -41,6 +42,35 @@ func TestHashPasswordSaltsDifferently(t *testing.T) {
 
 	if phc1 == phc2 {
 		t.Fatalf("hashing the same password twice must produce different PHC strings (random salt), got identical: %q", phc1)
+	}
+}
+
+func TestPasswordStampComesFromTheSaltNotTheKey(t *testing.T) {
+	t.Parallel()
+
+	phc1, err := authn.HashPassword("same password")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	phc2, err := authn.HashPassword("same password")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if authn.PasswordStamp(phc1) == authn.PasswordStamp(phc2) {
+		t.Fatalf("every new hash must get a new stamp, both got %q", authn.PasswordStamp(phc1))
+	}
+
+	// Same salt, different derived key: the stamp must not move, i.e. nothing of the key is in it.
+	otherKey := phc1[:strings.LastIndex(phc1, "$")+1] + base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	if got, want := authn.PasswordStamp(otherKey), authn.PasswordStamp(phc1); got != want {
+		t.Fatalf("stamp depends on the derived key: %q vs %q", got, want)
+	}
+
+	// Never empty: an empty stamp is a pre-2.5.0 session that is never checked.
+	for _, bad := range []string{"", "not-a-phc", "$argon2id$v=19$m=65536,t=3,p=2$$"} {
+		if authn.PasswordStamp(bad) == "" {
+			t.Fatalf("PasswordStamp(%q) is empty", bad)
+		}
 	}
 }
 
@@ -115,7 +145,7 @@ func TestVerifyPasswordHonorsParametersEncodedInHash(t *testing.T) {
 	t.Parallel()
 
 	const (
-		memory      = 8 * 1024 // 8 MiB -- deliberately far from HashPassword's 64 MiB default
+		memory      = 8 * 1024 // 8 MiB -- deliberately far from HashPassword's 19 MiB default
 		iterations  = 1
 		parallelism = 1
 		keyLen      = 32

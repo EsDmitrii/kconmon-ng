@@ -118,14 +118,23 @@ func (c *Client) Get(ctx context.Context, name string) (*unstructured.Unstructur
 	return c.ri.Get(ctx, name, metav1.GetOptions{})
 }
 
-// Delete removes one object by name; an object that is already gone is success, because that is the
-// state the caller asked for.
-func (c *Client) Delete(ctx context.Context, name string) error {
-	err := c.ri.Delete(ctx, name, metav1.DeleteOptions{})
+// DeleteExact removes obj only while it is still the object the caller read: same UID, same
+// resourceVersion. An object that is already gone is success.
+func (c *Client) DeleteExact(ctx context.Context, obj *unstructured.Unstructured) error {
+	uid, rv := obj.GetUID(), obj.GetResourceVersion()
+	err := c.ri.Delete(ctx, obj.GetName(), metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+	})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	return err
+}
+
+// ownedByConsole reports whether obj carries the label the console's render stamps on its bundle;
+// ListForeign draws the same line.
+func ownedByConsole(obj *unstructured.Unstructured) bool {
+	return obj.GetLabels()[alerting.ManagedByLabel] == alerting.ManagedByValue
 }
 
 // ForeignRule is one PrometheusRule in the namespace that the console does NOT own; it is listed
@@ -139,6 +148,9 @@ type ForeignRule struct {
 	// and recording alike, because a recording rule is still something an
 	// import would have to carry.
 	Rules int
+	// AlertRules is how many of those entries are alerting rules, the ones an import copies; the
+	// recording ones it skips.
+	AlertRules int
 	// ManagedBy is the value of app.kubernetes.io/managed-by, or "" when the object carries no such
 	// label.
 	ManagedBy string
@@ -158,17 +170,17 @@ func (c *Client) ListForeign(ctx context.Context) ([]ForeignRule, error) {
 	out := make([]ForeignRule, 0, len(list.Items))
 	for i := range list.Items {
 		item := &list.Items[i]
-		managedBy := item.GetLabels()[alerting.ManagedByLabel]
-		if managedBy == alerting.ManagedByValue {
+		if ownedByConsole(item) {
 			continue
 		}
 		groups, rules := countGroups(item)
 		out = append(out, ForeignRule{
-			Name:      item.GetName(),
-			Groups:    groups,
-			Rules:     rules,
-			ManagedBy: managedBy,
-			Object:    item.DeepCopy(),
+			Name:       item.GetName(),
+			Groups:     groups,
+			Rules:      rules,
+			AlertRules: countAlertingRules(item),
+			ManagedBy:  item.GetLabels()[alerting.ManagedByLabel],
+			Object:     item.DeepCopy(),
 		})
 	}
 	slices.SortFunc(out, func(a, b ForeignRule) int { return strings.Compare(a.Name, b.Name) })
@@ -195,6 +207,36 @@ func countGroups(obj *unstructured.Unstructured) (groups, rules int) {
 		rules += len(entries)
 	}
 	return groups, rules
+}
+
+// countAlertingRules counts the entries an import would try to copy: a non-empty alert and no
+// record, the same split httpapi's adoptRuleEntry makes.
+func countAlertingRules(obj *unstructured.Unstructured) int {
+	raw, found, err := unstructured.NestedSlice(obj.Object, "spec", "groups")
+	if !found || err != nil {
+		return 0
+	}
+	n := 0
+	for _, g := range raw {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		entries, _ := gm["rules"].([]any)
+		for _, e := range entries {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if record, _ := em["record"].(string); strings.TrimSpace(record) != "" {
+				continue
+			}
+			if alert, _ := em["alert"].(string); strings.TrimSpace(alert) != "" {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +349,14 @@ func Classify(err error) string {
 	}
 }
 
+// isContentRejection reports whether err is the cluster refusing the object's CONTENT: a 400 or 422,
+// which is also how an admission webhook's denial arrives. A timeout, 429, 5xx or an unreachable
+// webhook says nothing about any rule, so it must not send one to quarantine.
+func isContentRejection(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) ||
+		strings.Contains(err.Error(), "denied the request")
+}
+
 // causeMessage builds the operator-facing sync message: the cause class first
 // so it can be branched on, then a sentence naming what to fix, then the API's
 // own words. Bounded, because the column is.
@@ -335,9 +385,11 @@ type Store interface {
 	// ListAlertRules(ctx, true) is the only call made: the reconciler renders
 	// ENABLED rules and nothing else.
 	ListAlertRules(ctx context.Context, enabledOnly bool) ([]store.AlertRule, error)
-	UpdateAlertRuleSyncStatus(
-		ctx context.Context, id, status, message string, lastSyncedAt *time.Time,
-	) (store.AlertRule, error)
+	// UpdateAlertRuleSyncStatusIfUnchanged writes an outcome only onto the version the pass rendered,
+	// so a rule edited meanwhile keeps its 'unsynced'.
+	UpdateAlertRuleSyncStatusIfUnchanged(
+		ctx context.Context, id string, updatedAt time.Time, status, message string, lastSyncedAt *time.Time,
+	) (bool, error)
 }
 
 var _ Store = (*store.DB)(nil)
@@ -512,24 +564,46 @@ func (r *Reconciler) reconcileLocked(ctx context.Context) error {
 		return fmt.Errorf("list enabled alert rules: %w", err)
 	}
 
-	rules := make([]alerting.Rule, 0, len(rows))
-	ids := make([]string, 0, len(rows))
+	// Read the live bundle before deciding anything: its entries carry their rule ids
+	// (alerting.RuleIDLabel), so it is the last rule set the cluster accepted, whichever process
+	// applied it. Seeding lastApplied from it on every pass lets the alert-name tie-break and the
+	// quarantine survive a restart and see what the other replica applied since.
+	live, gerr := r.client.Get(ctx, r.bundleName)
+	if gerr == nil && ownedByConsole(live) {
+		if seeded := ruleFingerprints(live); len(seeded) > 0 {
+			if r.lastApplied == nil {
+				slog.Info("seeded the alert-rule quarantine baseline from the live bundle",
+					"bundle", r.bundleName, "rules", len(seeded))
+			}
+			r.lastApplied = seeded
+		}
+	}
+
+	candidates := make([]renderedRow, 0, len(rows))
+	versions := make(map[string]time.Time, len(rows))
 	for i := range rows {
+		versions[rows[i].ID] = rows[i].UpdatedAt
 		rule, rerr := r.renderable(&rows[i])
 		if rerr != nil {
 			// One unrenderable row must not cost the other rules their sync.
-			r.setStatus(ctx, rows[i].ID, store.AlertSyncStatusError, truncate("render: "+rerr.Error()), nil)
+			r.setStatus(ctx, rows[i].ID, versions, store.AlertSyncStatusError, truncate("render: "+rerr.Error()), nil)
 			continue
 		}
-		rules = append(rules, rule)
-		ids = append(ids, rows[i].ID)
+		candidates = append(candidates, renderedRow{rule: rule, row: &rows[i]})
+	}
+	candidates = r.dropAlertNameCollisions(ctx, candidates, versions)
+	rules := make([]alerting.Rule, 0, len(candidates))
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		rules = append(rules, c.rule)
+		ids = append(ids, c.row.ID)
 	}
 
 	// An empty rule set renders `groups: []`, which the prometheus-operator admission webhook
 	// rejects outright, so the apply would fail forever and the last deleted rule would keep
 	// evaluating. Owning no rules means owning no object; the next non-empty pass recreates it.
 	if len(rules) == 0 {
-		if derr := r.client.Delete(ctx, r.bundleName); derr != nil {
+		if derr := r.deleteIfOwned(ctx, live, gerr); derr != nil {
 			return fmt.Errorf("delete %s %s/%s: %w",
 				alerting.BundleKind, r.client.Namespace(), r.bundleName, derr)
 		}
@@ -538,46 +612,27 @@ func (r *Reconciler) reconcileLocked(ctx context.Context) error {
 
 	desired, err := r.renderer.RenderBundle(rules, r.client.Namespace(), r.bundleName)
 	if err != nil {
-		// A bundle-level failure is a relationship BETWEEN rules (an alert
-		// name collision), so it cannot be attributed to one of them: every
-		// surviving rule is unappliable and every one of them says so.
+		// Alert name collisions are resolved above, so nothing here is attributable to one rule:
+		// every surviving rule is unappliable and every one of them says so.
 		msg := truncate("render bundle: " + err.Error())
 		for _, id := range ids {
-			r.setStatus(ctx, id, store.AlertSyncStatusError, msg, nil)
+			r.setStatus(ctx, id, versions, store.AlertSyncStatusError, msg, nil)
 		}
 		return fmt.Errorf("render bundle: %w", err)
 	}
 
-	// Observe BEFORE re-asserting. This read is the ONLY reason the loop does
-	// a GET at all -- the apply needs no prior state.
 	drift, diff := false, ""
-	live, gerr := r.client.Get(ctx, r.bundleName)
 	switch {
 	case gerr == nil:
-		drift, diff = Compare(desired, live)
-		/* And the quarantine's fallback set is SEEDED from the live object, which is the only thing
-		   that makes the quarantine survive a restart.
-
-		   lastApplied is per-process and nil until this process's own first successful apply. So a
-		   console that starts up with a rule the cluster refuses ALREADY in the table never gets a
-		   successful apply, never populates lastApplied, and the quarantine guard below is therefore
-		   never true — one bad expression froze the whole bundle again, every rule stamped with the
-		   generic "the Kubernetes API rejected the apply", and disabling or deleting a rule answered
-		   2xx while Prometheus went on evaluating the stale set. Reproduced on the stand: after
-		   restarting both console replicas, all ten rules read `error` and a disabled UDPLossHigh was
-		   still firing in Prometheus.
-
-		   The set is not lost, though: the accepted object carries it. RuleIDsAnnotation is the
-		   comma-joined sorted id list of the apply the cluster took (alerting/render.go), written by
-		   the same render that produced it. Reading it back is exactly "the last set that applied",
-		   with no new storage and no new API call — this GET already happens. */
-		if r.lastApplied == nil {
-			if seeded := ruleFingerprints(live); len(seeded) > 0 {
-				r.lastApplied = seeded
-				slog.Info("seeded the alert-rule quarantine baseline from the live bundle",
-					"bundle", r.bundleName, "rules", len(seeded))
+		if !ownedByConsole(live) {
+			ferr := r.foreignBundleError(live)
+			msg := truncate(CauseOther + ": " + ferr.Error())
+			for _, id := range ids {
+				r.setStatus(ctx, id, versions, store.AlertSyncStatusError, msg, nil)
 			}
+			return ferr
 		}
+		drift, diff = Compare(desired, live)
 	case apierrors.IsNotFound(gerr):
 		// Either the object does not exist yet or the CRD does not. Neither is
 		// drift, and the apply below is what tells them apart.
@@ -594,32 +649,20 @@ func (r *Reconciler) reconcileLocked(ctx context.Context) error {
 
 	if _, aerr := r.client.Apply(ctx, desired); aerr != nil {
 		cause := Classify(aerr)
-		/* A CONTENT rejection is one rule's fault, and taking the whole bundle down for it is the
-		   worst outcome available.
-
-		   Nothing validates PromQL on the way in — renderRaw returns the operator's string verbatim
-		   and this module has no parser — so a kind='raw' rule with an unparseable expression is
-		   accepted 201 and lands in the bundle. The admission webhook then rejects the OBJECT, so no
-		   rule reaches the cluster: every id was stamped `error` with a message naming none of them,
-		   and the console-managed alert set froze at its last good state. New rules never took
-		   effect, edits never took effect, and — the sharp one — deleting or disabling a rule
-		   answered 204 in the API and in the UI while Prometheus went on evaluating and firing it.
-
-		   So the bad rule is quarantined instead: retry with the last set that DID apply, which by
-		   construction excludes whatever was added or changed since. The quarantined rules carry the
-		   error, the rest go back to reporting their real state, and an operator sees exactly which
-		   rules the cluster refused.
-
-		   CRD-missing and forbidden are NOT content rejections — the cluster refused the write
-		   itself, and no subset would apply either — so those keep taking every rule with them. */
-		if cause == CauseOther && r.lastApplied != nil {
-			if retried, qerr := r.retryWithLastApplied(ctx, rules, ids, ruleFingerprints(desired), aerr); retried {
+		/* A content rejection (the admission webhook refusing a raw rule's unparseable PromQL, which
+		   nothing validates on the way in) is one rule's fault. Failing the whole object would freeze
+		   the alert set: new rules and edits would never deploy, and a disabled or deleted rule would
+		   go on firing. So whatever was added or changed since the last accepted set is quarantined
+		   and the rest re-applied. CRD-missing and forbidden refuse the write itself, no subset would
+		   apply, so those keep failing every rule. */
+		if cause == CauseOther && isContentRejection(aerr) && r.lastApplied != nil {
+			if retried, qerr := r.retryWithLastApplied(ctx, rules, ids, versions, ruleFingerprints(desired), aerr); retried {
 				return qerr
 			}
 		}
 		msg := causeMessage(cause, r.client.Namespace(), aerr)
 		for _, id := range ids {
-			r.setStatus(ctx, id, store.AlertSyncStatusError, msg, nil)
+			r.setStatus(ctx, id, versions, store.AlertSyncStatusError, msg, nil)
 		}
 		return fmt.Errorf("apply %s %s/%s: %w", alerting.BundleKind, r.client.Namespace(), r.bundleName, aerr)
 	}
@@ -631,7 +674,7 @@ func (r *Reconciler) reconcileLocked(ctx context.Context) error {
 		status, message = store.AlertSyncStatusDrift, truncate(diff)
 	}
 	for _, id := range ids {
-		r.setStatus(ctx, id, status, message, &now)
+		r.setStatus(ctx, id, versions, status, message, &now)
 	}
 	// The CONTENT that reached the cluster, remembered so a later content rejection has something to
 	// fall back to; see the quarantine path above.
@@ -639,14 +682,67 @@ func (r *Reconciler) reconcileLocked(ctx context.Context) error {
 	return nil
 }
 
+// renderedRow is one enabled row that renders on its own.
+type renderedRow struct {
+	rule alerting.Rule
+	row  *store.AlertRule
+}
+
+/*
+dropAlertNameCollisions keeps one rule per Prometheus alert name: 'pair-loss' and 'PairLoss' both
+sanitize to PairLoss, and a bundle holding both is refused as a whole. The store refuses a new clash
+at write; this is the backstop for rows an older version let in and for writes that raced past that
+check. The rule deployed under the name keeps it, else the least recently updated one, so the rule
+that was created, renamed or re-enabled into the clash is the one refused, and every other rule still
+reaches the cluster.
+*/
+func (r *Reconciler) dropAlertNameCollisions(ctx context.Context, rows []renderedRow, versions map[string]time.Time) []renderedRow {
+	alerts := make(map[string]string, len(rows))
+	for _, c := range rows {
+		alerts[c.row.ID], _ = alerting.SanitizeAlertName(c.row.Name) // renderable already proved it
+	}
+	order := slices.Clone(rows)
+	slices.SortStableFunc(order, func(a, b renderedRow) int {
+		_, aDeployed := r.lastApplied[a.row.ID]
+		_, bDeployed := r.lastApplied[b.row.ID]
+		switch {
+		case aDeployed != bDeployed:
+			if aDeployed {
+				return -1
+			}
+			return 1
+		case !a.row.UpdatedAt.Equal(b.row.UpdatedAt):
+			return a.row.UpdatedAt.Compare(b.row.UpdatedAt)
+		case !a.row.CreatedAt.Equal(b.row.CreatedAt):
+			return a.row.CreatedAt.Compare(b.row.CreatedAt)
+		}
+		return strings.Compare(a.row.ID, b.row.ID)
+	})
+	holder := make(map[string]string, len(rows)) // alert name -> rule name holding it
+	refused := make(map[string]bool)
+	for _, c := range order {
+		alert := alerts[c.row.ID]
+		if prev, taken := holder[alert]; taken {
+			refused[c.row.ID] = true
+			r.setStatus(ctx, c.row.ID, versions, store.AlertSyncStatusError, truncate(fmt.Sprintf(
+				"alert name collision: %q and %q both sanitize to %q; rename this rule", prev, c.row.Name, alert)), nil)
+			continue
+		}
+		holder[alert] = c.row.Name
+	}
+	if len(refused) == 0 {
+		return rows
+	}
+	return slices.DeleteFunc(slices.Clone(rows), func(c renderedRow) bool { return refused[c.row.ID] })
+}
+
 /*
 ruleFingerprints maps rule id -> hash of that rule's RENDERED entry in a bundle object.
 
 alerting's renderer stamps RuleIDLabel on every entry it emits, so an object the CLUSTER holds can be
 read back rule by rule: for the live bundle that yields, by construction, the exact content of the
-last apply that succeeded — including one made by a previous process — which is what the quarantine
-needs to tell an unchanged rule from an edited one. Reading it costs nothing: reconcileLocked already
-fetched this object to observe drift.
+last apply that succeeded, including one made by a previous process, which is what the quarantine
+needs to tell an unchanged rule from an edited one. reconcileLocked reads the live object anyway.
 
 Hashing the whole entry (expr, for, labels, annotations) rather than the id alone is the point: an
 id set cannot see an edit, and an edit is the ordinary way a bundle gets a bad expression.
@@ -705,15 +801,15 @@ The message on a quarantined rule says the cluster refused it and carries the AP
 for an unparseable expression is the parse error itself — the sentence the operator needs.
 */
 func (r *Reconciler) retryWithLastApplied(
-	ctx context.Context, rules []alerting.Rule, ids []string, desiredFP map[string]string, cause error,
+	ctx context.Context, rules []alerting.Rule, ids []string, versions map[string]time.Time,
+	desiredFP map[string]string, cause error,
 ) (retried bool, err error) {
 	keep := make([]alerting.Rule, 0, len(ids))
 	keepIDs := make([]string, 0, len(ids))
 	var quarantined []string
 	for i, id := range ids {
-		/* Unchanged CONTENT, not merely a familiar id. A rule an operator has just edited keeps its
-		   id, so an id-only check put the broken new expression straight back into the "known good"
-		   retry -- an identical object, refused identically, nothing quarantined. */
+		// Unchanged content, not merely a familiar id: an edited rule keeps its id, and a broken edit
+		// has to be a suspect.
 		applied, known := r.lastApplied[id]
 		if known && desiredFP[id] == applied {
 			keep = append(keep, rules[i])
@@ -731,17 +827,11 @@ func (r *Reconciler) retryWithLastApplied(
 	msg := truncate("this rule was refused by the cluster and is not deployed; the rest of the " +
 		"bundle was re-applied without it: " + cause.Error())
 	for _, id := range quarantined {
-		r.setStatus(ctx, id, store.AlertSyncStatusError, msg, nil)
+		r.setStatus(ctx, id, versions, store.AlertSyncStatusError, msg, nil)
 	}
 
-	/* An EMPTY fallback set is not a reason to skip the probe.
-	   Deleting the bundle here and returning was an absorbing state: every rule had already been
-	   stamped "the cluster refused it" about a cluster that had never been shown it, lastApplied
-	   latched to the empty (non-nil) map, and from then on every pass computed an empty keep again --
-	   so one bad rule in the table made every OTHER rule permanently undeployable, silently. The
-	   probe loop below handles an empty accepted set perfectly well: each suspect is simply offered
-	   on its own. The bundle is deleted at the end, and only when every suspect was offered and every
-	   one refused. */
+	// An empty fallback set still goes through the probe below, which then offers each suspect on
+	// its own; the bundle goes only when every suspect was offered and refused.
 	if len(keep) > 0 {
 		desired, rerr := r.renderer.RenderBundle(keep, r.client.Namespace(), r.bundleName)
 		if rerr != nil {
@@ -751,31 +841,22 @@ func (r *Reconciler) retryWithLastApplied(
 			// The fallback set does not apply either, so the quarantine guessed wrong; every rule says so.
 			m := causeMessage(Classify(aerr), r.client.Namespace(), aerr)
 			for _, id := range keepIDs {
-				r.setStatus(ctx, id, store.AlertSyncStatusError, m, nil)
+				r.setStatus(ctx, id, versions, store.AlertSyncStatusError, m, nil)
 			}
 			return true, fmt.Errorf("apply %s %s/%s after quarantine: %w",
 				alerting.BundleKind, r.client.Namespace(), r.bundleName, aerr)
 		}
 	}
 
-	/* And now find out WHICH of the suspects the cluster actually objects to, one at a time.
-
-	   Without this the quarantine was permanent and indiscriminate: everything not in lastApplied
-	   was excluded, lastApplied was then set to exactly the surviving set, and so every rule created
-	   AFTER the bad one was quarantined with it on the next pass — carrying a message saying the
-	   cluster refused it, which the cluster had never been asked. A rule an operator writes today is
-	   undeployable for as long as an unrelated broken rule sits in the table, with no way to tell the
-	   two apart in the UI.
-
-	   Each suspect is offered on top of the set that just applied. One that goes in is genuinely
-	   fine and joins the accepted set; one that is refused keeps its quarantine, and now the message
-	   is about that rule specifically because that rule is what the cluster was shown. Normally there
-	   is exactly one suspect (the rule just edited); probeLimit bounds a pathological pass, and what
-	   it drops is logged rather than silently held back. */
+	/* Offer each suspect on its own on top of the set that just applied, so a rule stays quarantined
+	   only when the cluster refused that rule, and a rule written after an unrelated broken one still
+	   deploys. There is normally one suspect, the rule just edited; quarantineProbeLimit bounds a
+	   pathological pass, and what it defers is logged. */
 	accepted := keep
 	acceptedIDs := keepIDs
 	stillQuarantined := make([]string, 0, len(quarantined))
 	probes := 0
+	inconclusive := 0
 	for _, id := range quarantined {
 		if probes >= quarantineProbeLimit {
 			stillQuarantined = append(stillQuarantined, id)
@@ -794,14 +875,14 @@ func (r *Reconciler) retryWithLastApplied(
 			continue
 		}
 		if _, aerr := r.client.Apply(ctx, obj); aerr != nil {
-			// This one really is refused. Its status already says so, and it says it accurately now.
+			// Refused; a non-content failure (timeout, 5xx) counts as inconclusive and blocks the
+			// delete below.
 			stillQuarantined = append(stillQuarantined, id)
-			/* Put the last good object back before trying the next suspect -- and ONLY when there is
-			   one to put back. A refused apply leaves the live object exactly as it was, so with an
-			   empty accepted set there is nothing to restore; deleting instead took a healthy live
-			   bundle down over a pass in which the cluster had accepted nothing, and every rule in it
-			   stopped evaluating in Prometheus while the API went on answering 2xx. That is the
-			   failure this whole quarantine exists to prevent, committed by the recovery path. */
+			if !isContentRejection(aerr) {
+				inconclusive++
+			}
+			// Put the last good object back before the next suspect. A refused apply leaves the
+			// live object as it was, so with nothing accepted there is nothing to restore.
 			if len(accepted) > 0 {
 				if good, gerr := r.renderer.RenderBundle(accepted, r.client.Namespace(), r.bundleName); gerr == nil {
 					_, _ = r.client.Apply(ctx, good)
@@ -823,13 +904,10 @@ func (r *Reconciler) retryWithLastApplied(
 
 	now := r.now()
 	for _, id := range acceptedIDs {
-		r.setStatus(ctx, id, store.AlertSyncStatusSynced, "", &now)
+		r.setStatus(ctx, id, versions, store.AlertSyncStatusSynced, "", &now)
 	}
-	/* lastApplied moves only when the cluster actually took something.
-	   Latching it to an empty non-nil map after a pass that accepted nothing made the state
-	   absorbing: every later pass then computed an empty fallback again and re-ran the whole probe
-	   from scratch, and the delete below took the live bundle with it. A pass that proved nothing is
-	   a pass that should change nothing. */
+	// lastApplied moves only when the cluster took something; a pass that accepted nothing keeps
+	// the baseline it started from.
 	if len(acceptedIDs) > 0 {
 		r.lastApplied = make(map[string]string, len(acceptedIDs))
 		for _, id := range acceptedIDs {
@@ -837,25 +915,48 @@ func (r *Reconciler) retryWithLastApplied(
 		}
 	}
 
-	/* Nothing accepted, and every rule was actually OFFERED: own no rules, own no object.
-	   Two mistakes have been made here in a row, in opposite directions. Deleting whenever the
-	   accepted set was empty took a healthy live bundle down over a pass where the probe loop had not
-	   run -- a refused apply leaves the live object untouched, so there was nothing to restore.
-	   Removing the delete altogether then went the other way: an operator who disabled every healthy
-	   rule while one broken rule sat in the table left the LAST accepted bundle frozen in the cluster
-	   forever, so Prometheus went on evaluating and firing rules the console reported as disabled.
-	   The condition that separates them is whether the cluster was really shown each rule: only a
-	   pass that probed every suspect and had all of them refused has proved the object should go. A
-	   pass that deferred probes (the budget, or a rule that vanished mid-pass) has proved nothing and
+	/* Own no object only when every suspect was offered and refused on content: a bundle left in
+	   place would keep firing rules the console reports as disabled. A pass that deferred a probe
+	   (the budget, or a rule that vanished mid-pass) or saw a transient failure proved nothing and
 	   changes nothing. */
-	if len(acceptedIDs) == 0 && probes == len(quarantined) && len(quarantined) > 0 {
-		if derr := r.client.Delete(ctx, r.bundleName); derr != nil {
+	if len(acceptedIDs) == 0 && probes == len(quarantined) && inconclusive == 0 && len(quarantined) > 0 {
+		if derr := r.deleteOwnedBundle(ctx); derr != nil {
 			return true, fmt.Errorf("delete %s %s/%s after quarantine: %w",
 				alerting.BundleKind, r.client.Namespace(), r.bundleName, derr)
 		}
 		r.lastApplied = nil
 	}
 	return true, nil
+}
+
+/*
+deleteOwnedBundle deletes the bundle only when it is the console's own. The chart's Role scopes
+delete to the bundle name, but that name is plain config and can collide with another object (the
+chart refuses a collision with its own PrometheusRule at render), so ownership is checked here.
+*/
+func (r *Reconciler) deleteOwnedBundle(ctx context.Context) error {
+	live, err := r.client.Get(ctx, r.bundleName)
+	return r.deleteIfOwned(ctx, live, err)
+}
+
+// deleteIfOwned is deleteOwnedBundle over a read the caller already made; readErr is that read's error.
+func (r *Reconciler) deleteIfOwned(ctx context.Context, live *unstructured.Unstructured, readErr error) error {
+	switch {
+	case apierrors.IsNotFound(readErr):
+		return nil
+	case readErr != nil:
+		return fmt.Errorf("read it before deleting: %w", readErr)
+	case !ownedByConsole(live):
+		return r.foreignBundleError(live)
+	}
+	return r.client.DeleteExact(ctx, live)
+}
+
+func (r *Reconciler) foreignBundleError(live *unstructured.Unstructured) error {
+	return fmt.Errorf("%s %s/%s exists and is not the console's (%s=%q), so the console leaves it alone; "+
+		"set console.alerting.bundleName to a name no other %s in the namespace uses",
+		alerting.BundleKind, r.client.Namespace(), r.bundleName,
+		alerting.ManagedByLabel, live.GetLabels()[alerting.ManagedByLabel], alerting.BundleKind)
 }
 
 // quarantineProbeLimit bounds how many refused-rule candidates one pass re-offers to the cluster;
@@ -904,14 +1005,11 @@ func (r *Reconciler) renderable(row *store.AlertRule) (alerting.Rule, error) {
 	return rule, nil
 }
 
-// setStatus records one rule's outcome; a failed write is logged and swallowed on purpose.
-func (r *Reconciler) setStatus(ctx context.Context, id, status, message string, at *time.Time) {
-	if _, err := r.store.UpdateAlertRuleSyncStatus(ctx, id, status, message, at); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// The rule was deleted between the list and this write, which is what deleting a rule
-			// looks like from inside a pass, not a failure.
-			return
-		}
+// setStatus records one rule's outcome against the version of the row the pass read (versions[id]);
+// a rule edited or deleted since is left for the next pass. A failed write is logged and swallowed
+// on purpose.
+func (r *Reconciler) setStatus(ctx context.Context, id string, versions map[string]time.Time, status, message string, at *time.Time) {
+	if _, err := r.store.UpdateAlertRuleSyncStatusIfUnchanged(ctx, id, versions[id], status, message, at); err != nil {
 		if r.logs.allow("status:" + status) {
 			slog.Warn("could not record an alert rule sync outcome",
 				"ruleID", id, "status", status, "error", err)

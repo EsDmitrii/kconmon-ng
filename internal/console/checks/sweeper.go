@@ -32,10 +32,9 @@ const defaultSweepInterval = time.Minute
 // crc32.ChecksumIEEE([]byte("kconmon-ng.checks.Sweeper")).
 const sweeperLockKey int64 = 2749161301
 
-// intendedMetric is the controller's plan gauge (roadmap M10-2): value 1 for every pair the current
-// topology plan assigns, stale series deleted on plan change. The name is a cross-component
-// contract, hardcoded the same way the web matrix hardcodes its metric prefix.
-const intendedMetric = "kconmon_ng_probe_intended"
+// intendedSuffix names the controller's plan gauge after the metrics prefix: value 1 for every pair
+// the current topology plan assigns, stale series deleted on plan change.
+const intendedSuffix = "_probe_intended"
 
 // PairKey is one directed node pair, the sweeper's census unit.
 type PairKey struct {
@@ -247,23 +246,25 @@ type promQuerier interface {
 	Query(ctx context.Context, query string, ts time.Time) (json.RawMessage, error)
 }
 
-// PromIntendedPairs reads the topology plan out of Prometheus via the controller's intendedMetric
-// gauge — the only place the console can learn the plan without a controller API change.
+// PromIntendedPairs reads the topology plan out of Prometheus via the controller's plan gauge
+// (intendedSuffix), the only place the console can learn the plan without a controller API change.
 type PromIntendedPairs struct {
-	prom promQuerier
+	prom   promQuerier
+	metric string
 }
 
-// NewPromIntendedPairs returns a Prometheus-backed IntendedPairsSource.
-func NewPromIntendedPairs(prom promQuerier) *PromIntendedPairs {
-	return &PromIntendedPairs{prom: prom}
+// NewPromIntendedPairs returns a Prometheus-backed IntendedPairsSource reading the plan gauge under
+// metricsPrefix (config.metricsPrefix).
+func NewPromIntendedPairs(prom promQuerier, metricsPrefix string) *PromIntendedPairs {
+	return &PromIntendedPairs{prom: prom, metric: metricsPrefix + intendedSuffix}
 }
 
 // IntendedPairs runs one instant query and projects the vector onto pair keys. max by collapses
 // duplicate series (two controller replicas exporting through a leadership change).
 func (p *PromIntendedPairs) IntendedPairs(ctx context.Context) (map[PairKey]struct{}, error) {
-	raw, err := p.prom.Query(ctx, "max by (source_node, destination_node) ("+intendedMetric+")", time.Time{})
+	raw, err := p.prom.Query(ctx, "max by (source_node, destination_node) ("+p.metric+")", time.Time{})
 	if err != nil {
-		return nil, fmt.Errorf("checks: sweep: query %s: %w", intendedMetric, err)
+		return nil, fmt.Errorf("checks: sweep: query %s: %w", p.metric, err)
 	}
 	var envelope struct {
 		Data struct {
@@ -276,7 +277,7 @@ func (p *PromIntendedPairs) IntendedPairs(ctx context.Context) (map[PairKey]stru
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, fmt.Errorf("checks: sweep: decode %s vector: %w", intendedMetric, err)
+		return nil, fmt.Errorf("checks: sweep: decode %s vector: %w", p.metric, err)
 	}
 	out := make(map[PairKey]struct{}, len(envelope.Data.Result))
 	for _, r := range envelope.Data.Result {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,33 @@ func TestGRPCClientDialsTLSGatewayEndToEnd(t *testing.T) {
 	}
 	if _, _, err := client.Register(ctx, info, checker.PeerPorts{HTTP: 8080}); err != nil {
 		t.Fatalf("Register after Reconnect: %v", err)
+	}
+}
+
+/*
+agent.tls.enabled alone is TLS towards the system pool, the setup for a gateway behind a publicly
+trusted certificate. The test CA is in no system pool, so the handshake fails verification: that
+failure is the proof the agent dialled TLS and not plaintext, which would never reach a certificate.
+*/
+func TestGRPCClientTLSEnabledAloneVerifiesAgainstTheSystemPool(t *testing.T) {
+	p := newClientTestPKI(t)
+	addr, reg := startTestGateway(t, p, false)
+
+	client, err := NewGRPCClient(addr, ClientSecurity{TLS: config.AgentTLSConfig{Enabled: true}, TokenFile: p.tokenFile})
+	if err != nil {
+		t.Fatalf("NewGRPCClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	info := model.AgentInfo{ID: "h-h", NodeName: "h", PodName: "h", PodIP: "192.0.2.9"}
+	_, _, err = client.Register(ctx, info, checker.PeerPorts{HTTP: 8080})
+	if err == nil || !strings.Contains(err.Error(), "failed to verify certificate") {
+		t.Fatalf("Register with tls.enabled alone = %v, want a certificate verification failure", err)
+	}
+	if reg.Count() != 0 {
+		t.Errorf("registry holds %d agents after a failed handshake", reg.Count())
 	}
 }
 

@@ -197,7 +197,7 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 	   other. */
 	attempt := time.Now().UTC().Truncate(time.Microsecond)
 	for i := range 3 {
-		if err := db.UpdateWebhookDelivery(ctx, created.ID, "502 Bad Gateway", attempt, false); err != nil {
+		if err = db.UpdateWebhookDelivery(ctx, created.ID, "502 Bad Gateway", attempt, false); err != nil {
 			t.Fatalf("UpdateWebhookDelivery %d: %v", i, err)
 		}
 	}
@@ -235,7 +235,7 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 
 	// A success then zeroes the streak.
 	ok := attempt.Add(time.Minute)
-	if err := db.UpdateWebhookDelivery(ctx, created.ID, "200 OK", ok, true); err != nil {
+	if err = db.UpdateWebhookDelivery(ctx, created.ID, "200 OK", ok, true); err != nil {
 		t.Fatalf("UpdateWebhookDelivery(ok): %v", err)
 	}
 	got, err = db.GetWebhook(ctx, created.ID)

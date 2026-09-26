@@ -51,6 +51,9 @@ distinguish "network broken" (2) from "couldn't ask" (1).`,
 			if err := opts.validateOutput(); err != nil {
 				return err
 			}
+			if plane != "pod" {
+				return fmt.Errorf("invalid --plane %q: agents probe the pod network only", plane)
+			}
 			req := DiagnosticsRequest{
 				Source:      args[0],
 				Destination: args[1],
@@ -80,7 +83,7 @@ distinguish "network broken" (2) from "couldn't ask" (1).`,
 	}
 
 	cmd.Flags().StringVar(&checkType, "type", "icmp", "check type: icmp|tcp|udp|pmtu|dns|http")
-	cmd.Flags().StringVar(&plane, "plane", "pod", "network plane to test")
+	cmd.Flags().StringVar(&plane, "plane", "pod", "network plane to test; pod is the only one agents probe")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second, "diagnostic timeout (controller caps at 120s)")
 	return cmd
 }

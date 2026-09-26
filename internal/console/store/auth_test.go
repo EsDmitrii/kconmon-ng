@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -51,4 +52,40 @@ func TestGetTokenByIDAcceptsCanonicalUUIDShape(t *testing.T) {
 	}()
 	//nolint:errcheck // the call is expected to panic on the nil pool; there is no error to check
 	_, _ = (&DB{}).GetTokenByID(context.Background(), "0e2a6b3c-1f4d-4a7b-9c8e-3d5f7a9b1c2e")
+}
+
+// A malformed id is refused before the pool, like UpdateUserPassword's, and never reads as a lost
+// race (false, nil), which the login's hash upgrade would take silently.
+func TestRehashUserPasswordRejectsMalformedIDBeforeTouchingThePool(t *testing.T) {
+	swapped, err := (&DB{}).RehashUserPassword(context.Background(), "not-a-uuid", "old", "new")
+	if err == nil || swapped {
+		t.Fatalf("RehashUserPassword(malformed id) = %v, %v; want false and a parse error", swapped, err)
+	}
+	if !strings.Contains(err.Error(), "rehash user password") {
+		t.Errorf("RehashUserPassword(malformed id) = %v, want the error prefixed with the operation", err)
+	}
+}
+
+// storableAuditDetail keeps a clean detail byte for byte and turns what JSONB refuses into U+FFFD;
+// the real-PostgreSQL side is TestAuditInsertStoresARowWhateverTheFieldsCarry.
+func TestStorableAuditDetail(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{``, `{}`},
+		{`{"name":"ok","n":12345678901234567890}`, `{"name":"ok","n":12345678901234567890}`},
+		{`{"name":"ci-\ud800-token","n":12345678901234567890}`, `{"n":12345678901234567890,"name":"ci-` + "�" + `-token"}`},
+		{`{"a":["x\u0000y",{"\udc00":1}]}`, `{"a":["x` + "�" + `y",{"` + "�" + `":1}]}`},
+		{"{\"a\":\"\xff\"}", `{"a":"` + "�" + `"}`},
+		{`{"a":`, `{"unstorable":true}`},
+		{`{} {}`, `{"unstorable":true}`},
+		{`{"username":1e200000}`, `{"username":"1e200000"}`},
+		{`{"username":1e-20000}`, `{"username":"1e-20000"}`},
+		{`{"name":"ok","n":[1,1e131072]}`, `{"n":[1,"1e131072"],"name":"ok"}`},
+	} {
+		if got := string(storableAuditDetail(json.RawMessage(tc.in))); got != tc.want {
+			t.Errorf("storableAuditDetail(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := storableText("a\x00b\xffc"); got != "a�b�c" {
+		t.Errorf("storableText = %q", got)
+	}
 }

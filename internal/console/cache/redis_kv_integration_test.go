@@ -13,8 +13,7 @@ import (
 )
 
 // newIntegrationKV dials the REDIS_TEST_ADDR server and returns a RedisKV
-// on it, skipping the test when the address is unset. Same setup every test
-// in this file did inline before IncrWithTTL added three more of them.
+// on it, skipping the test when the address is unset.
 func newIntegrationKV(t *testing.T) *cache.RedisKV {
 	t.Helper()
 	addr := os.Getenv("REDIS_TEST_ADDR")
@@ -41,8 +40,7 @@ func TestRedisKVSetGetDeleteRoundtrip(t *testing.T) {
 		t.Skip("REDIS_TEST_ADDR not set; see docker command in this test's comment")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
@@ -55,11 +53,11 @@ func TestRedisKVSetGetDeleteRoundtrip(t *testing.T) {
 	t.Cleanup(func() { _ = kv.Delete(context.Background(), key) })
 
 	// Miss before anything is written.
-	if _, ok, err := kv.Get(ctx, key); err != nil || ok {
-		t.Fatalf("expected a clean miss before Set, got ok=%v err=%v", ok, err)
+	if _, ok, getErr := kv.Get(ctx, key); getErr != nil || ok {
+		t.Fatalf("expected a clean miss before Set, got ok=%v err=%v", ok, getErr)
 	}
 
-	if err := kv.Set(ctx, key, []byte("hello"), time.Minute); err != nil {
+	if err = kv.Set(ctx, key, []byte("hello"), time.Minute); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
@@ -90,8 +88,7 @@ func TestRedisKVTTLExpiry(t *testing.T) {
 		t.Skip("REDIS_TEST_ADDR not set; see docker command in TestRedisKVSetGetDeleteRoundtrip")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
@@ -223,5 +220,89 @@ func TestRedisKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T
 	}
 	if after != 1 {
 		t.Fatalf("IncrWithTTL after the window = %d, want 1 -- the concurrent first hits left the key TTL-less", after)
+	}
+}
+
+// TestRedisKVSetNXIsALockAndSetXXNeverRecreates pins the two conditional writes the session write
+// lock and the session rewrite rely on, against a real server.
+func TestRedisKVSetNXIsALockAndSetXXNeverRecreates(t *testing.T) {
+	kv := newIntegrationKV(t)
+	ctx := context.Background()
+	lock := "it:sesslock:" + time.Now().Format("150405.000000000")
+	rec := "it:sess:" + time.Now().Format("150405.000000000")
+	t.Cleanup(func() {
+		_ = kv.Delete(context.Background(), lock)
+		_ = kv.Delete(context.Background(), rec)
+	})
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners := 0
+	for range goroutines {
+		wg.Go(func() {
+			ok, err := kv.SetNX(ctx, lock, []byte("holder"), 300*time.Millisecond)
+			if err != nil {
+				t.Errorf("SetNX: %v", err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				winners++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if winners != 1 {
+		t.Fatalf("%d of %d concurrent SetNX calls took the lock, want exactly 1", winners, goroutines)
+	}
+	time.Sleep(600 * time.Millisecond)
+	if ok, err := kv.SetNX(ctx, lock, []byte("next"), time.Second); err != nil || !ok {
+		t.Fatalf("SetNX after the lock's TTL = %v, %v; want true, nil", ok, err)
+	}
+
+	if ok, err := kv.SetXX(ctx, rec, []byte("x"), time.Minute); err != nil || ok {
+		t.Fatalf("SetXX on an absent key = %v, %v; want false, nil", ok, err)
+	}
+	if _, found, _ := kv.Get(ctx, rec); found {
+		t.Fatal("a refused SetXX created the key")
+	}
+	if err := kv.Set(ctx, rec, []byte("old"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := kv.SetXX(ctx, rec, []byte("new"), time.Minute); err != nil || !ok {
+		t.Fatalf("SetXX on a live key = %v, %v; want true, nil", ok, err)
+	}
+	if val, found, err := kv.Get(ctx, rec); err != nil || !found || string(val) != "new" {
+		t.Errorf("Get after SetXX = %q, %v, %v; want %q", val, found, err, "new")
+	}
+}
+
+// DeleteIfEqual releases the session write lock against a real server: a stale holder's token
+// leaves the current holder's lock in place, the holder's own token removes it.
+func TestRedisKVDeleteIfEqualIsACompareAndDelete(t *testing.T) {
+	kv := newIntegrationKV(t)
+	ctx := context.Background()
+	lock := "it:sesslock:cad:" + time.Now().Format("150405.000000000")
+	t.Cleanup(func() { _ = kv.Delete(context.Background(), lock) })
+
+	if ok, err := kv.DeleteIfEqual(ctx, lock, []byte("a")); err != nil || ok {
+		t.Fatalf("DeleteIfEqual on an absent key = %v, %v; want false, nil", ok, err)
+	}
+	if ok, err := kv.SetNX(ctx, lock, []byte("b"), time.Minute); err != nil || !ok {
+		t.Fatalf("SetNX = %v, %v", ok, err)
+	}
+	if ok, err := kv.DeleteIfEqual(ctx, lock, []byte("a")); err != nil || ok {
+		t.Fatalf("DeleteIfEqual with a stale token = %v, %v; want false, nil", ok, err)
+	}
+	if val, found, err := kv.Get(ctx, lock); err != nil || !found || string(val) != "b" {
+		t.Fatalf("after a refused DeleteIfEqual: %q, %v, %v; want the holder's %q", val, found, err, "b")
+	}
+	if ok, err := kv.DeleteIfEqual(ctx, lock, []byte("b")); err != nil || !ok {
+		t.Fatalf("DeleteIfEqual with the holder's token = %v, %v; want true, nil", ok, err)
+	}
+	if _, found, _ := kv.Get(ctx, lock); found {
+		t.Error("DeleteIfEqual reported a delete but the key is still there")
 	}
 }

@@ -2,6 +2,7 @@ package meshplan
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"sort"
@@ -112,6 +113,20 @@ func TestBuildRingDegreeLargerThanFleetProbesEveryone(t *testing.T) {
 		if len(got[a.ID]) != len(agents)-1 {
 			t.Fatalf("ringDegree >= N-1 must probe all others; %s probes %v", a.ID, got[a.ID])
 		}
+	}
+}
+
+// Build's callers normally pass a validated config, where zoneChords is at most 64. One that does
+// not must get the plan of zoneChords = N-1, not a panic sizing the peer sets.
+func TestBuildChordsLargerThanFleetProbeEveryOtherZone(t *testing.T) {
+	agents := []model.AgentInfo{agent("a", "n1", "z1"), agent("b", "n2", "z2"), agent("c", "n3", "z3")}
+	want := Build(agents, sparseCfg(1, len(agents)-1, 0))
+	got := Build(agents, sparseCfg(1, math.MaxInt, 0))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("zoneChords = MaxInt planned %v, want the zoneChords = N-1 plan %v", got, want)
+	}
+	if p := Build(nil, sparseCfg(2, 2, 0)); p == nil || len(p) != 0 {
+		t.Fatalf("an empty fleet planned %v, want an empty sparse plan", p)
 	}
 }
 

@@ -277,9 +277,9 @@ func TestAlertRuleMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 			if _, err := db.UpdateAlertRule(ctx, id, validAlertRuleInput()); !errors.Is(err, ErrNotFound) {
 				t.Errorf("UpdateAlertRule(%q) err = %v, want ErrNotFound", id, err)
 			}
-			_, err := db.UpdateAlertRuleSyncStatus(ctx, id, AlertSyncStatusSynced, "", &now)
+			_, err := db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, id, now, AlertSyncStatusSynced, "", &now)
 			if !errors.Is(err, ErrNotFound) {
-				t.Errorf("UpdateAlertRuleSyncStatus(%q) err = %v, want ErrNotFound", id, err)
+				t.Errorf("UpdateAlertRuleSyncStatusIfUnchanged(%q) err = %v, want ErrNotFound", id, err)
 			}
 		})
 	}
@@ -301,10 +301,10 @@ func TestUpdateAlertRuleValidatesBeforeTheIDPreCheck(t *testing.T) {
 	}
 }
 
-// TestUpdateAlertRuleSyncStatusValidatesBeforeTouchingPgx asserts the sync
+// TestUpdateAlertRuleSyncStatusIfUnchangedValidatesBeforeTouchingPgx asserts the sync
 // half's own bounds -- the closed status set and the message length -- are
 // applied before the id pre-check, for the same reason. NIL pool.
-func TestUpdateAlertRuleSyncStatusValidatesBeforeTouchingPgx(t *testing.T) {
+func TestUpdateAlertRuleSyncStatusIfUnchangedValidatesBeforeTouchingPgx(t *testing.T) {
 	db := &DB{}
 	ctx := context.Background()
 	id := "3f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"
@@ -320,13 +320,13 @@ func TestUpdateAlertRuleSyncStatusValidatesBeforeTouchingPgx(t *testing.T) {
 		{"over-long message", AlertSyncStatusError, strings.Repeat("m", alertRuleSyncMessageMaxLen+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := db.UpdateAlertRuleSyncStatus(ctx, id, tc.status, tc.message, nil)
+			_, err := db.UpdateAlertRuleSyncStatusIfUnchanged(ctx, id, time.Now(), tc.status, tc.message, nil)
 			if err == nil {
-				t.Fatalf("UpdateAlertRuleSyncStatus(%q, %d-byte message) = nil, want a validation error",
+				t.Fatalf("UpdateAlertRuleSyncStatusIfUnchanged(%q, %d-byte message) = nil, want a validation error",
 					tc.status, len(tc.message))
 			}
 			if errors.Is(err, ErrNotFound) {
-				t.Errorf("UpdateAlertRuleSyncStatus reported %v, want a validation error rather than a miss", err)
+				t.Errorf("UpdateAlertRuleSyncStatusIfUnchanged reported %v, want a validation error rather than a miss", err)
 			}
 		})
 	}
@@ -343,6 +343,29 @@ func TestValidateJSONObjectRejectsNonObjects(t *testing.T) {
 	for _, bad := range []string{"[]", "[1]", "1", `"s"`, "true", "{", `{"a":}`, "nul"} {
 		if err := validateJSONObject("params", json.RawMessage(bad)); err == nil {
 			t.Errorf("validateJSONObject(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+func TestAlertNameConflict(t *testing.T) {
+	rows := []AlertRule{{ID: "r1", Name: "pair-loss"}, {ID: "r2", Name: "zone-latency"}, {ID: "r3", Name: "Pair.Loss"}}
+	for _, tc := range []struct {
+		desc, id, name string
+		clash          bool
+	}{
+		{"a create taking another rule's alert name", "", "PairLoss", true},
+		{"a create with a free alert name", "", "node-down", false},
+		{"a create differing only in case is left to the lower(name) index", "", "PAIR-LOSS", false},
+		{"an update renaming into another rule's alert name", "r2", "pair.loss", true},
+		{"an update keeping an alert name another row already clashes on", "r3", "PairLoss", false},
+		{"a name with no alert name is left to the render", "", "!!!", false},
+	} {
+		err := AlertNameConflict(rows, tc.id, tc.name)
+		if tc.clash != (err != nil) {
+			t.Errorf("%s: AlertNameConflict(%q, %q) = %v, want clash %t", tc.desc, tc.id, tc.name, err, tc.clash)
+		}
+		if err != nil && !strings.HasPrefix(err.Error(), "store: alert rule: name ") {
+			t.Errorf("%s: error %q, want the store's validation prefix", tc.desc, err)
 		}
 	}
 }

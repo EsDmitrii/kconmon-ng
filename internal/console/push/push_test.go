@@ -107,7 +107,7 @@ func TestMatrixPusherPushesEveryProtocolImmediately(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); p.Run(ctx) }()
 
-	for _, protocol := range []string{"tcp", "udp", "icmp"} {
+	for _, protocol := range []string{"tcp", "udp", "icmp", "pmtu"} {
 		waitForCounter(t, m.PushSnapshots.WithLabelValues(ws.MatrixTopic(protocol), "ok"), 1)
 	}
 
@@ -120,7 +120,7 @@ func TestMatrixPusherPushesEveryProtocolImmediately(t *testing.T) {
 
 	// Shutdown must not look like a failure: a query aborted by ctx cancel is
 	// not a push error, or every rolling restart would spike PushSnapshots.
-	for _, protocol := range []string{"tcp", "udp", "icmp"} {
+	for _, protocol := range []string{"tcp", "udp", "icmp", "pmtu"} {
 		topic := ws.MatrixTopic(protocol)
 		if got := testutil.ToFloat64(m.PushSnapshots.WithLabelValues(topic, "error")); got != 0 {
 			t.Errorf("%s: shutdown recorded %v errors, want 0", topic, got)
@@ -191,7 +191,7 @@ func TestMatrixPusherCancelMidQueryIsNotAPushError(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 
-	for _, protocol := range []string{"tcp", "udp", "icmp"} {
+	for _, protocol := range []string{"tcp", "udp", "icmp", "pmtu"} {
 		topic := ws.MatrixTopic(protocol)
 		if got := testutil.ToFloat64(m.PushSnapshots.WithLabelValues(topic, "error")); got != 0 {
 			t.Errorf("%s: a query aborted by ctx cancel recorded %v errors, want 0", topic, got)
@@ -230,7 +230,7 @@ func TestMatrixPusherNudgeBurstCoalescesIntoOneExtraRecompute(t *testing.T) {
 
 	// Give the loop time to do the wrong thing, then assert it did not.
 	time.Sleep(300 * time.Millisecond)
-	for _, protocol := range []string{"tcp", "udp", "icmp"} {
+	for _, protocol := range []string{"tcp", "udp", "icmp", "pmtu"} {
 		topic := ws.MatrixTopic(protocol)
 		if got := testutil.ToFloat64(m.PushSnapshots.WithLabelValues(topic, "ok")); got != 2 {
 			t.Errorf("%s: got %v snapshots, want exactly 2 (one initial + one coalesced nudge)", topic, got)

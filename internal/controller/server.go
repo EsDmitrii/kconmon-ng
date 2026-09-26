@@ -2,6 +2,8 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 
@@ -28,18 +30,18 @@ type HTTPServer struct {
 	/* The CIDRs an agent will actually probe (config.checkers.external.allowedCidrs). Published
 	   because the Console cannot otherwise know them -- they live in the AGENT's config, not the
 	   Console's -- and a target outside them can never be reached, which is worth saying at the
-	   moment it is created rather than as a timeout later. */
-	externalAllowedCIDRs []string
+	   moment it is created rather than as a timeout later. A config reload replaces it. */
+	externalAllowedCIDRs atomic.Pointer[[]string]
 }
 
 func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *prometheus.Registry, capabilities []string) *HTTPServer {
 	s := &HTTPServer{
-		mux:                  http.NewServeMux(),
-		registry:             registry,
-		promReg:              promReg,
-		capabilities:         capabilities,
-		externalAllowedCIDRs: []string{},
+		mux:          http.NewServeMux(),
+		registry:     registry,
+		promReg:      promReg,
+		capabilities: capabilities,
 	}
+	s.SetExternalAllowedCIDRs(nil)
 	// A nil slice would marshal as JSON null; an empty one keeps the field an
 	// array the Console can iterate unconditionally.
 	if s.capabilities == nil {
@@ -176,7 +178,7 @@ func (s *HTTPServer) SetExternalAllowedCIDRs(cidrs []string) {
 	if cidrs == nil {
 		cidrs = []string{}
 	}
-	s.externalAllowedCIDRs = cidrs
+	s.externalAllowedCIDRs.Store(&cidrs)
 }
 
 func (s *HTTPServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -185,6 +187,22 @@ func (s *HTTPServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
 		"version":              config.Version,
 		"commit":               config.Commit,
 		"capabilities":         s.capabilities,
-		"externalAllowedCidrs": s.externalAllowedCIDRs,
+		"externalAllowedCidrs": *s.externalAllowedCIDRs.Load(),
 	})
+}
+
+// decodeJSONBody decodes r's body into dst, reading at most limit bytes: the API is unauthenticated
+// and a JSON string is buffered whole, so an unbounded body is an OOM. It answers 413 past the
+// limit and 400 for anything else that does not decode, and reports whether dst is usable.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, limit int64, dst any) bool {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(dst)
+	if err == nil {
+		return true
+	}
+	if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
+		http.Error(w, fmt.Sprintf("request body exceeds %d bytes", limit), http.StatusRequestEntityTooLarge)
+		return false
+	}
+	http.Error(w, "invalid JSON body", http.StatusBadRequest)
+	return false
 }

@@ -1,6 +1,7 @@
 package metrics //nolint:revive // var-naming: "metrics" is a valid internal package name, not a stdlib conflict
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -54,6 +55,7 @@ func TestNewRegistersRealtimeMetrics(t *testing.T) {
 	m.WSClients.WithLabelValues().Set(3)
 	m.WSMessagesSent.WithLabelValues("live").Inc()
 	m.WSDroppedClients.WithLabelValues().Inc()
+	m.WSRefused.WithLabelValues("address").Inc()
 	m.PushSnapshots.WithLabelValues("matrix:tcp:pod", "ok").Inc()
 
 	if got := testutil.ToFloat64(m.EventsReceived.WithLabelValues("check_observed")); got != 1 {
@@ -88,6 +90,7 @@ func TestNewRegistersRealtimeMetrics(t *testing.T) {
 		"kconmon_ng_console_ws_clients",
 		"kconmon_ng_console_ws_messages_sent_total",
 		"kconmon_ng_console_ws_dropped_clients_total",
+		"kconmon_ng_console_ws_refused_total",
 		"kconmon_ng_console_push_snapshots_total",
 	} {
 		if !present[name] {
@@ -303,10 +306,10 @@ func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 	m := New("kconmon_ng", reg)
 
 	m.ExternalSeriesProjected.WithLabelValues().Set(12)
-	for _, result := range []string{"pushed", "unchanged", "not-leader", "error"} {
+	for _, result := range []string{"pushed", "unchanged", "not-leader", "error", "too-large"} {
 		m.ExternalReconciles.WithLabelValues(result).Inc()
 	}
-	for _, reason := range []string{"check-type", "destination-kind"} {
+	for _, reason := range []string{"check-type", "destination-kind", "unrunnable", "over-budget"} {
 		m.ExternalSpecsSkipped.WithLabelValues(reason).Inc()
 	}
 
@@ -343,7 +346,7 @@ func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 					continue
 				}
 				switch labels[0].GetValue() {
-				case "pushed", "unchanged", "not-leader", "error":
+				case "pushed", "unchanged", "not-leader", "error", "too-large":
 				default:
 					t.Errorf("%s has result=%q, outside the closed set", mf.GetName(), labels[0].GetValue())
 				}
@@ -353,7 +356,7 @@ func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 					continue
 				}
 				switch labels[0].GetValue() {
-				case "check-type", "destination-kind":
+				case "check-type", "destination-kind", "unrunnable", "over-budget":
 				default:
 					t.Errorf("%s has reason=%q, outside the closed set", mf.GetName(), labels[0].GetValue())
 				}
@@ -582,4 +585,68 @@ func TestNewRegistersWebhookDeliveryMetric(t *testing.T) {
 	if !present["kconmon_ng_console_webhook_deliveries_total"] {
 		t.Error("metric \"kconmon_ng_console_webhook_deliveries_total\" was not registered")
 	}
+}
+
+// TestNewRegistersWebhookSuppressedMetric pins the held-edge counter: exactly one {event} label.
+func TestNewRegistersWebhookSuppressedMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	m.WebhookSuppressed.WithLabelValues("alert.fired").Inc()
+	m.WebhookSuppressed.WithLabelValues("alert.resolved").Inc()
+
+	if got := testutil.ToFloat64(m.WebhookSuppressed.WithLabelValues("alert.fired")); got != 1 {
+		t.Errorf("WebhookSuppressed(alert.fired) = %v, want 1", got)
+	}
+	assertFamily(t, reg, "kconmon_ng_console_webhook_suppressed_total", "event")
+}
+
+// TestNewRegistersWebhookMaintenanceReadErrorsMetric pins the alert watcher's own window-read failure
+// counter: no labels, and a name apart from the store's generic query counter, which the HTTP API's
+// list calls also feed.
+func TestNewRegistersWebhookMaintenanceReadErrorsMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	m.WebhookMaintenanceReadErrors.WithLabelValues().Inc()
+
+	if got := testutil.ToFloat64(m.WebhookMaintenanceReadErrors.WithLabelValues()); got != 1 {
+		t.Errorf("WebhookMaintenanceReadErrors = %v, want 1", got)
+	}
+	assertFamily(t, reg, "kconmon_ng_console_webhook_maintenance_read_errors_total")
+}
+
+// TestNewRegistersWSRefusedMetric pins the socket-cap refusal counter: exactly one {limit} label.
+func TestNewRegistersWSRefusedMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	m.WSRefused.WithLabelValues("subject").Inc()
+	assertFamily(t, reg, "kconmon_ng_console_ws_refused_total", "limit")
+}
+
+// assertFamily fails unless name is registered on reg and every one of its series carries exactly
+// labels, which Gather sorts by name.
+func assertFamily(t *testing.T, reg *prometheus.Registry, name string, labels ...string) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			got := make([]string, 0, len(metric.GetLabel()))
+			for _, l := range metric.GetLabel() {
+				got = append(got, l.GetName())
+			}
+			if !slices.Equal(got, labels) {
+				t.Errorf("%s has labels %v, want %v", name, got, labels)
+			}
+		}
+		return
+	}
+	t.Errorf("metric %q was not registered", name)
 }

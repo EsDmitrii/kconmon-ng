@@ -35,7 +35,7 @@ type IncidentNotifier interface {
 
 // incidentsUnavailableDetail is served whenever s.incidents is nil.
 const incidentsUnavailableDetail = "incidents are persisted investigations with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/incidents"
+	databaseKnob + " to enable /api/v1/incidents"
 
 // incidentValidationPrefix is the prefix every store.IncidentInput.Validate.
 const incidentValidationPrefix = "store: incident: "
@@ -211,16 +211,13 @@ func (s *Server) handleIncidentsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIncidentsCreate opens one investigation: 201 with a Location header naming the new row;
-// validation is delegated to store.IncidentInput.Validate so the title bound.
+// validation is delegated to store.IncidentInput.Validate, so the title and notes bounds are the
+// store's own.
 func (s *Server) handleIncidentsCreate(w http.ResponseWriter, r *http.Request) {
 	if s.incidentsUnavailable(w) {
 		return
 	}
 	var req incidentRequest
-	// Deliberately LENIENT (no DisallowUnknownFields): client-owned state
-	// (createdBy, status) is IGNORED, not rejected -- the server sets the
-	// authenticated subject and opens the incident itself
-	// (TestIncidentsCreateRecordsTheSubjectAndIgnoresClientState).
 	// STRICT, as the schema says: a misspelled optional field must be refused, not dropped.
 	if !decodeMutationBody(w, r, &req,
 		`an incident body must be JSON with "title" and "fromAt" (RFC3339), `+
@@ -406,6 +403,12 @@ func decodeIncidentPatch(w http.ResponseWriter, r *http.Request) (incidentPatchR
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid incident",
 			fmt.Sprintf("incident: notes are %d bytes, limit is %d", len(*req.Notes), incidentNotesMaxLen))
 		return incidentPatchRequest{}, false
+	}
+	if req.Notes != nil {
+		if err := store.ValidateFreeText("notes", *req.Notes); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, "invalid incident", "incident: "+err.Error())
+			return incidentPatchRequest{}, false
+		}
 	}
 	if req.Pinned != nil {
 		// store.ValidatePinned is EXPORTED precisely so this pre-check and the

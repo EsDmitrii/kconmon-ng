@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -78,20 +79,6 @@ func (f *fakeAlertRuleStore) UpdateAlertRule(_ context.Context, id string, in st
 	updated := alertRuleFromFakeInput(id, &in, existing.CreatedAt, time.Now().UTC())
 	f.rules[id] = updated
 	return updated, nil
-}
-
-func (f *fakeAlertRuleStore) UpdateAlertRuleSyncStatus(
-	_ context.Context, id, status, message string, lastSyncedAt *time.Time,
-) (store.AlertRule, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	rule, ok := f.rules[id]
-	if !ok {
-		return store.AlertRule{}, store.ErrNotFound
-	}
-	rule.SyncStatus, rule.SyncMessage, rule.LastSyncedAt = status, message, lastSyncedAt
-	f.rules[id] = rule
-	return rule, nil
 }
 
 func (f *fakeAlertRuleStore) DeleteAlertRule(_ context.Context, id string) error {
@@ -338,8 +325,8 @@ func TestExportImportWithoutStoreReturns503(t *testing.T) {
 		if w.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s without a store = %d, want 503: %s", c.method, path, w.Code, w.Body)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, path, w.Body)
 		}
 	}
 }
@@ -493,8 +480,8 @@ func TestImportIntoFreshConsoleRemapsEveryReference(t *testing.T) {
 }
 
 // TestImportIsIdempotent re-imports the same bundle into the console it came
-// from: everything already exists under its natural key, so every collection
-// updates in place and nothing is created twice.
+// from: everything already exists under its natural key and nothing differs, so every collection
+// reports its row unchanged and nothing is created twice.
 func TestImportIsIdempotent(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	seedFullConfig(t, &fx)
@@ -512,14 +499,13 @@ func TestImportIsIdempotent(t *testing.T) {
 		"alertRules":       res.AlertRules,
 		"webhooks":         res.Webhooks,
 	} {
-		if got.Created != 0 || got.Updated != 1 || len(got.Errors) != 0 {
-			t.Errorf("%s = %+v, want exactly one update and no errors", name, got)
+		if got.Created != 0 || got.Updated != 0 || got.Unchanged != 1 || len(got.Errors) != 0 {
+			t.Errorf("%s = %+v, want exactly one unchanged row and no errors", name, got)
 		}
 	}
-	// A maintenance window has no UPDATE in the store by design, so an identical one is SKIPPED, never
-	// rewritten.
-	if res.MaintenanceWindows.Skipped != 1 || res.MaintenanceWindows.Created != 0 {
-		t.Errorf("maintenanceWindows = %+v, want exactly one skip", res.MaintenanceWindows)
+	// A maintenance window has no UPDATE in the store by design; an identical one is unchanged.
+	if res.MaintenanceWindows.Unchanged != 1 || res.MaintenanceWindows.Skipped != 0 || res.MaintenanceWindows.Created != 0 {
+		t.Errorf("maintenanceWindows = %+v, want exactly one unchanged window", res.MaintenanceWindows)
 	}
 
 	after := doExport(t, &fx)
@@ -1033,7 +1019,7 @@ func TestImportResolvesReferencesToRowsAlreadyHereWithAnEmptyTargetsSection(t *t
 	for _, e := range res.CheckDefinitions.Errors {
 		t.Errorf("definition %q rejected: %s", e.Name, e.Reason)
 	}
-	if res.CheckDefinitions.Updated == 0 && res.CheckDefinitions.Created == 0 {
+	if res.CheckDefinitions.Updated == 0 && res.CheckDefinitions.Created == 0 && res.CheckDefinitions.Unchanged == 0 {
 		t.Fatal("no definition was applied: a reference to a target this console already holds was " +
 			"reported as existing nowhere")
 	}
@@ -1241,5 +1227,111 @@ func TestImportRefusesATargetOutsideTheProbeAllowlist(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), `"created":1`) {
 		t.Errorf("the target was created anyway: %s", w.Body)
+	}
+}
+
+// A bundle is the other way to rewrite a custom role, so it gets the same last-admin guard POST
+// /api/v1/rbac/roles applies: dropping users:manage from the role that alone grants it is refused,
+// the role is left as it was, and the rest of the section still applies.
+func TestImportKeepsTheLastUsersManageHolder(t *testing.T) {
+	rbac := newFakeRoleAdmin()
+	if _, err := rbac.UpsertRole(context.Background(), "ops", []string{"users:manage", "rbac:manage"}); err != nil {
+		t.Fatal(err)
+	}
+	mustBind(t, rbac, "ops", "u-ops")
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	checks := newFakeChecksStore()
+	s := newAuthzServer(t, authr, authz.NewPolicy(map[string][]authz.Permission{"ops": {authz.PermUsersManage, authz.PermRBACManage}}), Deps{
+		Roles:       fakeRoleResolver{roles: []string{"admin"}},
+		UserAdmin:   newFakeUserAdmin(store.User{ID: "u-ops", Username: "ops"}),
+		RBAC:        rbac,
+		Targets:     newFakeTargetService(),
+		Definitions: checks,
+		Schedules:   checks,
+		AlertRules:  newFakeAlertRuleStore(),
+		Webhooks:    newFakeWebhookStore(),
+		Maintenance: newFakeMaintenanceStore(),
+	})
+	fx := &exportFixture{server: s, rbac: rbac}
+
+	for _, dryRun := range []bool{true, false} {
+		code, res := doImport(t, fx, importRequest{DryRun: dryRun, Bundle: &exportBundle{Version: exportBundleVersion, RBAC: &exportRBAC{Roles: []exportRole{
+			{Name: "ops", Permissions: []string{}},
+			{Name: "auditors", Permissions: []string{"events:read"}},
+		}}}})
+		if code != http.StatusOK {
+			t.Fatalf("import (dryRun=%v) = %d, want 200", dryRun, code)
+		}
+		got := res.RBACRoles
+		if len(got.Errors) != 1 || got.Errors[0].Name != "ops" || !strings.Contains(got.Errors[0].Reason, "no enabled user who can manage users") {
+			t.Errorf("import (dryRun=%v) rbacRoles errors = %+v, want ops refused as the last users:manage holder", dryRun, got.Errors)
+		}
+		if got.Created != 1 || got.Updated != 0 {
+			t.Errorf("import (dryRun=%v) rbacRoles = %+v, want auditors created and ops not counted as updated", dryRun, got)
+		}
+		if perms := rbac.roles["ops"].Permissions; !slices.Contains(perms, "users:manage") {
+			t.Fatalf("import (dryRun=%v) dropped users:manage from the last holder's role: ops = %v", dryRun, perms)
+		}
+	}
+}
+
+// Each role's last-admin guard in a dry run has to see the roles the bundle changed before it, as
+// the real import does. user1 holds users:manage only through custom role A and user2 only through
+// B; a bundle narrowing both passes each guard on its own, but applying A first leaves B's guard
+// with nobody. The preview must say what the import will do.
+func TestImportDryRunLastAdminGuardSeesTheBundlesEarlierRoles(t *testing.T) {
+	newFixture := func() exportFixture {
+		checks := newFakeChecksStore()
+		fx := exportFixture{
+			targets:     &linkedTargetService{fakeTargetService: newFakeTargetService(), checks: checks},
+			checks:      checks,
+			alertRules:  newFakeAlertRuleStore(),
+			webhooks:    newFakeWebhookStore(),
+			maintenance: newFakeMaintenanceStore(),
+			rbac:        newFakeRoleAdmin(),
+		}
+		ctx := context.Background()
+		for _, role := range []string{"role-a", "role-b"} {
+			if _, err := fx.rbac.UpsertRole(ctx, role, []string{string(authz.PermUsersManage)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mustBind(t, fx.rbac, "role-a", "u-1")
+		mustBind(t, fx.rbac, "role-b", "u-2")
+		users := newFakeUserAdmin(store.User{ID: "u-1", Username: "one"}, store.User{ID: "u-2", Username: "two"})
+		authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectToken, ID: "tok-admin"}}
+		fx.server = newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{
+			Roles:     fakeRoleResolver{roles: []string{"admin"}},
+			UserAdmin: users,
+			Targets:   fx.targets, Definitions: fx.checks, Schedules: fx.checks,
+			AlertRules: fx.alertRules, Webhooks: fx.webhooks, Maintenance: fx.maintenance,
+			RBAC: fx.rbac,
+		})
+		return fx
+	}
+	bundle := exportBundle{Version: exportBundleVersion, RBAC: &exportRBAC{
+		Roles: []exportRole{
+			{Name: "role-a", Permissions: []string{string(authz.PermSettingsWrite)}},
+			{Name: "role-b", Permissions: []string{string(authz.PermSettingsWrite)}},
+		},
+		Bindings: []exportBinding{},
+	}}
+
+	dryFx := newFixture()
+	code, dry := doImport(t, &dryFx, importRequest{DryRun: true, Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("dry run = %d, want 200", code)
+	}
+	realFx := newFixture()
+	code, applied := doImport(t, &realFx, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200", code)
+	}
+	if applied.RBACRoles.Updated != 1 || len(applied.RBACRoles.Errors) != 1 {
+		t.Fatalf("real import rbacRoles = %+v, want role-a updated and role-b refused", applied.RBACRoles)
+	}
+	if dry.RBACRoles.Updated != applied.RBACRoles.Updated || len(dry.RBACRoles.Errors) != len(applied.RBACRoles.Errors) {
+		t.Errorf("dry run rbacRoles = %+v, real import = %+v: the preview does not match the import",
+			dry.RBACRoles, applied.RBACRoles)
 	}
 }

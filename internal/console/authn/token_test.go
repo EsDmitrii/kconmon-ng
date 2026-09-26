@@ -242,6 +242,27 @@ func TestTokenFallbackOwnerDisabledCheckStoreErrorPropagates(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Errorf("Authenticate: err = %v, want it to wrap %v", err, boom)
 	}
+	if !errors.Is(err, authn.ErrUnavailable) {
+		t.Errorf("Authenticate: err = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestTokenFallbackTokenStoreErrorIsErrUnavailable(t *testing.T) {
+	t.Parallel()
+
+	wire, _ := makeToken(15)
+	ts := newFakeTokenStore(nil)
+	ts.err = errors.New("boom: store unavailable")
+	inner := &spyInner{err: authn.ErrNoCredentials, mode: "anonymous"}
+	a := authn.NewTokenFallback(ts, inner)
+
+	_, err := a.Authenticate(bearerRequest(wire))
+	if !errors.Is(err, authn.ErrUnavailable) {
+		t.Fatalf("Authenticate: err = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, authn.ErrInvalid) {
+		t.Errorf("Authenticate: err = %v, must NOT be ErrInvalid", err)
+	}
 }
 
 // TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound pins the

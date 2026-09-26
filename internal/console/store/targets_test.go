@@ -57,6 +57,9 @@ func TestTargetInputValidateRejects(t *testing.T) {
 		{"kind case mismatch", func(in *TargetInput) { in.Kind = "Host" }},
 		{"empty address", func(in *TargetInput) { in.Address = "" }},
 		{"whitespace-only address", func(in *TargetInput) { in.Address = "   " }},
+		{"url address over 2048 bytes", func(in *TargetInput) {
+			in.Kind, in.Address = "url", "https://example.test/"+strings.Repeat("a", addressMaxLen)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -209,6 +212,16 @@ func TestDefinitionInputValidateRejects(t *testing.T) {
 		{"unknown destination kind", func(in *DefinitionInput) { in.DestinationKind = "pod" }},
 		{"unknown check type", func(in *DefinitionInput) { in.CheckType = "ping" }},
 		{"empty plane", func(in *DefinitionInput) { in.Plane = "" }},
+		{"NUL in plane", func(in *DefinitionInput) { in.Plane = "pod\x00" }},
+		{"newline in plane", func(in *DefinitionInput) { in.Plane = "pod\n" }},
+		{"plane longer than a name", func(in *DefinitionInput) { in.Plane = strings.Repeat("p", 33) }},
+		{"plane other than pod", func(in *DefinitionInput) { in.Plane = "host" }},
+		{"params over 4096 bytes", func(in *DefinitionInput) {
+			in.Params = json.RawMessage(`{"a":"` + strings.Repeat("x", definitionParamsMaxBytes) + `"}`)
+		}},
+		{"adhoc address over 2048 bytes", func(in *DefinitionInput) {
+			in.DestinationKind, in.DestinationAddress = "adhoc", "https://example.test/"+strings.Repeat("a", addressMaxLen)
+		}},
 		{"target kind without target id", func(in *DefinitionInput) { in.DestinationKind = "target" }},
 		{"node kind with target id", func(in *DefinitionInput) {
 			in.DestinationTargetID = "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"
@@ -223,6 +236,29 @@ func TestDefinitionInputValidateRejects(t *testing.T) {
 				t.Errorf("Validate(%+v) = nil, want an error", in)
 			}
 		})
+	}
+}
+
+// A plane, an address or params can be megabytes long: the refusal names the bound, never the value.
+func TestOverlongDefinitionAndTargetFieldsAreRefusedWithoutEchoingThem(t *testing.T) {
+	huge := strings.Repeat("x", 1<<20)
+	plane := validDefinitionInput()
+	plane.Plane = huge
+	adhoc := validDefinitionInput()
+	adhoc.DestinationKind, adhoc.DestinationAddress = "adhoc", "https://example.test/"+huge
+	params := validDefinitionInput()
+	params.Params = json.RawMessage(`{"a":"` + huge + `"}`)
+	urlTarget := validTargetInput()
+	urlTarget.Kind, urlTarget.Address = "url", "https://example.test/"+huge
+	hostTarget := validTargetInput()
+	hostTarget.Address = huge
+	for name, err := range map[string]error{
+		"plane": plane.Validate(), "adhoc address": adhoc.Validate(), "params": params.Validate(),
+		"url target address": urlTarget.Validate(), "host target address": hostTarget.Validate(),
+	} {
+		if err == nil || len(err.Error()) > 200 {
+			t.Errorf("%s: Validate = %.200v (%d bytes), want a short error", name, err, len(fmt.Sprint(err)))
+		}
 	}
 }
 

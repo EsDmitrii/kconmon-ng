@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -67,22 +68,27 @@ func (f *fakeAuditStore) snapshot() []store.AuditEntry {
 	return out
 }
 
-// waitForOneAuditEntry polls fakeAuditStore until it holds at least one
-// entry (the drain goroutine writes asynchronously, off the request path)
-// or fails the test after a generous bound.
-func waitForOneAuditEntry(t *testing.T, fs *fakeAuditStore) []store.AuditEntry {
+// waitForAuditEntries polls for at least n entries: the drain goroutine writes them off the request
+// path.
+func waitForAuditEntries(t *testing.T, fs *fakeAuditStore, n int) []store.AuditEntry {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		entries := fs.snapshot()
-		if len(entries) >= 1 {
+		if len(entries) >= n {
 			return entries
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("audit store has %d entries after 2s, want >= 1", len(entries))
+			t.Fatalf("audit store has %d entries after 2s, want %d", len(entries), n)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// waitForOneAuditEntry is waitForAuditEntries for the one row most tests expect.
+func waitForOneAuditEntry(t *testing.T, fs *fakeAuditStore) []store.AuditEntry {
+	t.Helper()
+	return waitForAuditEntries(t, fs, 1)
 }
 
 // stalledAuditStore is an Auditor whose InsertAuditEntry blocks until the
@@ -353,6 +359,8 @@ func TestAuditResourceCannotBeMadeUnstorable(t *testing.T) {
 		{"clean", "role-a", "role-a"},
 		{"nul", "role\x00a", "role\uFFFDa"},
 		{"newline", "role\na", "role\uFFFDa"},
+		{"invalid utf-8", "role\xffa", "role\uFFFDa"},
+		{"truncated utf-8", "role\xc3", "role\uFFFD"},
 	} {
 		if got := sanitizeAuditText(tc.in); got != tc.want {
 			t.Errorf("%s: sanitizeAuditText(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
@@ -377,6 +385,8 @@ func TestControlCharacterInThePathIs400(t *testing.T) {
 		"/api/v1/rbac/roles/role%00a",
 		"/api/v1/tokens/11111111-1111-1111-1111-111111111111%00",
 		"/api/v1/rbac/roles/role%0Aa",
+		"/api/v1/rbac/roles/role%FFa",
+		"/api/v1/rbac/roles/role%C3",
 	} {
 		w := doRequest(t, s, http.MethodDelete, path, nil, mutateWithCSRF)
 		if w.Code != http.StatusBadRequest {
@@ -487,22 +497,39 @@ func TestAuditExportIsAudited(t *testing.T) {
 func TestAuditDenialsYieldRegardlessOfSubjectKind(t *testing.T) {
 	for _, kind := range []authz.SubjectKind{"", authz.SubjectAnonymous, authz.SubjectToken, authz.SubjectUser} {
 		t.Run(string(kind)+"/ordinary route yields", func(t *testing.T) {
-			if !auditYields(auditOutcomeDenied, "/api/v1/topology") {
+			if !auditYields(kind, auditOutcomeDenied, "/api/v1/topology") {
 				t.Error("an ordinary denial does not yield the buffer half")
+			}
+			// A failed request after authorize passed is as cheap as a denial.
+			if !auditYields(kind, auditOutcomeError, "/api/v1/promql/query") {
+				t.Error("an ordinary failed request does not yield the buffer half")
 			}
 		})
 	}
-	if auditYields(auditOutcomeDenied, "/api/v1/rbac/roles") {
+	if auditYields(authz.SubjectUser, auditOutcomeDenied, "/api/v1/rbac/roles") {
 		t.Error("a denied RBAC attempt yields the buffer; those are the rows an investigation needs")
 	}
-	if auditYields(auditOutcomeAllowed, "/api/v1/topology") {
-		t.Error("an ALLOWED row yields; only denials may")
+	if auditYields(authz.SubjectUser, auditOutcomeAllowed, "/api/v1/topology") {
+		t.Error("an ALLOWED row of a signed-in caller yields; only failed rows may")
 	}
 }
 
-// auditYields mirrors recordAudit's drop condition for a half-full buffer.
-func auditYields(outcome, pattern string) bool {
-	return outcome == auditOutcomeDenied && !auditSensitiveRoute(pattern)
+// auditYields reports whether recordAudit drops this row once half the buffer holds allowed rows.
+func auditYields(kind authz.SubjectKind, outcome, pattern string) bool {
+	ch := make(chan auditJob, auditBufferSize)
+	for range auditBufferSize / 2 {
+		ch <- auditJob{outcome: auditOutcomeAllowed}
+	}
+	cheap, sensitive := auditRowTier(outcome, kind, http.MethodPost, pattern)
+	job := auditJob{outcome: outcome}
+	if cheap {
+		job.budget, job.failedSensitive = "addr:192.0.2.1", sensitive
+	}
+	if !auditQueued.admit(ch, job, auditQueueLimit(cheap, sensitive, auditBufferSize)) {
+		return true
+	}
+	auditQueued.release(ch, job.budget, job.failedSensitive)
+	return false
 }
 
 /* ── QA round 5: a caller must not be able to delete their own audit row ──── */
@@ -522,6 +549,45 @@ func TestAuditDetailStripsNULEscapes(t *testing.T) {
 	// The rest of the value survives: this is a sanitisation, not a drop.
 	if !bytes.Contains(detail, []byte(`"webhook"`)) {
 		t.Errorf("detail = %s, want the name preserved with the escape removed", detail)
+	}
+}
+
+/*
+ * PostgreSQL refuses a jsonb value that is not UTF-8 (22021) or carries an unpaired surrogate escape
+ * (22P02). The handler decodes such a byte to U+FFFD and stores the write, so a raw copy in the
+ * detail let the caller of a privileged write decide that its audit row is never written.
+ */
+func TestAuditDetailIsAlwaysStorableText(t *testing.T) {
+	for name, body := range map[string]string{
+		"invalid byte in a string":  "{\"name\":\"ops\xff\",\"permissions\":[\"rbac:manage\"]}",
+		"invalid byte in an array":  "{\"name\":\"ops\",\"permissions\":[\"rbac:manage\xfe\"]}",
+		"unpaired high surrogate":   `{"name":"ops\ud800","permissions":[]}`,
+		"unpaired low surrogate":    `{"name":"ops\uDC00x","permissions":[]}`,
+		"high surrogate at the end": `{"name":"\ud83d","permissions":[]}`,
+		"invalid byte beside a NUL": "{\"name\":\"o\\u0000ps\xff\",\"permissions\":[]}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			detail := auditDetailFor("POST /api/v1/rbac/roles", []byte(body))
+			if !utf8.Valid(detail) {
+				t.Fatalf("detail is not UTF-8, PostgreSQL refuses the row: %q", detail)
+			}
+			if bytes.Contains(bytes.ToLower(detail), []byte(`\ud8`)) || bytes.Contains(bytes.ToLower(detail), []byte(`\udc`)) {
+				t.Fatalf("detail keeps an unpaired surrogate escape, PostgreSQL refuses the row: %s", detail)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(detail, &got); err != nil {
+				t.Fatalf("detail is not JSON: %s", detail)
+			}
+			if name, _ := got["name"].(string); !strings.HasPrefix(name, "o") && !strings.Contains(name, "\uFFFD") {
+				t.Errorf("detail name = %q, want the value with the bad bytes replaced", name)
+			}
+		})
+	}
+	// A paired surrogate is a real character and stays one.
+	detail := auditDetailFor("POST /api/v1/rbac/roles", []byte(`{"name":"ops\ud83d\ude00","permissions":[]}`))
+	var got map[string]any
+	if err := json.Unmarshal(detail, &got); err != nil || got["name"] != "ops\U0001F600" {
+		t.Errorf("detail = %s, want the emoji kept", detail)
 	}
 }
 
@@ -728,5 +794,121 @@ func TestAuditListLiftsSubjectDisplayOutOfDetail(t *testing.T) {
 	}
 	if old := body.Entries[1]; old.SubjectDisplay != "" {
 		t.Errorf("pre-capture row invented a subjectDisplay: %q", old.SubjectDisplay)
+	}
+}
+
+/* ── R1: a public-route flood must not evict the rows that matter ───────── */
+
+// Failed logins are answered 4xx (outcome "error", not "denied") and need no credentials, so they
+// must yield the second half of the buffer exactly like denials do.
+func TestCredentialLessLoginFloodYieldsTheAuditBuffer(t *testing.T) {
+	audit := &fakeAuditStore{block: make(chan struct{})}
+	authr := fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"}
+	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{Audit: audit})
+
+	for range auditBufferSize * 3 {
+		doRequest(t, s, http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"x","password":"y"}`), nil)
+	}
+	if got := len(s.auditCh); got > auditBufferSize/2 {
+		t.Fatalf("audit buffer holds %d of %d after a login flood, want at most half", got, auditBufferSize)
+	}
+	close(audit.block)
+}
+
+// A row on a sensitive route waits for room instead of being dropped when the buffer is full of
+// rows that do not yield.
+func TestSensitiveAuditRowWaitsForRoomInAFullBuffer(t *testing.T) {
+	audit := &fakeAuditStore{block: make(chan struct{})}
+	s := newAuditTestServer(t, audit, nil, Deps{})
+	parkAuditDrain(t, s)
+	for len(s.auditCh) < cap(s.auditCh) {
+		s.auditCh <- auditJob{action: "POST /api/v1/annotations", outcome: auditOutcomeAllowed, detail: emptyDetail}
+	}
+
+	req := auditRequest(t, http.MethodPost, "/api/v1/rbac/bindings", nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.recordAudit(req, authz.Subject{Kind: authz.SubjectUser, ID: "admin"}, auditOutcomeAllowed, emptyDetail)
+	}()
+	// Nothing can make room while the insert is blocked, so a return now means the row was dropped.
+	select {
+	case <-done:
+		t.Fatal("recordAudit returned while the buffer was full instead of waiting for room")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(audit.block)
+	<-done
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, e := range audit.snapshot() {
+			if e.Action == "POST /api/v1/rbac/bindings" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the RBAC binding row was dropped from a full audit buffer")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Behind a trusted proxy the row names the client the rate limiter already resolved, not the proxy.
+func TestAuditRecordsTheClientBehindATrustedProxy(t *testing.T) {
+	fs := &fakeAuditStore{}
+	s := newAuditTestServer(t, fs, nil, Deps{})
+	s.trustedProxies = parseCIDRs([]string{"10.0.0.0/8"})
+
+	doRequest(t, s, http.MethodDelete, "/api/v1/rbac/bindings/b1", nil, func(r *http.Request) {
+		mutateWithCSRF(r)
+		r.RemoteAddr = "10.1.2.3:4444"
+		r.Header.Set("X-Forwarded-For", "203.0.113.9")
+	})
+	if got := waitForOneAuditEntry(t, fs)[0].RemoteAddr; got != "203.0.113.9" {
+		t.Fatalf("remoteAddr = %q, want the client 203.0.113.9", got)
+	}
+}
+
+// A flood of failed logins keeps the buffer half full, and the one login that SUCCEEDS carries no
+// credentials yet either. Only failures yield: the successful sign-in is the row an investigation
+// of that flood needs.
+func TestSuccessfulLoginRowDoesNotYieldToAFailedLoginFlood(t *testing.T) {
+	for _, pattern := range []string{"/api/v1/auth/login", "/api/v1/auth/password"} {
+		t.Run(pattern, func(t *testing.T) {
+			audit := &fakeAuditStore{block: make(chan struct{})}
+			s := newAuditTestServer(t, audit, nil, Deps{})
+			parkAuditDrain(t, s)
+			for len(s.auditCh) < cap(s.auditCh)/2 {
+				s.auditCh <- auditJob{action: "POST " + pattern, outcome: auditOutcomeError, detail: emptyDetail}
+			}
+
+			req := auditRequest(t, http.MethodPost, pattern, nil)
+			before := len(s.auditCh)
+			s.recordAudit(req, authz.Subject{}, auditOutcomeAllowed, emptyDetail)
+			if got := len(s.auditCh); got != before+1 {
+				t.Errorf("successful %s row dropped with the buffer at %d/%d", pattern, before, cap(s.auditCh))
+			}
+
+			s.recordAudit(req, authz.Subject{}, auditOutcomeError, emptyDetail)
+			if got := len(s.auditCh); got != before+1 {
+				t.Errorf("a failed %s row did not yield with the buffer at %d/%d", pattern, before+1, cap(s.auditCh))
+			}
+			close(audit.block)
+		})
+	}
+}
+
+// The detail kept in memory, and logged if the write fails, is the value the row stores: decoded and
+// encoded again, whatever spelling the body used.
+func TestAuditDetailValueIsTheValueAsStored(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"b" : 1, "a":"\u00e9"}`: "{\"a\":\"\u00e9\",\"b\":1}",
+		`"\ud800"`:                "\"\uFFFD\"",
+		`"plain"`:                 `"plain"`,
+	} {
+		if got := string(scrubJSONNULs(json.RawMessage(in))); got != want {
+			t.Errorf("scrubJSONNULs(%s) = %s, want %s", in, got, want)
+		}
 	}
 }

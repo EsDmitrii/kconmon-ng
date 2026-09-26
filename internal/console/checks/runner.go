@@ -142,6 +142,11 @@ type finishedFrame struct {
 // Start validates spec, plans it into pairs, persists a pending run; it returns as soon as the run
 // is durable and registered.
 func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) (string, error) { //nolint:gocritic // hugeParam: Spec mirrors the store package's own value-type write-payload structs (store/checks.go)
+	// The API refuses another plane before it gets here; a schedule's definition may carry one saved
+	// before that rule, which the controller would refuse for every pair.
+	if err := ValidatePlane(spec.Plane); err != nil {
+		return "", err
+	}
 	if err := ValidateDuration(spec.Duration); err != nil {
 		return "", err
 	}
@@ -160,7 +165,7 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 	}
 
 	if spec.Plane == "" {
-		spec.Plane = "pod"
+		spec.Plane = PodPlane
 	}
 
 	// The cadence is re-planned, never refused: a check type slower than the cadence it was given
@@ -1053,13 +1058,19 @@ func (r *Runner) dispatchPair(ctx context.Context, pair *Pair, spec *Spec, perPa
 
 // publishFrame marshals frame and publishes it on topic via the bus; it never touches the hub
 // directly -- ws.Hub.OpenTopic already subscribed the hub to this bus topic.
+//
+// The publish outlives ctx (runCtx) for the same reason the result write does: the terminal frame
+// of a pair in flight at a cancel or at the run's deadline is produced after runCtx is done, and the
+// Valkey bus refuses a done context before it writes anything.
 func (r *Runner) publishFrame(ctx context.Context, topic string, frame any) {
 	data, err := json.Marshal(frame)
 	if err != nil {
 		slog.Error("checks: encode progress frame failed", "topic", topic, "error", err)
 		return
 	}
-	if err := r.bus.Publish(ctx, topic, cache.Message{Type: ws.TypeEvent, Data: data}); err != nil {
+	pubCtx, pubCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalOpTimeout)
+	defer pubCancel()
+	if err := r.bus.Publish(pubCtx, topic, cache.Message{Type: ws.TypeEvent, Data: data}); err != nil {
 		slog.Warn("checks: publish progress frame failed", "topic", topic, "error", err)
 		return
 	}

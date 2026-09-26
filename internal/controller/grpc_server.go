@@ -12,6 +12,7 @@ import (
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
+	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
@@ -32,25 +33,12 @@ type GRPCServer struct {
 	externalMgr *ExternalCheckManager
 
 	mu sync.RWMutex
-	/* A SET of peer-update streams per agent id, not one per id.
-
-	   The id on a WatchPeers request is client-supplied and nothing authenticates the gRPC surface,
-	   so with one entry per id the map was last-writer-wins: a second subscriber under an existing
-	   agent's id displaced that agent's mailbox, the agent's own stream goroutine stayed parked on a
-	   channel that would never be written to again, and its peer list froze — it kept probing pods
-	   that had left the fleet and never learned of new ones, while heartbeats, the connection gauge
-	   and registered==expected all read healthy and nothing was logged. When the second subscriber
-	   disconnected, its deferred cleanup owned the mapped entry and deleted the id outright, so the
-	   real agent stayed deaf even after it left.
-
-	   A set cannot be displaced: a stream removes only its OWN watcher, and a broadcast reaches all
-	   of them. It does not authenticate anything — that is the NetworkPolicy's job, and the shared
-	   policy admits the gRPC port from agent pods of this release only — but no caller can take an
-	   agent's subscription away from it. */
+	// A set of peer-update streams per agent id: the id is client-supplied, so a second subscriber
+	// under it must not displace the agent's own stream. A stream removes only its own watcher, and a
+	// broadcast reaches all of them.
 	watchers map[string]map[*peerWatcher]struct{}
 
-	leaderElection bool
-	isLeader       func() bool
+	gate leaderGate
 
 	eventsEnabled bool
 	eventsMu      sync.RWMutex
@@ -81,8 +69,7 @@ type GRPCServer struct {
 	peerPlan atomic.Pointer[meshplan.Plan]
 }
 
-// defaultLeaderCheckInterval is how often an open WatchEvents stream re-checks
-// leadership.
+// defaultLeaderCheckInterval is how often an open server stream re-checks leadership.
 const defaultLeaderCheckInterval = 5 * time.Second
 
 // defaultPeerBroadcastWindow is the coalescing window for peer fan-out: long enough to collapse a
@@ -103,8 +90,7 @@ func NewGRPCServer(
 		taskMgr:             NewTaskManager(),
 		externalMgr:         NewExternalCheckManager(),
 		watchers:            make(map[string]map[*peerWatcher]struct{}),
-		leaderElection:      leaderElection,
-		isLeader:            isLeader,
+		gate:                leaderGate{enabled: leaderElection, isLeader: isLeader},
 		eventsEnabled:       eventsEnabled,
 		eventSubs:           make(map[string]chan *pb.Event),
 		leaderCheckInterval: defaultLeaderCheckInterval,
@@ -140,6 +126,13 @@ func (s *GRPCServer) RegisterService(srv *grpc.Server) {
 	if s.eventsEnabled {
 		pb.RegisterEventStreamServer(srv, s)
 	}
+}
+
+// RegisterGatewayService registers only the agent-facing service on the external gateway. The
+// EventStream subscription carries no identity the gateway could pin, and its events include the
+// task ids a caller would need to answer another agent's diagnostics.
+func (s *GRPCServer) RegisterGatewayService(srv *grpc.Server) {
+	pb.RegisterAgentRegistryServer(srv, s)
 }
 
 // SetPeerPlan installs the probe plan applied to every peer list this server emits; nil restores
@@ -191,17 +184,14 @@ func planContains(allowed []string, id string) bool {
 
 // Register accepts an agent into the registry; leader-only when leader election is enabled, or the
 // Service round-robin would split the agents across replicas and each would plan its own mesh.
-func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
-	if s.lostLeadership() {
-		return nil, status.Error(codes.Unavailable, "not the leader")
+func (s *GRPCServer) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
+	if s.gate.lost() {
+		return nil, errNotLeader
 	}
 
 	agentMeta := req.GetAgent()
-	/* An agent is only an agent if it says WHO and WHERE it is.
-	   Nothing checked: GetAgent() is nil-safe, so an empty RegisterRequest produced AgentInfo{} —
-	   stored under the key "" and broadcast to the whole fleet as a peer, which every agent then
-	   turned into a probe against PodIP "" forever. It is not only reachable adversarially: an agent
-	   started without the downward-API env registers exactly this. */
+	// GetAgent() is nil-safe, so an empty request (an agent started without the downward-API env)
+	// would otherwise register AgentInfo{} and hand the fleet a peer with no address to probe.
 	if err := validateAgentMeta(agentMeta); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -212,7 +202,7 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 		PodName:  agentMeta.GetPodName(),
 		PodIP:    agentMeta.GetPodIp(),
 		Zone:     agentMeta.GetZone(),
-		Labels:   agentMeta.GetLabels(),
+		Labels:   registrantLabels(ctx, agentMeta.GetLabels()),
 		// Retained so the diagnostics handler can gate external destinations on
 		// what this agent build actually supports.
 		Capabilities: agentMeta.GetCapabilities(),
@@ -223,7 +213,6 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	}
 
 	resolved := s.registry.Register(info)
-	s.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(s.registry.Count()))
 
 	peers := s.filterPeersByPlan(resolved.ID, s.registry.GetPeers(resolved.ID))
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
@@ -232,11 +221,40 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	}
 
 	return &pb.RegisterResponse{
-		AgentId:    resolved.ID,
-		Peers:      pbPeers,
-		ServerTime: timestamppb.Now(),
-		Agent:      agentInfoToProto(resolved),
+		AgentId:     resolved.ID,
+		Peers:       pbPeers,
+		ServerTime:  timestamppb.Now(),
+		Agent:       agentInfoToProto(resolved),
+		FleetEchoes: fleetEchoes(s.registry.GetAll()),
 	}, nil
+}
+
+// gatewayCallerKey marks a request that came in through the external gateway's interceptor.
+type gatewayCallerKey struct{}
+
+func withGatewayCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, gatewayCallerKey{}, true)
+}
+
+// registrantLabels is labels with model.LabelExternal set by the listener, not by the agent: every
+// gateway registrant runs outside the cluster, and the in-cluster listener serves pods and nodes only.
+// The agent's own value is never trusted, so it can neither publish itself as a scrape target nor
+// pose as a DaemonSet agent.
+func registrantLabels(ctx context.Context, labels map[string]string) map[string]string {
+	gateway, _ := ctx.Value(gatewayCallerKey{}).(bool)
+	if _, claimed := labels[model.LabelExternal]; !gateway && !claimed {
+		return labels
+	}
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		if k != model.LabelExternal {
+			out[k] = v
+		}
+	}
+	if gateway {
+		out[model.LabelExternal] = "true"
+	}
+	return out
 }
 
 // maxPort bounds the port fields of AgentMeta: they are uint32 on the wire, so a value no socket
@@ -244,8 +262,9 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 const maxPort = 65535
 
 // validateAgentMeta rejects a registration that cannot describe a probe target. The PodIP has to
-// PARSE: a peer with a malformed address is a checker target that can never connect, published to
-// every other agent in the fleet. Ports are optional (0 = a pre-2.4.0 agent), but never > 65535.
+// PARSE and be probeable: a peer with a malformed or loopback address is a checker target that can
+// never connect, published to every other agent in the fleet. Ports are optional (0 = a pre-2.4.0
+// agent), but never > 65535.
 func validateAgentMeta(m *pb.AgentMeta) error {
 	switch {
 	case m == nil:
@@ -258,6 +277,10 @@ func validateAgentMeta(m *pb.AgentMeta) error {
 		return errors.New("register: pod IP is empty")
 	case net.ParseIP(m.GetPodIp()) == nil:
 		return fmt.Errorf("register: pod IP %q is not an IP address", m.GetPodIp())
+	case config.UnreachableAdvertiseAddress(net.ParseIP(m.GetPodIp())) != "":
+		return fmt.Errorf("register: pod IP %q is %s, which peers cannot probe; "+
+			"set agent.advertiseAddress to an address they can reach",
+			m.GetPodIp(), config.UnreachableAdvertiseAddress(net.ParseIP(m.GetPodIp())))
 	case m.GetHttpPort() > maxPort:
 		return fmt.Errorf("register: http_port %d is out of range", m.GetHttpPort())
 	case m.GetUdpPort() > maxPort:
@@ -283,15 +306,14 @@ func (s *GRPCServer) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*em
 // Unknown agent IDs are a no-op and do not return an error.
 func (s *GRPCServer) Deregister(_ context.Context, req *pb.DeregisterRequest) (*emptypb.Empty, error) {
 	s.registry.Deregister(req.GetAgentId())
-	s.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(s.registry.Count()))
 	return &emptypb.Empty{}, nil
 }
 
 // WatchPeers server-streams an agent's peer list, which is the probe plan; leader-only when leader
 // election is enabled.
 func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegistry_WatchPeersServer) error {
-	if s.lostLeadership() {
-		return status.Error(codes.Unavailable, "not the leader")
+	if s.gate.lost() {
+		return errNotLeader
 	}
 
 	agentID := req.GetAgentId()
@@ -328,69 +350,78 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 	}
 	// Through the same bounded write as every later update: the FIRST send is the one a subscriber
 	// that never reads blocks on.
-	if err := s.sendPeerUpdate(stream, w, &pb.PeerUpdate{
-		Type:      pb.PeerUpdate_FULL_SYNC,
-		Peers:     pbPeers,
-		Timestamp: timestamppb.Now(),
-	}); err != nil {
+	initial := &pb.PeerUpdate{
+		Type:        pb.PeerUpdate_FULL_SYNC,
+		Peers:       pbPeers,
+		Timestamp:   timestamppb.Now(),
+		FleetEchoes: fleetEchoes(s.registry.GetAll()),
+	}
+	if err := s.boundedSend(stream.Context(), w.desynced, func() error { return stream.Send(initial) }); err != nil {
 		return err
 	}
 
-	// kube-proxy leaves established connections alone, so a demoted replica has to end the stream
-	// itself for the agent's reconnect loop to move it to the new leader.
+	// A desynced stream ends so that the agent resubscribes: every update is a FULL_SYNC applied by
+	// wholesale replacement, so a dropped one would leave the agent on a stale mesh indefinitely.
+	return pumpStream(stream.Context(), s, w.ch, w.desynced, stream.Send)
+}
+
+var (
+	errNotLeader      = status.Error(codes.Unavailable, notLeaderMsg)
+	errLeadershipLost = status.Error(codes.Unavailable, "leadership lost")
+	errShuttingDown   = status.Error(codes.Unavailable, "controller shutting down")
+	errDesynced       = status.Error(codes.Unavailable, "peer update dropped: resubscribe for a full sync")
+	errNotReading     = status.Error(codes.Unavailable,
+		"stream update could not be written: the subscriber is not reading its stream")
+)
+
+// pumpStream sends what ch delivers until the client leaves, the controller shuts down, desynced
+// fires (a nil one never does) or this replica loses the lease. kube-proxy leaves established
+// connections alone, so a demoted replica has to end its streams itself for the client's reconnect
+// loop to reach the new leader.
+func pumpStream[T any](
+	ctx context.Context, s *GRPCServer, ch <-chan T, desynced <-chan struct{}, send func(T) error,
+) error {
 	leaderCheck := time.NewTicker(s.leaderCheckInterval)
 	defer leaderCheck.Stop()
 
 	for {
 		select {
-		case update, ok := <-w.ch:
+		// No manager closes a subscription channel while its stream runs; the check only keeps a
+		// closed one from spinning.
+		case msg, ok := <-ch:
 			if !ok {
 				return nil
 			}
-			if err := s.sendPeerUpdate(stream, w, update); err != nil {
+			if err := s.boundedSend(ctx, desynced, func() error { return send(msg) }); err != nil {
 				return err
 			}
-		case <-w.desynced:
-			/* A peer update could not be queued for this stream, so what it holds is no longer what
-			   the registry holds — and every update is a FULL_SYNC applied by wholesale replacement,
-			   so the loss is not self-correcting. Ending the stream is the recovery: the agent's
-			   reconnect loop re-subscribes and the first thing WatchPeers sends is a fresh
-			   FULL_SYNC. Dropping the message instead left an agent probing a mesh that no longer
-			   existed, indefinitely — the stream stayed healthy, heartbeats kept succeeding, and
-			   nothing anywhere resynced it. */
-			return status.Error(codes.Unavailable, "peer update dropped: resubscribe for a full sync")
+		case <-desynced:
+			return errDesynced
 		case <-leaderCheck.C:
-			if s.lostLeadership() {
-				return status.Error(codes.Unavailable, "leadership lost")
+			if s.gate.lost() {
+				return errLeadershipLost
 			}
 		case <-s.stopCh:
-			return status.Error(codes.Unavailable, "controller shutting down")
-		case <-stream.Context().Done():
-			return stream.Context().Err()
+			return errShuttingDown
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
 
 /*
-sendPeerUpdate performs ONE stream.Send with a bound on how long it may block.
+boundedSend performs ONE stream.Send with a bound on how long it may block. Send parks on the HTTP/2
+flow-control window, so a subscriber that stops reading while keeping its connection alive would
+hold the handler inside Send, where it observes neither desynced, the leader check nor Shutdown.
 
-stream.Send parks on the HTTP/2 stream's flow-control window, so a subscriber that stops reading
-while keeping the connection alive froze the handler goroutine inside it — and a goroutine parked in
-Send is a goroutine that will never reach its select again. It could not observe w.desynced, could
-not observe the leadership check, and could not observe s.stopCh: BroadcastPeerUpdate went on filling
-its 16-deep mailbox, logged "ending the stream so the agent resyncs" on every topology change after
-that, and ended nothing. The connection gauge and the goroutine were held until the client's TCP
-died, which for a frozen pod can be a very long time.
-
-A Send that cannot make progress inside peerSendTimeout is treated as the subscriber being gone: the
-handler returns, which closes the stream, which unblocks the goroutine below (it writes to a buffered
-channel and exits). Only one Send is ever in flight, so this does not violate the one-writer rule.
+A Send that makes no progress within peerSendTimeout counts as the subscriber being gone: the
+handler returns, which closes the stream and unblocks the goroutine below (it writes to a buffered
+channel and exits). Only one Send is ever in flight, so the one-writer rule holds. desynced may be
+nil.
 */
-func (s *GRPCServer) sendPeerUpdate(
-	stream pb.AgentRegistry_WatchPeersServer, w *peerWatcher, update *pb.PeerUpdate,
-) error {
+func (s *GRPCServer) boundedSend(ctx context.Context, desynced <-chan struct{}, send func() error) error {
 	done := make(chan error, 1)
-	go func() { done <- stream.Send(update) }()
+	go func() { done <- send() }()
 
 	timer := time.NewTimer(peerSendTimeout)
 	defer timer.Stop()
@@ -399,32 +430,29 @@ func (s *GRPCServer) sendPeerUpdate(
 	case err := <-done:
 		return err
 	case <-timer.C:
-		return status.Error(codes.Unavailable,
-			"peer update could not be written: the subscriber is not reading its stream")
-	case <-w.desynced:
-		return status.Error(codes.Unavailable, "peer update dropped: resubscribe for a full sync")
+		return errNotReading
+	case <-desynced:
+		return errDesynced
 	case <-s.stopCh:
-		return status.Error(codes.Unavailable, "controller shutting down")
-	case <-stream.Context().Done():
-		return stream.Context().Err()
+		return errShuttingDown
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-// peerSendTimeout bounds ONE write to a peer-update subscriber. It is generous next to a healthy
-// agent's read loop (microseconds) and short next to the interval at which topology changes arrive.
+// peerSendTimeout bounds ONE write to any server stream. It is generous next to a healthy client's
+// read loop (microseconds) and short next to the interval at which topology changes arrive.
 const peerSendTimeout = 10 * time.Second
 
 // WatchTasks server-streams on-demand diagnostic tasks to an agent. It mirrors
 // the WatchPeers lifecycle: register a subscription, count the connection, and
 // clean up on stream close. Task fan-out is owned by the TaskManager.
 func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegistry_WatchTasksServer) error {
-	if s.lostLeadership() {
-		return status.Error(codes.Unavailable, "not the leader")
+	if s.gate.lost() {
+		return errNotLeader
 	}
 
-	agentID := req.GetAgentId()
-
-	tasks, cleanup := s.taskMgr.Subscribe(agentID)
+	tasks, cleanup := s.taskMgr.Subscribe(req.GetAgentId())
 	s.metrics.ControllerGRPCConnections.WithLabelValues().Inc()
 
 	defer func() {
@@ -432,34 +460,7 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
 	}()
 
-	/* The same demotion check WatchPeers and WatchEvents carry. Without it a replica demoted while
-	   it stayed alive kept serving task subscriptions forever: its subscriber map and the connection
-	   gauges kept counting agents it no longer owns, and a client that does not tear the whole
-	   ClientConn down stayed pinned to the wrong replica. */
-	leaderCheck := time.NewTicker(s.leaderCheckInterval)
-	defer leaderCheck.Stop()
-
-	for {
-		select {
-		// The TaskManager never closes the subscription channel (see Subscribe), so this branch does not
-		// fire on teardown.
-		case task, ok := <-tasks:
-			if !ok {
-				return nil
-			}
-			if err := stream.Send(task); err != nil {
-				return err
-			}
-		case <-leaderCheck.C:
-			if s.lostLeadership() {
-				return status.Error(codes.Unavailable, "leadership lost")
-			}
-		case <-s.stopCh:
-			return status.Error(codes.Unavailable, "controller shutting down")
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		}
-	}
+	return pumpStream(stream.Context(), s, tasks, nil, stream.Send)
 }
 
 // WatchExternalChecks server-streams an agent's CONTINUOUS external-check assignment; a change
@@ -468,8 +469,8 @@ func (s *GRPCServer) WatchExternalChecks(
 	req *pb.WatchExternalChecksRequest,
 	stream pb.AgentRegistry_WatchExternalChecksServer,
 ) error {
-	if s.lostLeadership() {
-		return status.Error(codes.Unavailable, "not the leader")
+	if s.gate.lost() {
+		return errNotLeader
 	}
 
 	agentID := req.GetAgentId()
@@ -484,35 +485,12 @@ func (s *GRPCServer) WatchExternalChecks(
 		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
 	}()
 
-	if err := stream.Send(s.externalMgr.Assignment(agentID)); err != nil {
+	initial := s.externalMgr.Assignment(agentID)
+	if err := s.boundedSend(stream.Context(), nil, func() error { return stream.Send(initial) }); err != nil {
 		return err
 	}
 
-	// See WatchTasks: a demoted replica has to end its own streams.
-	leaderCheck := time.NewTicker(s.leaderCheckInterval)
-	defer leaderCheck.Stop()
-
-	for {
-		select {
-		// The ExternalCheckManager never closes the subscription channel (see Subscribe), so this branch
-		// does not fire on teardown.
-		case assignment, ok := <-updates:
-			if !ok {
-				return nil
-			}
-			if err := stream.Send(assignment); err != nil {
-				return err
-			}
-		case <-leaderCheck.C:
-			if s.lostLeadership() {
-				return status.Error(codes.Unavailable, "leadership lost")
-			}
-		case <-s.stopCh:
-			return status.Error(codes.Unavailable, "controller shutting down")
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		}
-	}
+	return pumpStream(stream.Context(), s, updates, nil, stream.Send)
 }
 
 // ReportTaskResult delivers a task outcome from an agent back to the waiting
@@ -526,8 +504,8 @@ func (s *GRPCServer) ReportTaskResult(_ context.Context, res *pb.TaskResult) (*e
 // WatchEvents server-streams controller domain events to the Console; leader-only when leader
 // election is enabled.
 func (s *GRPCServer) WatchEvents(_ *pb.WatchEventsRequest, stream pb.EventStream_WatchEventsServer) error {
-	if s.lostLeadership() {
-		return status.Error(codes.Unavailable, "not the leader")
+	if s.gate.lost() {
+		return errNotLeader
 	}
 
 	id := uuid.NewString()
@@ -547,34 +525,7 @@ func (s *GRPCServer) WatchEvents(_ *pb.WatchEventsRequest, stream pb.EventStream
 		close(ch)
 	}()
 
-	leaderCheck := time.NewTicker(s.leaderCheckInterval)
-	defer leaderCheck.Stop()
-
-	for {
-		select {
-		case ev, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			if err := stream.Send(ev); err != nil {
-				return err
-			}
-		case <-leaderCheck.C:
-			if s.lostLeadership() {
-				return status.Error(codes.Unavailable, "leadership lost")
-			}
-		case <-s.stopCh:
-			return status.Error(codes.Unavailable, "controller shutting down")
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		}
-	}
-}
-
-// lostLeadership reports whether leader election is on and this replica is not
-// (or is no longer) the leader.
-func (s *GRPCServer) lostLeadership() bool {
-	return s.leaderElection && (s.isLeader == nil || !s.isLeader())
+	return pumpStream(stream.Context(), s, ch, nil, stream.Send)
 }
 
 // PublishEvent assigns a sequence number and timestamp; callers construct ev with only the oneof
@@ -651,11 +602,10 @@ func (w *peerWatcher) markDesynced() {
 SchedulePeerBroadcast coalesces peer fan-out: it records the newest snapshot and arms ONE
 trailing-edge flush per window instead of broadcasting on every registry change.
 
-During a rollout N changes arrive as a burst and each used to run its own O(N) broadcast — O(N²)
-messages that overflowed peerWatcherBuffer, desynced every stream, and each desync then cost a
-reconnect plus one more FULL_SYNC. Collapsing is safe because every update is a FULL_SYNC applied
-by wholesale replacement: the newest list supersedes anything a suppressed broadcast would have
-said. The armed timer is deliberately NOT reset by later arrivals — a resetting debounce never
+A rollout lands N changes in a burst, and a broadcast per change would send O(N²) messages,
+overflow peerWatcherBuffer and desync every stream. Collapsing is safe because every update is a
+FULL_SYNC applied by wholesale replacement: the newest list supersedes anything a suppressed
+broadcast would have said. The armed timer is deliberately NOT reset by later arrivals — a resetting debounce never
 fires under sustained churn — so staleness is bounded by one window.
 
 Callers arrive in mutation order (the registry publishes under notifyMu), so "newest snapshot
@@ -689,7 +639,7 @@ func (s *GRPCServer) flushPeerBroadcast() {
 	}
 	// A replica demoted inside the window has nothing to announce about a fleet it no longer owns
 	// (ResetQuiet's reasoning); the new leader's own FULL_SYNC replaces the plan.
-	if s.lostLeadership() {
+	if s.gate.lost() {
 		return
 	}
 	s.BroadcastPeerUpdate(agents)
@@ -710,6 +660,7 @@ func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 	for i := range agents {
 		protos[i] = peerToProto(agents[i])
 	}
+	echoes := fleetEchoes(agents)
 	now := timestamppb.Now()
 
 	// Read once per broadcast, not per watcher: a plan swap mid-loop must not hand half the fleet
@@ -733,9 +684,10 @@ func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 		}
 		// One update per id, shared by every stream open for that id.
 		update := &pb.PeerUpdate{
-			Type:      pb.PeerUpdate_FULL_SYNC,
-			Peers:     filtered,
-			Timestamp: now,
+			Type:        pb.PeerUpdate_FULL_SYNC,
+			Peers:       filtered,
+			Timestamp:   now,
+			FleetEchoes: echoes,
 		}
 
 		for w := range set {
@@ -785,6 +737,17 @@ func peerToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hugePar
 		HttpPort: portToProto(a.HTTPPort),
 		UdpPort:  portToProto(a.UDPPort),
 	}
+}
+
+// fleetEchoes is every agent's echo endpoint. A sparse plan hides most of the fleet from an agent's
+// peer list, and an echo that knows only its peers answers a stranger's echo: one forged datagram
+// then bounces between the two until the echo limiter drops it.
+func fleetEchoes(agents []model.AgentInfo) []*pb.EchoEndpoint {
+	out := make([]*pb.EchoEndpoint, len(agents))
+	for i := range agents {
+		out[i] = &pb.EchoEndpoint{Address: agents[i].PodIP, Port: portToProto(agents[i].UDPPort)}
+	}
+	return out
 }
 
 // portToProto narrows a stored port for the wire. Registration already refused anything above

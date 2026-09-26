@@ -41,12 +41,12 @@ type TestDispatcher interface {
 // are persisted CONFIGURATION and get no in-memory fallback, targetsUnavailableDetail's
 // rule.
 const webhooksUnavailableDetail = "webhook endpoints are persisted configuration with no in-memory fallback: " +
-	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/webhooks"
+	databaseKnob + " to enable /api/v1/webhooks"
 
 // webhookKeyUnavailableDetail is served for the two operations that need the cipher.
 const webhookKeyUnavailableDetail = "webhook secrets are encrypted at rest and this console has no encryption " +
-	"key configured: set console.webhooks.encryptionKey (32 bytes, base64, from a Secret) to create or " +
-	"test webhook endpoints"
+	"key configured: set webhooks.encryptionKeyFile in the console config (Helm: console.webhooks.existingSecret, " +
+	"base64 of 32 random bytes) to create or test webhook endpoints"
 
 // webhookValidationPrefix is the prefix store.WebhookInput.Validate builds
 // every one of its errors with.
@@ -143,11 +143,10 @@ func writeWebhookStoreError(w http.ResponseWriter, name, id string, err error) {
 // the callers.
 func decodeWebhookRequest(w http.ResponseWriter, r *http.Request) (webhookRequest, bool) {
 	var req webhookRequest
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
-			`a webhook body must be JSON with "name", "url" (http/https), "events" `+
-				`(a subset of incident.created, incident.resolved, incident.reopened), `+
-				`an optional "enabled", and a write-only "secret"`))
+	if !decodeMutationBody(w, r, &req,
+		`a webhook body must be JSON with "name", "url" (http/https), "events" `+
+			`(a subset of incident.created, incident.resolved, incident.reopened), `+
+			`an optional "enabled", and a write-only "secret"`) {
 		return webhookRequest{}, false
 	}
 	if req.Secret != nil && *req.Secret == "" {

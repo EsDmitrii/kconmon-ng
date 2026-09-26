@@ -272,7 +272,7 @@ func TestListK8sEventsPagesNewestFirst(t *testing.T) {
 
 	const total = 7
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		in := k8sEventInput("uid-"+strconv.Itoa(i), "1", "node-a", base.Add(time.Duration(i)*time.Minute))
 		if _, err := db.InsertK8sEvent(ctx, in); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
@@ -396,7 +396,7 @@ FROM generate_series(1, $1::int) AS g`, k8sIdxSeedRows); err != nil {
 
 	// --- half one: the shipped call moves the index's scan counter ---------
 
-	before := idxScans(t, ctx, conn, "k8s_events_name_time_idx")
+	before := idxScans(ctx, t, conn, "k8s_events_name_time_idx")
 
 	page, err := db.ListK8sEvents(ctx, store.K8sEventFilter{Name: "node-7", Limit: 50})
 	if err != nil {
@@ -416,7 +416,7 @@ FROM generate_series(1, $1::int) AS g`, k8sIdxSeedRows); err != nil {
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
-		after = idxScans(t, ctx, conn, "k8s_events_name_time_idx")
+		after = idxScans(ctx, t, conn, "k8s_events_name_time_idx")
 		if after > before {
 			break
 		}

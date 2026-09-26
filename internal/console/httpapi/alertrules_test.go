@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
@@ -224,8 +225,8 @@ func TestAlertRulesWithoutStoreReturn503(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 			t.Errorf("%s %s Content-Type = %q, want application/problem+json", c.method, c.path, ct)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -253,10 +254,11 @@ func TestAlertingOffIs409NamingTheFeatureFlag(t *testing.T) {
 		if w.Code != http.StatusConflict {
 			t.Errorf("%s %s with alerting off = %d, want 409: %s", c.method, c.path, w.Code, w.Body)
 		}
-		if !strings.Contains(w.Body.String(), "console.alerting.enabled") {
-			t.Errorf("%s %s 409 detail = %s, want it to name console.alerting.enabled", c.method, c.path, w.Body)
+		const knob = "alerting.enabled in the console config (Helm: console.alerting.enabled)"
+		if !strings.Contains(problemDetail(t, w.Body.Bytes()), knob) {
+			t.Errorf("%s %s 409 detail = %s, want it to name %s", c.method, c.path, w.Body, knob)
 		}
-		if strings.Contains(w.Body.String(), "console.database.mode") {
+		if strings.Contains(w.Body.String(), "database.dsnFile") {
 			t.Errorf("%s %s 409 detail names the database: %s -- the database is fine here", c.method, c.path, w.Body)
 		}
 	}
@@ -602,7 +604,7 @@ func TestForeignRulesServeAProjectionNeverTheRawObject(t *testing.T) {
 		}}},
 	}}
 	syncer := &fakeRuleSyncer{foreign: []promrules.ForeignRule{{
-		Name: "someone-elses-rules", Groups: 1, Rules: 1,
+		Name: "someone-elses-rules", Groups: 1, Rules: 1, AlertRules: 1,
 		ManagedBy: "some-other-chart", Object: raw,
 	}}}
 	st := newFakeAlertRuleStore()
@@ -620,8 +622,8 @@ func TestForeignRulesServeAProjectionNeverTheRawObject(t *testing.T) {
 		t.Fatalf("foreign = %+v, want exactly one entry", body.Foreign)
 	}
 	got := body.Foreign[0]
-	if got.Name != "someone-elses-rules" || got.Groups != 1 || got.Rules != 1 || got.ManagedBy != "some-other-chart" {
-		t.Errorf("foreign[0] = %+v, want the four projected fields", got)
+	if got.Name != "someone-elses-rules" || got.Groups != 1 || got.Rules != 1 || got.AlertRules != 1 || got.ManagedBy != "some-other-chart" {
+		t.Errorf("foreign[0] = %+v, want the five projected fields", got)
 	}
 	// The raw object is NOT served: it is somebody else's object, and its
 	// annotations and expressions are a leak surface this API has no reason
@@ -1495,5 +1497,25 @@ func TestAlertRulePreviewSpendsThePromQLBudgetForTemplatedKindsToo(t *testing.T)
 		strings.NewReader(validAlertRuleBody), mutateWithCSRF)
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second templated preview = %d, want 429: the budget must bound every kind", second.Code)
+	}
+}
+
+// The raw preview's extra gate is a permission denial like any other: the same problem title a
+// client already matches on, and the same authz_denied counter an operator alerts on.
+func TestAlertRuleRawPreviewDenialLooksLikeAuthorizeDenial(t *testing.T) {
+	reader := newPermsServer(t, []authz.Permission{authz.PermAlertsRead},
+		Deps{AlertRules: newFakeAlertRuleStore(), Prometheus: newFakePrometheus(t, promVector(1))})
+
+	raw := `{"name":"Draft","kind":"raw","severity":"warning","params":{"expr":"vector(1) < 0"}}`
+	w := doRequest(t, reader, http.MethodPost, "/api/v1/alert-rules/preview", strings.NewReader(raw), mutateWithCSRF)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("raw preview with alerts:read alone = %d, want 403: %s", w.Code, w.Body)
+	}
+	var p problem
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil || p.Title != "permission denied" {
+		t.Errorf("title = %q (%s), want \"permission denied\" as authorize answers", p.Title, w.Body)
+	}
+	if got := testutil.ToFloat64(reader.metrics.AuthzDenied.WithLabelValues(string(authz.PermPromQLQuery))); got != 1 {
+		t.Errorf("authz_denied{permission=%q} = %v, want 1", authz.PermPromQLQuery, got)
 	}
 }

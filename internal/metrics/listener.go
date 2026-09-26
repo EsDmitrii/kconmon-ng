@@ -8,26 +8,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-/*
-Package-level: the METRICS listener, separate from whatever API a component also serves.
-
-The controller serves its whole API on one port — GET /api/v1/topology, POST /api/v1/diagnostics,
-PUT /api/v1/external-checks — and authenticates none of it; the only gate is leader election, which
-is availability, not authorization. A NetworkPolicy rule admitting a scraper to that port therefore
-admitted whoever else lives in the scraper's namespace to the fleet's control plane: on a real
-cluster that namespace also holds Grafana, node-exporter, kube-state-metrics and the operator, any
-of which is one compromise away from dispatching probes and rewriting external-check assignments.
-Narrowing the rule from "every namespace" to "the monitoring namespace" moved the blast radius; it
-did not remove it, because a NetworkPolicy cannot say "this port, but only these paths".
-
-Two listeners can. Scraping needs /metrics and nothing else, so /metrics gets a port of its own and
-the policy opens that one. The API port keeps serving /metrics too — anyone scraping it directly is
-unaffected — but nothing in the chart opens it to a scraper any more.
-
-The health endpoints ride along because a probe and a scrape want the same thing: a port that is
-safe to expose.
-*/
-
 // Route is an extra endpoint a component mounts on its metrics listener next to the fixed three.
 // The controller's Prometheus SD body lives here because metricsPort is the one port the chart's
 // NetworkPolicy opens to the scraper; the agent and the console mount nothing extra.
@@ -37,7 +17,9 @@ type Route struct {
 }
 
 // NewListenerHandler builds the metrics-listener mux: /metrics plus the two health endpoints, plus
-// any extra routes. `ready` reports readiness; a nil func means always ready.
+// any extra routes. `ready` reports readiness; a nil func means always ready. It gets a port of its
+// own because the controller's API port is unauthenticated and a NetworkPolicy opens ports, not
+// paths: a scraper let in here reaches nothing that drives the fleet.
 func NewListenerHandler(promReg *prometheus.Registry, ready func() bool, extra ...Route) http.Handler {
 	mux := http.NewServeMux()
 	for _, r := range extra {

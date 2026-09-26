@@ -53,8 +53,8 @@ func TestInterleaveBySourceSpreadsTheDispatchWindow(t *testing.T) {
 	}
 }
 
-// TestClampTimeoutForGivesMTRItsTraceBudget pins the deadline half of the fix: an operator-supplied
-// timeout below the trace budget turned work still in flight into a dispatch timeout.
+// An operator-supplied timeout below the trace budget would turn a trace still in flight into a
+// dispatch timeout, so mtr gets the budget as a floor.
 func TestClampTimeoutForGivesMTRItsTraceBudget(t *testing.T) {
 	if got := clampTimeoutFor("mtr", 5*time.Second); got != mtrMinPerPairTimeout {
 		t.Errorf("mtr per-pair timeout = %s, want the %s floor", got, mtrMinPerPairTimeout)
@@ -67,9 +67,9 @@ func TestClampTimeoutForGivesMTRItsTraceBudget(t *testing.T) {
 	}
 }
 
-// A black-holed pair's pmtu search waits out a read deadline per lost datagram, at full size and
-// on up to one bisection step in two. Below the floor the run reports "unreachable" for exactly the
-// pair the operator started it to look at.
+// A black-holed pair's pmtu search waits out a read deadline per lost datagram (both full-size
+// attempts, up to 16 bisection steps, two confirmations). Below the floor the run reports
+// "unreachable" for exactly the pair the operator started it to look at.
 func TestClampTimeoutForGivesPMTUItsSearchBudget(t *testing.T) {
 	if got := clampTimeoutFor("pmtu", 0); got < 10*time.Second {
 		t.Errorf("pmtu per-pair timeout for an unspecified deadline = %s, want the search budget", got)
@@ -144,10 +144,8 @@ func TestDispatchRoundNeverExceedsOneAgentsCapacity(t *testing.T) {
 	}
 }
 
-// TestEffectiveSampleIntervalStretchesForSlowTypes is the owner's case: a 15m MTR run over 4 pairs
-// used to be refused because the base 5s cadence cannot hold a 90s trace — but the base cadence is
-// derived from the duration and an operator cannot dial it, so refusing was advice nobody could
-// act on. The cadence is re-planned instead.
+// A 15m MTR run cannot keep the base 5s cadence with a 90s trace, and the operator cannot dial that
+// cadence, so the run is re-planned around the trace budget rather than refused.
 func TestEffectiveSampleIntervalStretchesForSlowTypes(t *testing.T) {
 	pairs := allToAllPairs(2) // 2 pairs, one per source
 	mtrSpec := &Spec{Type: "mtr", Duration: 15 * time.Minute}
@@ -158,6 +156,30 @@ func TestEffectiveSampleIntervalStretchesForSlowTypes(t *testing.T) {
 	}
 	if samples := PlannedSamplesPerPair(mtrSpec.Duration, got); samples != 10 {
 		t.Errorf("planned samples = %d, want 10 (15m at 90s)", samples)
+	}
+}
+
+// A path MTU probe over a black-holed pair waits out a read deadline per lost datagram, about 10s a
+// probe, so a pmtu duration run is planned like a traceroute: around its per-pair timeout.
+func TestPMTUIsPlannedAroundItsPerPairTimeout(t *testing.T) {
+	pairs := allToAllPairs(10) // 9 destinations per source: five batches at two per source
+	timeout := clampTimeoutFor("pmtu", 0)
+	cad := PlanCadence(&Spec{Type: "pmtu", Duration: time.Minute}, pairs, timeout)
+
+	if want := roundFloor(pairs, timeout); cad.Interval != want {
+		t.Errorf("pmtu interval = %s, want one round's floor %s", cad.Interval, want)
+	}
+	if cad.Adjusted != IntervalStretched {
+		t.Errorf("adjusted = %q, want %q", cad.Adjusted, IntervalStretched)
+	}
+	if want := PlannedSamplesPerPair(time.Minute, roundFloor(pairs, timeout)); cad.SamplesPerPair != want {
+		t.Errorf("samplesPerPair = %d, want %d", cad.SamplesPerPair, want)
+	}
+
+	// The fast probes keep planning around their base cadence.
+	tcp := PlanCadence(&Spec{Type: "tcp", Duration: time.Minute}, pairs, clampTimeoutFor("tcp", 0))
+	if tcp.Adjusted != "" || tcp.Interval != tcp.Base {
+		t.Errorf("tcp plan = %+v, want the unstretched base cadence", tcp)
 	}
 }
 

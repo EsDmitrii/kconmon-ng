@@ -18,6 +18,7 @@ import (
 // fakeRoleAdmin is a RoleAdmin test double: an in-memory roles/bindings
 // table, mutex-guarded for -race.
 type fakeRoleAdmin struct {
+	guardMu  sync.Mutex // the *Guarded methods' stand-in for the store's advisory lock
 	mu       sync.Mutex
 	roles    map[string]store.Role
 	bindings map[int64]store.RoleBinding

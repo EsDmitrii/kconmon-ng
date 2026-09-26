@@ -1,0 +1,21 @@
+---
+# NetworkPolicy overlay for the e2e NetworkPolicy leg, layered last on values.yaml, console-values.yaml
+# and prometheus-values.yaml. kindnet enforces NetworkPolicy since kind v0.24, so a flow a rule misses
+# fails the leg instead of passing on an open cluster.
+networkPolicy:
+  enabled: true
+  # The fixture Prometheus from e2e/testdata/prometheus.yaml runs in the release namespace.
+  prometheusNamespace: default
+  prometheusPodLabels:
+    app: kconmon-e2e-prometheus
+  # Only the external-check target of this leg, the fixture Prometheus pod on its own port. A wider
+  # rule (the pod and Service CIDRs, any port) would also carry agent -> controller and DNS, so a
+  # broken rule for either would pass here.
+  externalEgress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kconmon-e2e-prometheus
+      ports:
+        - protocol: TCP
+          port: 9090

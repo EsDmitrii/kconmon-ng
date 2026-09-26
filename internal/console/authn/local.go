@@ -45,7 +45,7 @@ func (l *localAuthenticator) Authenticate(r *http.Request) (authz.Subject, error
 
 	sess, ok, err := l.sessions.Get(r.Context(), cookie.Value)
 	if err != nil {
-		return authz.Subject{}, fmt.Errorf("authn: local: get session: %w", err)
+		return authz.Subject{}, fmt.Errorf("authn: local: get session: %w: %w", ErrUnavailable, err)
 	}
 	if !ok {
 		// An id that is absent, corrupted, or already past its own ExpiresAt (SessionStore.Get collapses
@@ -61,13 +61,14 @@ func (l *localAuthenticator) Authenticate(r *http.Request) (authz.Subject, error
 			// an unknown session id above.
 			return authz.Subject{}, ErrNoCredentials
 		}
-		return authz.Subject{}, fmt.Errorf("authn: local: get user: %w", err)
+		return authz.Subject{}, fmt.Errorf("authn: local: get user: %w: %w", ErrUnavailable, err)
 	}
 	if user.Disabled {
 		return authz.Subject{}, ErrDisabled
 	}
-	if sess.PasswordStamp != "" && sess.PasswordStamp != PasswordStamp(user.PasswordHash) {
-		// The password changed after this session was opened: re-prompt, it is not an attack.
+	if sess.PasswordStamp != "" && sess.PasswordStamp != SessionStamp(user.PasswordHash, user.SessionEpoch) {
+		// The password changed, or the user was disabled, after this session was opened: re-prompt,
+		// it is not an attack.
 		return authz.Subject{}, ErrNoCredentials
 	}
 

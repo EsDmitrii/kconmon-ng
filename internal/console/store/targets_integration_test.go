@@ -41,7 +41,7 @@ func newTargetsDB(t *testing.T) (*store.DB, string) {
 	return db, dsn
 }
 
-func mustCreateTarget(t *testing.T, ctx context.Context, db *store.DB, name string) store.Target {
+func mustCreateTarget(ctx context.Context, t *testing.T, db *store.DB, name string) store.Target {
 	t.Helper()
 	tgt, err := db.CreateTarget(ctx, store.TargetInput{Name: name, Kind: "host", Address: "10.0.0.1"})
 	if err != nil {
@@ -50,7 +50,7 @@ func mustCreateTarget(t *testing.T, ctx context.Context, db *store.DB, name stri
 	return tgt
 }
 
-func mustCreateDefinition(t *testing.T, ctx context.Context, db *store.DB, name, targetID string) store.Definition {
+func mustCreateDefinition(ctx context.Context, t *testing.T, db *store.DB, name, targetID string) store.Definition {
 	t.Helper()
 	in := store.DefinitionInput{
 		Name:            name,
@@ -103,7 +103,7 @@ func TestTargetLifecycle(t *testing.T) {
 		t.Errorf("GetTarget = %+v, want %+v", got, created)
 	}
 	var labels map[string]string
-	if err := json.Unmarshal(got.Labels, &labels); err != nil {
+	if err = json.Unmarshal(got.Labels, &labels); err != nil {
 		t.Fatalf("GetTarget: labels are not a JSON object: %v", err)
 	}
 	if labels["env"] != "prod" {
@@ -149,7 +149,7 @@ func TestCreateTargetDuplicateNameIsAlreadyExists(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	mustCreateTarget(t, ctx, db, "edge-gw")
+	mustCreateTarget(ctx, t, db, "edge-gw")
 
 	_, err := db.CreateTarget(ctx, store.TargetInput{Name: "edge-gw", Kind: "url", Address: "https://other.test"})
 	if !errors.Is(err, store.ErrAlreadyExists) {
@@ -157,7 +157,7 @@ func TestCreateTargetDuplicateNameIsAlreadyExists(t *testing.T) {
 	}
 
 	// The same rule on the update path: renaming onto a taken name.
-	other := mustCreateTarget(t, ctx, db, "core-gw")
+	other := mustCreateTarget(ctx, t, db, "core-gw")
 	_, err = db.UpdateTarget(ctx, other.ID, store.TargetInput{Name: "edge-gw", Kind: "host", Address: "10.0.0.2"})
 	if !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("UpdateTarget onto a taken name: err = %v, want ErrAlreadyExists", err)
@@ -169,8 +169,8 @@ func TestDeleteTargetReferencedByDefinitionIsInUse(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	tgt := mustCreateTarget(t, ctx, db, "edge-gw")
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", tgt.ID)
+	tgt := mustCreateTarget(ctx, t, db, "edge-gw")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", tgt.ID)
 	if def.DestinationTargetID != tgt.ID {
 		t.Fatalf("CreateDefinition: DestinationTargetID = %q, want %q", def.DestinationTargetID, tgt.ID)
 	}
@@ -180,7 +180,7 @@ func TestDeleteTargetReferencedByDefinitionIsInUse(t *testing.T) {
 		t.Fatalf("DeleteTarget while referenced: err = %v, want ErrInUse", err)
 	}
 
-	if _, err := db.GetTarget(ctx, tgt.ID); err != nil {
+	if _, err = db.GetTarget(ctx, tgt.ID); err != nil {
 		t.Errorf("GetTarget after the refused delete: %v", err)
 	}
 	survived, err := db.GetDefinition(ctx, def.ID)
@@ -266,7 +266,7 @@ func TestCreateDefinitionRejectsUndialableAdhocAddress(t *testing.T) {
 	// And an update cannot walk a good row into a bad one.
 	broken := good
 	broken.DestinationAddress = "example.test:http"
-	if _, err := db.UpdateDefinition(ctx, def.ID, broken); err == nil {
+	if _, err = db.UpdateDefinition(ctx, def.ID, broken); err == nil {
 		t.Fatal("UpdateDefinition to a non-numeric port = nil, want an error")
 	}
 	after, err := db.GetDefinition(ctx, def.ID)
@@ -285,11 +285,11 @@ func TestDeleteDefinitionCascadesSchedules(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
-	keep := mustCreateDefinition(t, ctx, db, "core-tcp", "")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", "")
+	keep := mustCreateDefinition(ctx, t, db, "core-tcp", "")
 
 	next := time.Now().Add(time.Minute).UTC()
-	var scheduleIDs []string
+	scheduleIDs := make([]string, 0, 3)
 	for range 3 {
 		s, err := db.CreateSchedule(ctx, store.ScheduleInput{
 			DefinitionID: def.ID,
@@ -360,7 +360,7 @@ func TestListTargetsKeysetPagesWithoutDuplicates(t *testing.T) {
 		// Distinct names, and created_at values that mostly collide (the
 		// inserts are milliseconds apart), so the cursor's id half is doing
 		// real tie-breaking work rather than being decorative.
-		tgt := mustCreateTarget(t, ctx, db, "gw-"+string(rune('a'+i%26))+"-"+strings.Repeat("x", i%5+1))
+		tgt := mustCreateTarget(ctx, t, db, "gw-"+string(rune('a'+i%26))+"-"+strings.Repeat("x", i%5+1))
 		want[tgt.ID] = true
 	}
 
@@ -411,7 +411,7 @@ func TestListTargetsFiltersByKind(t *testing.T) {
 	ctx := context.Background()
 
 	for i := range 4 {
-		mustCreateTarget(t, ctx, db, "host-"+string(rune('a'+i)))
+		mustCreateTarget(ctx, t, db, "host-"+string(rune('a'+i)))
 	}
 	for i := range 3 {
 		if _, err := db.CreateTarget(ctx, store.TargetInput{
@@ -444,12 +444,12 @@ func TestListDefinitionsFiltersByTarget(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	tgt := mustCreateTarget(t, ctx, db, "edge-gw")
-	other := mustCreateTarget(t, ctx, db, "core-gw")
-	mustCreateDefinition(t, ctx, db, "edge-tcp", tgt.ID)
-	mustCreateDefinition(t, ctx, db, "edge-http", tgt.ID)
-	mustCreateDefinition(t, ctx, db, "core-tcp", other.ID)
-	mustCreateDefinition(t, ctx, db, "node-tcp", "")
+	tgt := mustCreateTarget(ctx, t, db, "edge-gw")
+	other := mustCreateTarget(ctx, t, db, "core-gw")
+	mustCreateDefinition(ctx, t, db, "edge-tcp", tgt.ID)
+	mustCreateDefinition(ctx, t, db, "edge-http", tgt.ID)
+	mustCreateDefinition(ctx, t, db, "core-tcp", other.ID)
+	mustCreateDefinition(ctx, t, db, "node-tcp", "")
 
 	page, err := db.ListDefinitions(ctx, store.DefinitionFilter{TargetID: tgt.ID})
 	if err != nil {
@@ -494,7 +494,7 @@ func TestListDueSchedulesReturnsOnlyEnabledPastDue(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", "")
 	now := time.Now().UTC()
 	past := now.Add(-2 * time.Minute)
 	older := now.Add(-5 * time.Minute)
@@ -534,7 +534,7 @@ func TestListDueSchedulesReturnsOnlyEnabledPastDue(t *testing.T) {
 	}
 
 	// MarkScheduleFired with a nil next retires the schedule from the poll.
-	if err := db.MarkScheduleFired(ctx, dueSoonest.ID, now, nil, ""); err != nil {
+	if err = db.MarkScheduleFired(ctx, dueSoonest.ID, now, nil, ""); err != nil {
 		t.Fatalf("MarkScheduleFired: %v", err)
 	}
 	after, err := db.GetSchedule(ctx, dueSoonest.ID)
@@ -566,7 +566,7 @@ func TestScheduleLastErrorRoundTrips(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", "")
 	now := time.Now().UTC().Truncate(time.Microsecond) // pg stores microseconds
 	next := now.Add(time.Minute)
 
@@ -584,7 +584,7 @@ func TestScheduleLastErrorRoundTrips(t *testing.T) {
 	}
 
 	const boom = "get destination target 0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22: store: not found"
-	if err := db.MarkScheduleFired(ctx, created.ID, now, &next, boom); err != nil {
+	if err = db.MarkScheduleFired(ctx, created.ID, now, &next, boom); err != nil {
 		t.Fatalf("MarkScheduleFired(failure): %v", err)
 	}
 	failed, err := db.GetSchedule(ctx, created.ID)
@@ -606,7 +606,7 @@ func TestScheduleLastErrorRoundTrips(t *testing.T) {
 
 	// An EDIT is not a fire: the failure survives a full-replace update, so an
 	// operator cannot turn a broken row green by pressing Save.
-	if _, err := db.UpdateSchedule(ctx, created.ID, store.ScheduleInput{
+	if _, err = db.UpdateSchedule(ctx, created.ID, store.ScheduleInput{
 		DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(2 * time.Minute),
 		Enabled: true, NextFireAt: &next,
 	}); err != nil {
@@ -622,7 +622,7 @@ func TestScheduleLastErrorRoundTrips(t *testing.T) {
 
 	// The next fire that goes through clears BOTH halves.
 	later := now.Add(time.Minute)
-	if err := db.MarkScheduleFired(ctx, created.ID, later, &next, ""); err != nil {
+	if err = db.MarkScheduleFired(ctx, created.ID, later, &next, ""); err != nil {
 		t.Fatalf("MarkScheduleFired(success): %v", err)
 	}
 	healthy, err := db.GetSchedule(ctx, created.ID)
@@ -640,7 +640,7 @@ func TestScheduleLastErrorIsTruncated(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
 
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", "")
 	now := time.Now().UTC()
 	created, err := db.CreateSchedule(ctx, store.ScheduleInput{
 		DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(time.Minute), Enabled: true, NextFireAt: &now,
@@ -652,7 +652,7 @@ func TestScheduleLastErrorIsTruncated(t *testing.T) {
 	// Multi-byte on purpose: a byte-sliced UTF-8 message would put a
 	// replacement character on the operator's screen.
 	huge := strings.Repeat("плохо ", 400)
-	if err := db.MarkScheduleFired(ctx, created.ID, now, &now, huge); err != nil {
+	if err = db.MarkScheduleFired(ctx, created.ID, now, &now, huge); err != nil {
 		t.Fatalf("MarkScheduleFired: %v", err)
 	}
 	got, err := db.GetSchedule(ctx, created.ID)
@@ -756,7 +756,7 @@ func listDueSchedulesSQL(t *testing.T) string {
 }
 
 // idxScans reads pg_stat_user_indexes.idx_scan for one index.
-func idxScans(t *testing.T, ctx context.Context, conn *pgxpool.Conn, index string) int64 {
+func idxScans(ctx context.Context, t *testing.T, conn *pgxpool.Conn, index string) int64 {
 	t.Helper()
 	if _, err := conn.Exec(ctx, "SELECT pg_stat_clear_snapshot()"); err != nil {
 		t.Fatalf("pg_stat_clear_snapshot: %v", err)
@@ -777,7 +777,7 @@ func TestListDueSchedulesUsesPartialIndex(t *testing.T) {
 	db, dsn := newTargetsDB(t)
 	ctx := context.Background()
 
-	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	def := mustCreateDefinition(ctx, t, db, "edge-tcp", "")
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -795,20 +795,20 @@ func TestListDueSchedulesUsesPartialIndex(t *testing.T) {
 
 	// Seeded in a single statement rather than through CreateSchedule: 50k round trips would dominate
 	// the suite's runtime.
-	if _, err := conn.Exec(ctx, `
+	if _, err = conn.Exec(ctx, `
 INSERT INTO check_schedules (id, definition_id, kind, interval_ns, enabled, next_fire_at)
 SELECT gen_random_uuid(), $1::uuid, 'interval', 60000000000, true,
        now() - make_interval(secs => $2::int - g)
 FROM generate_series(1, $2::int) AS g`, def.ID, dueIdxSeedRows); err != nil {
 		t.Fatalf("seed %d schedules: %v", dueIdxSeedRows, err)
 	}
-	if _, err := conn.Exec(ctx, "ANALYZE check_schedules"); err != nil {
+	if _, err = conn.Exec(ctx, "ANALYZE check_schedules"); err != nil {
 		t.Fatalf("ANALYZE: %v", err)
 	}
 
 	// --- half one: the shipped call moves the index's scan counter ---------
 
-	before := idxScans(t, ctx, conn, "check_schedules_due_idx")
+	before := idxScans(ctx, t, conn, "check_schedules_due_idx")
 
 	due, err := db.ListDueSchedules(ctx, time.Now().UTC(), 100)
 	if err != nil {
@@ -829,7 +829,7 @@ FROM generate_series(1, $2::int) AS g`, def.ID, dueIdxSeedRows); err != nil {
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
-		after = idxScans(t, ctx, conn, "check_schedules_due_idx")
+		after = idxScans(ctx, t, conn, "check_schedules_due_idx")
 		if after > before {
 			break
 		}
@@ -838,7 +838,7 @@ FROM generate_series(1, $2::int) AS g`, def.ID, dueIdxSeedRows); err != nil {
 				"(was %d before): the shipped query is not being answered by the index", after, before)
 		}
 		time.Sleep(300 * time.Millisecond)
-		if _, err := db.GetTarget(ctx, "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"); !errors.Is(err, store.ErrNotFound) {
+		if _, err = db.GetTarget(ctx, "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("stats-flush nudge: GetTarget err = %v, want ErrNotFound", err)
 		}
 	}
@@ -895,6 +895,52 @@ func TestTargetInvalidInputNeverReachesTheDatabase(t *testing.T) {
 	}
 	if len(page.Targets) != 0 {
 		t.Errorf("a rejected create left %d rows behind", len(page.Targets))
+	}
+}
+
+// validateJSONBStorable's number bounds are jsonb's own: a params literal PostgreSQL stores is stored,
+// and one it refuses with 22003 is a "store: definition: " validation error that never reaches it.
+func TestDefinitionParamsNumbersMatchWhatJSONBStores(t *testing.T) {
+	db, dsn := newTargetsDB(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	cases := []struct {
+		num      string
+		storable bool
+	}{
+		{"1e131071", true}, {"-1e131071", true}, {"100e131069", true}, {"0.001e131074", true},
+		{"1e-16383", true}, {"0e200000", true}, {"12345678901234567890", true},
+		{"1e131072", false}, {"1e200000", false}, {"0.001e131075", false},
+		{"1e-16384", false}, {"1e-20000", false}, {"1.0e-16383", false}, {"0e-16384", false},
+	}
+	for i, tc := range cases {
+		params := `{"x":` + tc.num + `}`
+		if _, pgErr := pool.Exec(ctx, `SELECT $1::text::jsonb`, params); (pgErr == nil) != tc.storable {
+			t.Fatalf("%s: PostgreSQL's jsonb says %v, the case says storable=%v", tc.num, pgErr, tc.storable)
+		}
+		in := store.DefinitionInput{
+			Name: "num-" + strconv.Itoa(i), SourceSelection: "all", DestinationKind: "node",
+			CheckType: "tcp", Plane: "pod", Params: json.RawMessage(params),
+		}
+		_, err := db.CreateDefinition(ctx, in)
+		switch {
+		case tc.storable && err != nil:
+			t.Errorf("%s: jsonb stores it, CreateDefinition = %v", tc.num, err)
+		case !tc.storable && (err == nil || !strings.HasPrefix(err.Error(), "store: definition: ")):
+			t.Errorf("%s: CreateDefinition = %v, want a \"store: definition: \" validation error", tc.num, err)
+		}
+	}
+
+	in := store.DefinitionInput{
+		Name: "nul-plane", SourceSelection: "all", DestinationKind: "node", CheckType: "tcp", Plane: "pod\x00",
+	}
+	if _, err := db.CreateDefinition(ctx, in); err == nil || !strings.HasPrefix(err.Error(), "store: definition: ") {
+		t.Errorf("CreateDefinition with a NUL in plane = %v, want a \"store: definition: \" validation error", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,6 +42,7 @@ type externalTestEnv struct {
 	handler *ExternalChecksHandler
 	mgr     *ExternalCheckManager
 	metrics *metrics.PrometheusMetrics
+	reg     *Registry
 }
 
 func newExternalTestEnv(t *testing.T, leaderElection, isLeader bool) *externalTestEnv {
@@ -53,7 +56,7 @@ func newExternalTestEnv(t *testing.T, leaderElection, isLeader bool) *externalTe
 	srv := NewGRPCServer(reg, m, false, nil, false)
 	h := NewExternalChecksHandler(reg, srv.ExternalCheckManager(), m, leaderElection, func() bool { return isLeader })
 
-	return &externalTestEnv{srv: srv, handler: h, mgr: srv.ExternalCheckManager(), metrics: m}
+	return &externalTestEnv{srv: srv, handler: h, mgr: srv.ExternalCheckManager(), metrics: m, reg: reg}
 }
 
 func (e *externalTestEnv) put(body string) *httptest.ResponseRecorder {
@@ -215,6 +218,113 @@ func TestExternalPutUnknownAgentIgnored(t *testing.T) {
 	}
 }
 
+// A PUT that CHANGES a briefly unknown agent's specs (a definition added or deleted while it was
+// evicted) stores the new specs, not the old ones: the Console records this body as pushed and does not
+// re-PUT it for 2 minutes, so a kept stale list meant probing a deleted target, or never starting a new
+// one, for that long. An open stream gets the change like any other.
+func TestExternalPutStoresNewSpecsOfBrieflyUnknownAgent(t *testing.T) {
+	env := newExternalTestEnv(t, false, true)
+
+	stream, _ := env.watch(t, "agent-a")
+	_ = recvAssignment(t, stream) // initial empty
+	if w := env.put(oneSpecBody); w.Code != http.StatusOK {
+		t.Fatalf("first PUT: expected 200, got %d", w.Code)
+	}
+	_ = recvAssignment(t, stream)
+
+	env.reg.SetTTL(time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	if env.reg.EvictStale() == 0 {
+		t.Fatal("setup: nothing was evicted")
+	}
+
+	changed := `{"agents": {"agent-a": [
+	  {"definitionId":"def-2","target":{"name":"t2","kind":"host","address":"1.1.1.1","port":443},"checkType":"tcp","intervalNs":30000000000,"timeoutNs":5000000000},
+	  {"definitionId":"def-3","target":{"name":"t3","kind":"host","address":"9.9.9.9"},"checkType":"icmp","intervalNs":30000000000,"timeoutNs":5000000000}
+	]}}`
+	w := env.put(changed)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT naming the evicted agent: expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp externalChecksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if len(resp.Unknown) != 1 || resp.Unknown[0] != "agent-a" {
+		t.Errorf("expected agent-a reported as unknown, got %v", resp.Unknown)
+	}
+	ids := func(a *pb.ExternalCheckAssignment) []string {
+		out := make([]string, 0, len(a.GetSpecs()))
+		for _, s := range a.GetSpecs() {
+			out = append(out, s.GetDefinitionId())
+		}
+		return out
+	}
+	if got := ids(env.mgr.Assignment("agent-a")); len(got) != 2 || got[0] != "def-2" || got[1] != "def-3" {
+		t.Errorf("a re-subscribing agent-a gets %v, want [def-2 def-3] from the latest PUT", got)
+	}
+	if got := ids(recvAssignment(t, stream)); len(got) != 2 {
+		t.Errorf("the open stream got %v, want the changed specs", got)
+	}
+}
+
+// An agent the registry dropped between the Console's topology read and its PUT (a missed heartbeat)
+// keeps its assignment: the Console's next ticks compute the same desired state and do not re-PUT
+// until the 2-minute resync, so wiping it here left the agent probing nothing for that long.
+func TestExternalPutKeepsAssignmentOfBrieflyUnknownAgent(t *testing.T) {
+	env := newExternalTestEnv(t, false, true)
+
+	stream, _ := env.watch(t, "agent-a")
+	_ = recvAssignment(t, stream) // initial empty
+	if w := env.put(oneSpecBody); w.Code != http.StatusOK {
+		t.Fatalf("first PUT: expected 200, got %d", w.Code)
+	}
+	if got := recvAssignment(t, stream); len(got.GetSpecs()) != 1 {
+		t.Fatalf("expected the assignment push, got %d specs", len(got.GetSpecs()))
+	}
+
+	env.reg.SetTTL(time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	if env.reg.EvictStale() == 0 {
+		t.Fatal("setup: nothing was evicted")
+	}
+
+	w := env.put(oneSpecBody)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT naming the evicted agent: expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp externalChecksResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if len(resp.Unknown) != 1 || resp.Unknown[0] != "agent-a" {
+		t.Errorf("expected agent-a reported as unknown, got %v", resp.Unknown)
+	}
+	select {
+	case a := <-stream.sent:
+		t.Fatalf("the briefly unknown agent was pushed %d specs; its assignment must be kept", len(a.GetSpecs()))
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got := env.mgr.AssignedCount(); got != 1 {
+		t.Errorf("AssignedCount = %d, want 1: the kept assignment still counts", got)
+	}
+	// A stream that broke with the heartbeat re-subscribes to the kept assignment, not an empty one.
+	if got := env.mgr.Assignment("agent-a"); len(got.GetSpecs()) != 1 {
+		t.Errorf("a re-subscribing agent-a gets %d specs, want 1", len(got.GetSpecs()))
+	}
+
+	// Leaving it out of the body still removes it: the Console's next topology no longer has it.
+	if w := env.put(`{"agents": {}}`); w.Code != http.StatusOK {
+		t.Fatalf("removal PUT: expected 200, got %d", w.Code)
+	}
+	if got := recvAssignment(t, stream); len(got.GetSpecs()) != 0 {
+		t.Fatalf("expected an EMPTY assignment after removal, got %d specs", len(got.GetSpecs()))
+	}
+	if got := env.mgr.AssignedCount(); got != 0 {
+		t.Errorf("AssignedCount = %d, want 0 after removal", got)
+	}
+}
+
 // 5. An agent dropped from a subsequent PUT gets an EMPTY assignment pushed:
 // deletion has to converge, not just stop being re-sent.
 func TestExternalRemovedAgentGetsEmptyAssignment(t *testing.T) {
@@ -364,6 +474,91 @@ func TestExternalStalledSubscriberDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
+// oneTCPSpec is a single tcp spec whose address makes it distinct.
+func oneTCPSpec(addr string) []*pb.ExternalCheckSpec {
+	return []*pb.ExternalCheckSpec{{DefinitionId: "d", CheckType: "tcp",
+		Target: &pb.ExternalTarget{Name: "t", Kind: "host", Address: addr}}}
+}
+
+// fillExternalBuffer queues externalSubscriberBuffer distinct assignments the subscriber has not
+// read, so the next push to it cannot be queued.
+func fillExternalBuffer(m *ExternalCheckManager, agentID string) {
+	for i := range externalSubscriberBuffer {
+		m.Apply(map[string][]*pb.ExternalCheckSpec{agentID: oneTCPSpec(string(rune('a' + i)))})
+	}
+}
+
+// drainExternal reads n queued assignments and returns the last one.
+func drainExternal(t *testing.T, ch <-chan *pb.ExternalCheckAssignment, n int) *pb.ExternalCheckAssignment {
+	t.Helper()
+	var last *pb.ExternalCheckAssignment
+	for range n {
+		select {
+		case last = <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out draining queued assignments")
+		}
+	}
+	return last
+}
+
+// A push that could not be queued is re-pushed by the next PUT even though the desired state has
+// not changed since: the console's periodic re-PUT is the recovery path.
+func TestExternalDroppedUpdateIsRePushed(t *testing.T) {
+	m := NewExternalCheckManager()
+	ch, cleanup := m.Subscribe("agent-a")
+	defer cleanup()
+
+	fillExternalBuffer(m, "agent-a")
+	final := map[string][]*pb.ExternalCheckSpec{"agent-a": oneTCPSpec("final")}
+	m.Apply(final)
+	drainExternal(t, ch, externalSubscriberBuffer)
+
+	if changed := m.Apply(final); changed != 1 {
+		t.Errorf("changed = %d on the re-push, want 1", changed)
+	}
+	select {
+	case a := <-ch:
+		if got := a.GetSpecs()[0].GetTarget().GetAddress(); got != "final" {
+			t.Fatalf("re-push carries address %q, want final", got)
+		}
+	default:
+		t.Fatal("the dropped update was never re-pushed")
+	}
+	if got := m.AssignedCount(); got != 1 {
+		t.Errorf("AssignedCount = %d while the drop was pending, want 1", got)
+	}
+}
+
+// The same holds for a removal: the agent must get its empty assignment, or it keeps probing
+// definitions the console deleted.
+func TestExternalDroppedRemovalIsRePushed(t *testing.T) {
+	m := NewExternalCheckManager()
+	ch, cleanup := m.Subscribe("agent-a")
+	defer cleanup()
+
+	fillExternalBuffer(m, "agent-a")
+	m.Apply(map[string][]*pb.ExternalCheckSpec{})
+	if last := drainExternal(t, ch, externalSubscriberBuffer); len(last.GetSpecs()) == 0 {
+		t.Fatal("setup: the last queued assignment is already empty")
+	}
+
+	changed := m.Apply(map[string][]*pb.ExternalCheckSpec{})
+	select {
+	case a := <-ch:
+		if len(a.GetSpecs()) != 0 {
+			t.Fatalf("re-push carries %d specs, want none", len(a.GetSpecs()))
+		}
+	default:
+		t.Fatalf("the dropped removal was never re-pushed (changed=%d)", changed)
+	}
+
+	// Delivered once: the next identical PUT is a no-op again.
+	if changed := m.Apply(map[string][]*pb.ExternalCheckSpec{}); changed != 0 {
+		t.Errorf("changed = %d after the re-push was delivered, want 0", changed)
+	}
+}
+
 // 8. Concurrent subscribe / cleanup / push. Under -race this is the tasks.go
 // send-on-closed-channel race: the manager must never close a subscriber
 // channel, only delete the map entry.
@@ -498,5 +693,45 @@ func TestExternalChecksRouteWiring(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 once the handler is injected, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+// PUT /api/v1/external-checks carries the whole desired state, so its cap is sized for a large fleet
+// rather than for one request; past it the body is refused with 413 instead of being buffered whole.
+func TestExternalPutRefusesAnOversizedBody(t *testing.T) {
+	env := newExternalTestEnv(t, false, false)
+
+	huge := `{"agents":{"agent-a":[{"definitionId":"` + strings.Repeat("d", maxExternalChecksBodyBytes) +
+		`","target":{"name":"x","kind":"host","address":"1.1.1.1"},"checkType":"tcp","intervalNs":1,"timeoutNs":1}]}}`
+	w := env.put(huge)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("body past the cap: got %d (%.200s), want 413", w.Code, w.Body.String())
+	}
+	if env.mgr.AssignedCount() != 0 {
+		t.Error("an oversized PUT changed the assignment state")
+	}
+
+	// A desired state of a few thousand specs is well under the cap.
+	var b strings.Builder
+	b.WriteString(`{"agents":{"agent-a":[`)
+	for i := range 4000 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"definitionId":"def-%06d","target":{"name":"t%d","kind":"host","address":"10.0.%d.%d","port":443},`+
+			`"checkType":"tcp","intervalNs":30000000000,"timeoutNs":5000000000}`, i, i, i/250, i%250)
+	}
+	b.WriteString(`]}}`)
+	if w := env.put(b.String()); w.Code != http.StatusOK {
+		t.Fatalf("PUT of 4000 specs (%d bytes): got %d (%.200s), want 200", b.Len(), w.Code, w.Body.String())
+	}
+}
+
+// The console sheds definitions until its PUT fits its own copy of the limit, so a smaller limit
+// here would refuse every PUT the console believes it trimmed enough.
+func TestExternalBodyLimitMatchesTheConsole(t *testing.T) {
+	if maxExternalChecksBodyBytes != controllerclient.MaxExternalChecksBodyBytes {
+		t.Fatalf("maxExternalChecksBodyBytes = %d, console controllerclient.MaxExternalChecksBodyBytes = %d",
+			maxExternalChecksBodyBytes, controllerclient.MaxExternalChecksBodyBytes)
 	}
 }

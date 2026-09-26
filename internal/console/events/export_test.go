@@ -12,3 +12,8 @@ func PairScope(src, dst string) string { return pairScope(src, dst) }
 
 // SetBaselineInterval overrides how often a connected ingester re-records the topology baseline.
 func (i *Ingester) SetBaselineInterval(d time.Duration) { i.baselineInterval = d }
+
+// SetBackoff overrides the reconnect backoff bounds.
+func (i *Ingester) SetBackoff(initial, maxBackoff time.Duration) {
+	i.initialBackoff, i.maxBackoff = initial, maxBackoff
+}

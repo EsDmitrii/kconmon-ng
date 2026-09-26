@@ -36,8 +36,6 @@ func newAnnotationsDB(t *testing.T) *store.DB {
 	return db
 }
 
-func scopePtr(s string) *string { return &s }
-
 // There is no update by design, so this is the whole of the CRUD.
 func TestAnnotationLifecycle(t *testing.T) {
 	db := newAnnotationsDB(t)
@@ -264,7 +262,7 @@ func TestListAnnotationsScopeFilterCanSelectTheGlobalOnes(t *testing.T) {
 		t.Errorf("a nil scope returned %d annotations, want all 4", len(all.Annotations))
 	}
 
-	global, err := db.ListAnnotations(ctx, store.AnnotationFilter{Scope: scopePtr("")})
+	global, err := db.ListAnnotations(ctx, store.AnnotationFilter{Scope: new("")})
 	if err != nil {
 		t.Fatalf("ListAnnotations(global scope): %v", err)
 	}
@@ -277,7 +275,7 @@ func TestListAnnotationsScopeFilterCanSelectTheGlobalOnes(t *testing.T) {
 		}
 	}
 
-	scoped, err := db.ListAnnotations(ctx, store.AnnotationFilter{Scope: scopePtr("node-a")})
+	scoped, err := db.ListAnnotations(ctx, store.AnnotationFilter{Scope: new("node-a")})
 	if err != nil {
 		t.Fatalf("ListAnnotations(node-a): %v", err)
 	}
@@ -295,7 +293,7 @@ func TestListAnnotationsPagesNewestFirst(t *testing.T) {
 
 	const total = 7
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if _, err := db.CreateAnnotation(ctx, store.AnnotationInput{
 			StartAt: base.Add(time.Duration(i) * time.Minute),
 			Text:    "mark-" + strconv.Itoa(i),

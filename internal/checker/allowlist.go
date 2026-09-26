@@ -19,6 +19,10 @@ var (
 	// failed the check.
 	ErrDeniedIPv4 = errors.New("destination resolved into a denied IPv4 range")
 	ErrDeniedIPv6 = errors.New("destination resolved into a denied IPv6 range")
+	// ErrNotAllowedIPv4 and ErrNotAllowedIPv6 are the address falling outside every allowed range
+	// rather than inside a denied one.
+	ErrNotAllowedIPv4 = errors.New("destination resolved outside the allowed IPv4 ranges")
+	ErrNotAllowedIPv6 = errors.New("destination resolved outside the allowed IPv6 ranges")
 	// ErrDeniedZoneScoped covers fe80::1%eth0-style addresses: a zone names a
 	// local interface, which is not something a remote-destination allowlist can
 	// reason about, so it is refused rather than stripped.
@@ -165,10 +169,19 @@ func (a *Allowlist) check(addr netip.Addr) error {
 	if a.Allow(addr) {
 		return nil
 	}
-	if addr.Unmap().Is4() {
-		return ErrDeniedIPv4
+	ip := addr.Unmap()
+	for _, p := range a.denied {
+		if p.Contains(ip) {
+			if ip.Is4() {
+				return ErrDeniedIPv4
+			}
+			return ErrDeniedIPv6
+		}
 	}
-	return ErrDeniedIPv6
+	if ip.Is4() {
+		return ErrNotAllowedIPv4
+	}
+	return ErrNotAllowedIPv6
 }
 
 // parseLiteral recognises a host that is itself an IP address, tolerating the

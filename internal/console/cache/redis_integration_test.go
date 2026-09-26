@@ -3,7 +3,6 @@
 package cache_test
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -21,8 +20,7 @@ func TestRedisBusPublishSubscribeRoundtrip(t *testing.T) {
 		t.Skip("REDIS_TEST_ADDR not set; see docker command in this test's comment")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// No credentials in the DSN: an unauthenticated local server is what this test dials.
 	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)

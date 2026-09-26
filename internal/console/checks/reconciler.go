@@ -51,6 +51,9 @@ const (
 	reconcileUnchanged = "unchanged"
 	reconcileNotLeader = "not-leader"
 	reconcileError     = "error"
+	// reconcileTooLarge is the controller's 413: unlike an error, no retry helps until the desired
+	// state shrinks, and agents keep their last accepted assignment meanwhile.
+	reconcileTooLarge = "too-large"
 )
 
 // ExternalSpecsSkipped reason labels -- the closed set metrics.go documents.
@@ -64,11 +67,13 @@ const (
 	// (see httpapi.refuseUnrunnableDefinition); this is the backstop for a row that predates the
 	// guard or was written straight to the database.
 	skipUnrunnable = "unrunnable"
+	// skipOverBudget is a definition left out so the assignment fits the controller's request body
+	// limit (fitBodyLimit).
+	skipOverBudget = "over-budget"
 )
 
-// externalCheckTypes mirrors internal/controller's own validExternalCheckTypes
-// (internal/controller/external.go) and; enforcing it HERE, before the PUT, is not defensive
-// tidiness.
+// externalCheckTypes mirrors internal/controller's validExternalCheckTypes; checking it before the
+// PUT keeps one bad definition from failing the whole body, which the controller refuses as a unit.
 var externalCheckTypes = map[string]bool{"tcp": true, "icmp": true, "dns": true, "http": true}
 
 // Locker is the cross-replica mutual-exclusion seam, satisfied by *store.DB --
@@ -130,27 +135,21 @@ type Reconciler struct {
 	interval time.Duration
 	lockKey  int64
 
-	// lastPushedAt is when that PUT happened; see externalResyncInterval.
+	// lastPushedAt is when lastPushed was PUT; see externalResyncInterval.
 	lastPushedAt time.Time
 	// lastPushed is the JSON fingerprint of the desired state this replica most recently PUT
-	// successfully; the controller's own change detection (ExternalCheckManager.Apply) absorbs.
+	// successfully, so an unchanged desired state is not re-sent before externalResyncInterval.
 	lastPushed []byte
 
-	// warnedSkips remembers which definition IDs have already been logged as skipped.
+	// warnedSkips remembers which definition id and skip reason pairs have already been logged.
 	warnedSkips map[string]struct{}
 }
 
-// NewReconciler returns a Reconciler. Run is what starts it.
-/*
- * ReconcilerLockKey is this loop's OWN advisory key.
- *
- * main.go handed it the scheduler's key, so the two loops — which do unrelated work on the same
- * tick interval — took turns on one lock: every pass of one was a skipped pass of the other, at half
- * the cadence each was configured for. It is crc32.Checksum([]byte("kconmon-ng.checks.Reconciler"),
- * crc32.MakeTable(crc32.IEEE)).
- */
+// ReconcilerLockKey is this loop's own advisory key, crc32.ChecksumIEEE([]byte("kconmon-ng.checks.Reconciler"));
+// sharing the scheduler's key would make the two loops take turns and halve both cadences.
 const ReconcilerLockKey int64 = 3318800038
 
+// NewReconciler returns a Reconciler; Run starts it.
 func NewReconciler(d ReconcilerDeps) *Reconciler { //nolint:gocritic // hugeParam: ReconcilerDeps mirrors scheduler.Deps' value semantics -- a named-field composition root, built once at boot
 	if d.LockKey == 0 {
 		d.LockKey = ReconcilerLockKey
@@ -187,6 +186,11 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) Tick(ctx context.Context) {
 	locked, err := r.lock.WithAdvisoryLock(ctx, r.lockKey, r.leaderTick)
 	switch {
+	case errors.Is(err, controllerclient.ErrDesiredStateTooLarge):
+		r.m.ExternalReconciles.WithLabelValues(reconcileTooLarge).Inc()
+		slog.Error("checks: the controller refused the continuous external-check assignment as over its "+
+			"request body limit; agents keep their last accepted assignment until it shrinks",
+			"limitBytes", controllerclient.MaxExternalChecksBodyBytes, "error", err)
 	case err != nil:
 		// Both "could not take the lock" and "the reconcile itself failed" land here.
 		r.m.ExternalReconciles.WithLabelValues(reconcileError).Inc()
@@ -290,7 +294,82 @@ func (r *Reconciler) desired(ctx context.Context) (assignment map[string][]contr
 		}
 		out[agentID] = assigned
 	}
-	return out, series, nil
+	return out, r.fitBodyLimit(out, defs, series), nil
+}
+
+/*
+fitBodyLimit leaves whole definitions out of assignment, newest first, until its PUT body fits the
+controller's request body limit, and returns the series left.
+
+The controller refuses an oversized body whole, and every later tick sends the same one, so every
+agent's continuous checks would stay frozen on the last assignment it accepted. Shedding the newest
+keeps a definition added later from evicting one already running. The size is an upper bound: an
+agent whose list empties takes its key out too.
+*/
+func (r *Reconciler) fitBodyLimit(assignment map[string][]controllerclient.ExternalCheckSpec, defs []Definition, series int) int {
+	size := len(`{"agents":{}}`)
+	cost := map[string]int{} // definition ID -> its specs' bytes, a separator each
+	specBytes := map[string]int{}
+	for agentID, specs := range assignment {
+		quoted, _ := json.Marshal(agentID)
+		size += len(quoted) + len(`:[],`)
+		for i := range specs {
+			id := specs[i].DefinitionID
+			n, seen := specBytes[id]
+			if !seen {
+				encoded, _ := json.Marshal(specs[i])
+				n = len(encoded) + 1
+				specBytes[id] = n
+			}
+			cost[id] += n
+			size += n
+		}
+	}
+	if size <= controllerclient.MaxExternalChecksBodyBytes {
+		return series
+	}
+
+	newestFirst := make([]*Definition, 0, len(cost))
+	for i := range defs {
+		if _, assigned := cost[defs[i].ID]; assigned {
+			newestFirst = append(newestFirst, &defs[i])
+		}
+	}
+	sort.Slice(newestFirst, func(i, j int) bool {
+		a, b := newestFirst[i], newestFirst[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID > b.ID
+	})
+	shed := map[string]bool{}
+	for _, def := range newestFirst {
+		if size <= controllerclient.MaxExternalChecksBodyBytes {
+			break
+		}
+		shed[def.ID] = true
+		size -= cost[def.ID]
+		r.skip(def.ID, skipOverBudget, "checks: reconcile: leaving a continuous definition out, the "+
+			"assignment would exceed the controller's request body limit",
+			"name", def.Name, "limitBytes", controllerclient.MaxExternalChecksBodyBytes)
+	}
+
+	series = 0
+	for agentID, specs := range assignment {
+		kept := specs[:0]
+		for i := range specs {
+			if !shed[specs[i].DefinitionID] {
+				kept = append(kept, specs[i])
+			}
+		}
+		if len(kept) == 0 {
+			delete(assignment, agentID)
+			continue
+		}
+		assignment[agentID] = kept
+		series += len(kept)
+	}
+	return series
 }
 
 // agentRefs projects a topology snapshot onto the agent list AssignAgents takes; the planner keys
@@ -366,7 +445,7 @@ func (r *Reconciler) continuousDefinitions(ctx context.Context) ([]Definition, m
 				Timeout:      time.Duration(spec.TimeoutNs),
 				ParamsJSON:   spec.Params,
 			}); perr != nil {
-				r.skip(&def, skipUnrunnable,
+				r.skipDefinition(&def, skipUnrunnable,
 					"checks: reconcile: skipping continuous definition, no agent can parse it: "+perr.Error())
 				continue
 			}
@@ -380,6 +459,7 @@ func (r *Reconciler) continuousDefinitions(ctx context.Context) ([]Definition, m
 			CheckType:          def.CheckType,
 			DestinationAddress: def.DestinationAddress,
 			Enabled:            def.Enabled,
+			CreatedAt:          def.CreatedAt,
 		})
 	}
 	return defs, specs, nil
@@ -429,17 +509,17 @@ func (r *Reconciler) continuousDefinitionIDs(ctx context.Context) ([]string, err
 // about once, and left out of the desired state entirely.
 func (r *Reconciler) specFor(def *store.Definition) (controllerclient.ExternalCheckSpec, bool) {
 	if !externalCheckTypes[def.CheckType] {
-		// mtr and udp. Skipping the DEFINITION, rather than letting the
+		// mtr, udp and pmtu. Skipping the DEFINITION, rather than letting the
 		// controller reject it, is what keeps every other definition's
 		// assignment alive: the handler answers 400 for the whole body.
-		r.skip(def, skipCheckType,
+		r.skipDefinition(def, skipCheckType,
 			"checks: reconcile: skipping continuous definition, its check type cannot be a continuous external check")
 		return controllerclient.ExternalCheckSpec{}, false
 	}
 	if def.DestinationKind == "node" {
 		// A continuous check against cluster nodes is the agents' own peer mesh, which every agent
 		// already runs unprompted.
-		r.skip(def, skipDestinationKind,
+		r.skipDefinition(def, skipDestinationKind,
 			"checks: reconcile: skipping continuous definition, a node destination is the agents' own peer mesh, not an external check")
 		return controllerclient.ExternalCheckSpec{}, false
 	}
@@ -500,14 +580,19 @@ func adhocTargetKind(address string) string {
 	return "host"
 }
 
-// skip counts one definition left out of the desired state and logs it the
-// first time this process sees that definition -- see warnedSkips for why the
-// two cadences differ.
-func (r *Reconciler) skip(def *store.Definition, reason, msg string) {
+// skip counts one definition left out of the desired state on every tick, and logs it only the
+// first time this process leaves it out for reason: the metric carries the rate, the log the news.
+func (r *Reconciler) skip(id, reason, msg string, attrs ...any) {
 	r.m.ExternalSpecsSkipped.WithLabelValues(reason).Inc()
-	if _, warned := r.warnedSkips[def.ID]; warned {
+	key := id + "/" + reason
+	if _, warned := r.warnedSkips[key]; warned {
 		return
 	}
-	r.warnedSkips[def.ID] = struct{}{}
-	slog.Warn(msg, "definition", def.ID, "checkType", def.CheckType, "destinationKind", def.DestinationKind)
+	r.warnedSkips[key] = struct{}{}
+	slog.Warn(msg, append([]any{"definition", id}, attrs...)...)
+}
+
+// skipDefinition is skip for a stored definition, logged with its check type and destination kind.
+func (r *Reconciler) skipDefinition(def *store.Definition, reason, msg string) {
+	r.skip(def.ID, reason, msg, "checkType", def.CheckType, "destinationKind", def.DestinationKind)
 }

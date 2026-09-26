@@ -1,7 +1,7 @@
 package authz
 
 // builtinRoles are the compiled-in role→permission sets (SECURITY.md §10.2); these are NOT database
-// rows: RBAC must work with database.mode=disabled.
+// rows: RBAC must work without a database.
 var builtinRoles = map[string][]Permission{
 	// What viewer must NEVER gain is CONFIGURATION authority.
 	"viewer": {

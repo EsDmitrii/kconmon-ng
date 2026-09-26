@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,5 +241,51 @@ func TestHTTPCheckerVerifiesCertificatesByDefault(t *testing.T) {
 		Check(context.Background(), Target{})
 	if !res.Success {
 		t.Errorf("insecureSkipVerify did not opt the target out: %+v", res)
+	}
+}
+
+// A password in the target URL (the only way to probe a basic-auth endpoint) is sent, but never
+// leaves the checker in result.Error or Details.URL.
+func TestHTTPCheckerRedactsThePassword(t *testing.T) {
+	var gotUser, gotPass string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser, gotPass, _ = r.BasicAuth()
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("down"))
+	}))
+	defer srv.Close()
+	withAuth := strings.Replace(srv.URL, "http://", "http://probe:s3cret@", 1)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := strings.Replace(closed.URL, "http://", "http://probe:s3cret@", 1) + "/health"
+	closed.Close()
+
+	for _, tc := range []struct {
+		name   string
+		target HTTPCheckTarget
+	}{
+		{"unexpected status", HTTPCheckTarget{URL: withAuth + "/health"}},
+		{"unexpected status, want", HTTPCheckTarget{URL: withAuth + "/health", ExpectStatus: http.StatusOK}},
+		{"body pattern mismatch", HTTPCheckTarget{URL: withAuth + "/health", ExpectStatus: http.StatusInternalServerError, BodyPattern: regexp.MustCompile("up")}},
+		{"request failed", HTTPCheckTarget{URL: closedURL}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := NewHTTPChecker(time.Second, []HTTPCheckTarget{tc.target}).Check(context.Background(), Target{})
+			if res.Success || res.Error == "" {
+				t.Fatalf("setup: the check was meant to fail: %+v", res)
+			}
+			if strings.Contains(res.Error, "s3cret") || !strings.Contains(res.Error, "probe:xxxxx@") {
+				t.Errorf("result.Error carries the password or lost the redacted URL: %q", res.Error)
+			}
+			details, ok := res.Details.([]model.HTTPDetails)
+			if !ok || len(details) != 1 {
+				t.Fatalf("expected one HTTPDetails, got %T", res.Details)
+			}
+			if strings.Contains(details[0].URL, "s3cret") || !strings.Contains(details[0].URL, "probe:xxxxx@") {
+				t.Errorf("Details.URL carries the password or lost the redacted URL: %q", details[0].URL)
+			}
+		})
+	}
+	if gotUser != "probe" || gotPass != "s3cret" {
+		t.Errorf("the request lost its credentials: user %q, password %q", gotUser, gotPass)
 	}
 }

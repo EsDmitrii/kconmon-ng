@@ -29,9 +29,10 @@ var (
 	ErrDispatch     = errors.New("dispatch failed")    // controller 502
 	ErrCheckTimeout = errors.New("dispatch timed out") // controller 504
 	ErrBadRequest   = errors.New("invalid request")    // controller 400
-	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does not advertise the
-	// "external-checks" capability.
-	ErrExternalUnsupported = errors.New("agent does not support external destinations") // controller 501
+	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does not run this check,
+	// either the check type (not among its advertised planes) or an external destination (no
+	// "external-checks" capability). The name predates the check-type case.
+	ErrExternalUnsupported = errors.New("source agent does not run this check") // controller 501
 	// ErrResultLost is the failure with no status at all: the controller accepted the POST and then
 	// closed the connection without writing a response. The check itself may well have SUCCEEDED on
 	// the agent -- what failed is the delivery -- so this is deliberately not ErrCheckTimeout, and
@@ -41,14 +42,22 @@ var (
 )
 
 const (
-	// Each 503 retry redials, so an attempt is an independent draw among the controller replicas:
-	// missing the leader R-1 times out of R has probability ((R-1)/R)^N, and 6 attempts keep a
-	// two-replica deployment under 2%.
+	// Each 503 retry goes out on a fresh connection, so an attempt is an independent draw among the
+	// controller replicas: missing the leader R-1 times out of R has probability ((R-1)/R)^N.
 	maxAttempts = 6
 	// A 503 means "wrong replica", not "overloaded", so the wait only has to outlast the redial.
 	initialBackoff  = 200 * time.Millisecond
 	maxRetryBackoff = time.Second
-	maxBodyBytes    = 4 << 20 // topology snapshots are small; 4 MiB is generous
+	// A standby's "not the leader" proves the leader is up behind the same Service, so that answer
+	// gets more, shorter draws: six missed a two-replica leader 1 time in 64, which failed about 1.5%
+	// of run pairs on a healthy fleet; twenty miss it about once in a million, in about the same
+	// 3.5 s the six took.
+	maxStandbyAttempts  = 20
+	standbyBackoff      = 50 * time.Millisecond
+	maxStandbyBackoff   = 200 * time.Millisecond
+	standbyAnswer       = "not the leader" // internal/controller.notLeaderMsg
+	maxErrorPrefixBytes = 512
+	maxBodyBytes        = 4 << 20 // topology snapshots are small; 4 MiB is generous
 
 	// diagnosticsTimeoutCap mirrors internal/controller/diagnostics.go's maxDiagnosticsTimeout; the
 	// controller silently clamps ?timeout= server-side.
@@ -119,6 +128,58 @@ type Client struct {
 	// tr is the transport both clients share, owned by this Client so dropping its pooled
 	// connections cannot disturb anything else in the process.
 	tr *http.Transport
+	// retryHC and retryDiagHC carry every retry after a 503 on a connection of its own: with a pool,
+	// a concurrent request can hand back a connection pinned to the standby between redial and the
+	// retry, and the retry is no new draw at all.
+	retryHC     *http.Client
+	retryDiagHC *http.Client
+}
+
+// clientsFor returns the hc/diagHC pair for an attempt: pooled first, fresh connections after.
+func (c *Client) clientsFor(attempt int) (hc, diagHC *http.Client) {
+	if attempt > 1 {
+		return c.retryHC, c.retryDiagHC
+	}
+	return c.hc, c.diagHC
+}
+
+// retryLadder is the 503 retry state the three calls share.
+type retryLadder struct {
+	attempt int
+	backoff time.Duration
+	standby time.Duration
+}
+
+func newRetryLadder() *retryLadder {
+	return &retryLadder{attempt: 1, backoff: initialBackoff, standby: standbyBackoff}
+}
+
+// again reports whether the 503 answer body earns another attempt, and waits for it; false with a
+// nil error means the budget is spent.
+func (l *retryLadder) again(ctx context.Context, c *Client, body []byte) (bool, error) {
+	isStandby := string(bytes.TrimSpace(body)) == standbyAnswer
+	limit := maxAttempts
+	if isStandby {
+		limit = maxStandbyAttempts
+	}
+	if l.attempt >= limit {
+		return false, nil
+	}
+	c.redial()
+	wait := l.backoff
+	if isStandby {
+		wait = l.standby
+		l.standby = min(l.standby*2, maxStandbyBackoff)
+	} else {
+		l.backoff = min(l.backoff*2, maxRetryBackoff)
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-time.After(wait):
+	}
+	l.attempt++
+	return true, nil
 }
 
 // newTransport clones the default transport so this Client owns its own connection pool.
@@ -145,11 +206,15 @@ func (c *Client) redial() {
 // regardless of the context deadline passed alongside it, so the shorter of the two always wins.
 func New(baseURL string, timeout time.Duration) *Client {
 	tr := newTransport()
+	fresh := newTransport()
+	fresh.DisableKeepAlives = true
 	return &Client{
-		base:   baseURL,
-		hc:     &http.Client{Timeout: timeout, Transport: tr},
-		diagHC: &http.Client{Transport: tr},
-		tr:     tr,
+		base:        baseURL,
+		hc:          &http.Client{Timeout: timeout, Transport: tr},
+		diagHC:      &http.Client{Transport: tr},
+		tr:          tr,
+		retryHC:     &http.Client{Timeout: timeout, Transport: fresh},
+		retryDiagHC: &http.Client{Transport: fresh},
 	}
 }
 
@@ -205,24 +270,23 @@ func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time
 		return nil, fmt.Errorf("controller diagnose: encode request: %w", err)
 	}
 
-	backoff := initialBackoff
-	for attempt := 1; ; attempt++ {
+	ladder := newRetryLadder()
+	for {
 		start := time.Now()
-		data, status, err := c.tryDiagnose(ctx, body, timeout)
+		_, diagHC := c.clientsFor(ladder.attempt)
+		data, status, err := c.tryDiagnose(ctx, diagHC, body, timeout)
 		elapsed := time.Since(start)
 		switch {
 		case err == nil && status == http.StatusOK:
 			return data, nil
-		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
-			c.redial()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff):
-			}
-			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
-			return nil, fmt.Errorf("controller diagnose after %d attempts: %w", attempt, ErrUnavailable)
+			again, waitErr := ladder.again(ctx, c, data)
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			if !again {
+				return nil, fmt.Errorf("controller diagnose after %d attempts: %w", ladder.attempt, ErrUnavailable)
+			}
 		case status == http.StatusBadRequest:
 			return nil, fmt.Errorf("controller diagnose: %w: %s", ErrBadRequest, bytes.TrimSpace(data))
 		case status == http.StatusNotFound:
@@ -273,7 +337,7 @@ func connectionDroppedEarly(err error) bool {
 // tryDiagnose issues one POST /api/v1/diagnostics attempt and returns the response body (capped to
 // maxBodyBytes, exactly like tryOnce) alongside the status code; the request is bounded by a
 // context derived here (timeout + diagnoseCtxSlack).
-func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Duration) (data []byte, status int, err error) {
+func (c *Client) tryDiagnose(ctx context.Context, hc *http.Client, body []byte, timeout time.Duration) (data []byte, status int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout+diagnoseCtxSlack)
 	defer cancel()
 
@@ -284,7 +348,7 @@ func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Dura
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.diagHC.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
+	resp, err := hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
 	if err != nil {
 		return nil, 0, err
 	}
@@ -296,6 +360,14 @@ func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Dura
 	}
 	return data, resp.StatusCode, nil
 }
+
+// MaxExternalChecksBodyBytes is the controller's limit on a PUT /api/v1/external-checks body
+// (internal/controller: maxExternalChecksBodyBytes); the two must stay equal.
+const MaxExternalChecksBodyBytes = 8 << 20
+
+// ErrDesiredStateTooLarge is the controller's 413 to PutExternalChecks: it applied nothing, and every
+// agent keeps the last assignment it accepted until the desired state shrinks.
+var ErrDesiredStateTooLarge = errors.New("desired state exceeds the controller's request body limit")
 
 // ExternalTarget is one continuous probe's destination.
 type ExternalTarget struct {
@@ -342,9 +414,10 @@ func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]Exte
 		return nil, fmt.Errorf("controller external-checks: encode request: %w", err)
 	}
 
-	backoff := initialBackoff
-	for attempt := 1; ; attempt++ {
-		data, status, err := c.tryPutExternalChecks(ctx, body)
+	ladder := newRetryLadder()
+	for {
+		hc, _ := c.clientsFor(ladder.attempt)
+		data, status, err := c.tryPutExternalChecks(ctx, hc, body)
 		switch {
 		case err == nil && status == http.StatusOK:
 			var out ExternalChecksResult
@@ -352,18 +425,18 @@ func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]Exte
 				return nil, fmt.Errorf("controller external-checks: decode response: %w", decErr)
 			}
 			return &out, nil
-		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
-			c.redial()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff):
-			}
-			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
-			return nil, fmt.Errorf("controller external-checks after %d attempts: %w", attempt, ErrUnavailable)
+			again, waitErr := ladder.again(ctx, c, data)
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			if !again {
+				return nil, fmt.Errorf("controller external-checks after %d attempts: %w", ladder.attempt, ErrUnavailable)
+			}
 		case status == http.StatusBadRequest:
 			return nil, fmt.Errorf("controller external-checks: %w: %s", ErrBadRequest, bytes.TrimSpace(data))
+		case status == http.StatusRequestEntityTooLarge:
+			return nil, fmt.Errorf("controller external-checks: %w: %s", ErrDesiredStateTooLarge, bytes.TrimSpace(data))
 		case err != nil:
 			return nil, fmt.Errorf("controller external-checks: %w", err)
 		default:
@@ -374,14 +447,14 @@ func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]Exte
 
 // tryPutExternalChecks issues one PUT attempt and returns the body (capped to maxBodyBytes, exactly
 // like tryOnce/tryDiagnose) alongside the status.
-func (c *Client) tryPutExternalChecks(ctx context.Context, body []byte) (data []byte, status int, err error) {
+func (c *Client) tryPutExternalChecks(ctx context.Context, hc *http.Client, body []byte) (data []byte, status int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/external-checks", bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
+	resp, err := hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
 	if err != nil {
 		return nil, 0, err
 	}
@@ -395,22 +468,21 @@ func (c *Client) tryPutExternalChecks(ctx context.Context, body []byte) (data []
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
-	backoff := initialBackoff
-	for attempt := 1; ; attempt++ {
-		status, err := c.tryOnce(ctx, path, out)
+	ladder := newRetryLadder()
+	for {
+		hc, _ := c.clientsFor(ladder.attempt)
+		status, errBody, err := c.tryOnce(ctx, hc, path, out)
 		switch {
 		case err == nil && status == http.StatusOK:
 			return nil
-		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
-			c.redial()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
-			return fmt.Errorf("controller %s after %d attempts: %w", path, attempt, ErrUnavailable)
+			again, waitErr := ladder.again(ctx, c, errBody)
+			if waitErr != nil {
+				return waitErr
+			}
+			if !again {
+				return fmt.Errorf("controller %s after %d attempts: %w", path, ladder.attempt, ErrUnavailable)
+			}
 		case err != nil:
 			return fmt.Errorf("controller %s: %w", path, err)
 		default:
@@ -419,22 +491,25 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	}
 }
 
-func (c *Client) tryOnce(ctx context.Context, path string, out any) (int, error) {
+// tryOnce issues one GET; for a non-200 it returns the start of the body, which is how a standby
+// is told apart from other 503s.
+func (c *Client) tryOnce(ctx context.Context, hc *http.Client, path string, out any) (status int, errBody []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, http.NoBody)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	resp, err := c.hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
+	resp, err := hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		errBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorPrefixBytes))
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
-		return resp.StatusCode, nil
+		return resp.StatusCode, errBody, nil
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(out); err != nil {
-		return resp.StatusCode, fmt.Errorf("decode: %w", err)
+		return resp.StatusCode, nil, fmt.Errorf("decode: %w", err)
 	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, nil, nil
 }

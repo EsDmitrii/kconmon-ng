@@ -96,8 +96,9 @@ func (c *rigCounters) changes() uint64 {
 /*
 logCounter is the rig's slog handler: it silences the controller's and agents' per-event Info spam
 (2000 registrations would print 2000 lines), counts every Warn+ record by message, and still prints
-Error+ records. The counts surface real signals — the server's "peer update could not be queued"
-desync warning, agents' "heartbeat failed" — in the final report without grepping logs.
+Error+ records with their attributes. The counts surface real signals — the server's "peer update
+could not be queued" desync warning, agents' "heartbeat failed" — in the final report without
+grepping logs.
 */
 type logCounter struct {
 	mu     sync.Mutex
@@ -118,7 +119,12 @@ func (h *logCounter) Handle(_ context.Context, r slog.Record) error { //nolint:g
 	h.counts[r.Message]++
 	h.mu.Unlock()
 	if r.Level >= slog.LevelError && h.errOut != nil {
-		_, _ = fmt.Fprintf(h.errOut, "%s %s %s\n", r.Time.Format(time.TimeOnly), r.Level, r.Message)
+		line := fmt.Sprintf("%s %s %s", r.Time.Format(time.TimeOnly), r.Level, r.Message)
+		r.Attrs(func(a slog.Attr) bool {
+			line += " " + a.String()
+			return true
+		})
+		_, _ = fmt.Fprintln(h.errOut, line)
 	}
 	return nil
 }

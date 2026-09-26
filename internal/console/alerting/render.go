@@ -41,6 +41,8 @@ const (
 	suffixExternalResult = "_external_results_total"
 	suffixRegisteredAgts = "_controller_registered_agents"
 	suffixExpectedAgts   = "_controller_expected_agents"
+	suffixExternalAgts   = "_controller_external_agents"
+	suffixLeader         = "_controller_leader"
 )
 
 // Renderer renders alert rules against ONE metric prefix; a renderer built from the wrong prefix
@@ -226,7 +228,7 @@ func (r Renderer) Render(rule Rule) (expr string, err error) {
 	case KindHTTPTTFB:
 		return r.renderHTTPTTFB(rule.Params)
 	case KindAgentMissing:
-		return r.metric(suffixRegisteredAgts) + " < " + r.metric(suffixExpectedAgts), nil
+		return r.renderAgentMissing(), nil
 	case KindExternalTargetDown:
 		return r.renderExternalTargetDown(rule.Params)
 	case KindRaw:
@@ -235,6 +237,17 @@ func (r Renderer) Render(rule Rule) (expr string, err error) {
 		// Unreachable: kindSchemas is the closed set and it was checked above.
 		return "", fmt.Errorf("unknown kind %q", rule.Kind)
 	}
+}
+
+// renderAgentMissing is the chart's KconmonAgentsMissing expression, kept identical to it
+// (TestAgentMissingRendersTheChartRuleExpression): a demoted standby reports zero registered agents
+// against a full expected count, and every external agent would otherwise hide one missing node.
+func (r Renderer) renderAgentMissing() string {
+	registered := r.metric(suffixRegisteredAgts)
+	return "(" + r.metric(suffixExpectedAgts) +
+		" - (" + registered +
+		" - (" + r.metric(suffixExternalAgts) + " or " + registered + " * 0)) > 0)" +
+		" and (" + r.metric(suffixLeader) + " == 1)"
 }
 
 func (r Renderer) renderPairLoss(params map[string]any) (expr string, err error) {

@@ -1,0 +1,9 @@
+---
+# Console overlay for the legs after the main run: the fault leg (the black-holed pair in the pmtu
+# matrix) and the gateway leg (the external agent's row and column). Layered on values.yaml and
+# console-values.yaml. Absent from console-values.yaml on purpose: the main run pins the console's
+# no-Prometheus branches.
+console:
+  prometheus:
+    # The fixture Prometheus from e2e/testdata/prometheus.yaml.
+    url: http://kconmon-e2e-prometheus:9090

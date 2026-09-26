@@ -245,8 +245,8 @@ func TestWebhooksWithoutStoreReturn503(t *testing.T) {
 		if w.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s without a WebhookService = %d, want 503: %s", c.method, c.path, w.Code, w.Body)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -446,8 +446,14 @@ func TestWebhookCreateAndTestWithoutASealerReturn503NamingTheKey(t *testing.T) {
 		if w.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s without a sealer = %d, want 503: %s", c.method, c.path, w.Code, w.Body)
 		}
-		if !strings.Contains(w.Body.String(), "console.webhooks.encryptionKey") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.webhooks.encryptionKey",
+		// The keys an operator can actually set: the chart schema refuses console.webhooks.encryptionKey.
+		for _, key := range []string{"webhooks.encryptionKeyFile", "console.webhooks.existingSecret"} {
+			if !strings.Contains(w.Body.String(), key) {
+				t.Errorf("%s %s 503 detail = %s, want it to name %s", c.method, c.path, w.Body, key)
+			}
+		}
+		if strings.Contains(w.Body.String(), "console.webhooks.encryptionKey") {
+			t.Errorf("%s %s 503 detail = %s names console.webhooks.encryptionKey, which the chart refuses",
 				c.method, c.path, w.Body)
 		}
 	}

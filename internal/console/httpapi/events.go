@@ -45,12 +45,14 @@ type eventsResponse struct {
 	NextCursor string             `json:"nextCursor"`
 }
 
+// eventsUnavailableDetail is served whenever s.events is nil.
+const eventsUnavailableDetail = databaseKnob + " to enable GET /api/v1/events"
+
 // handleEvents serves one page of persisted controller events, newest first, behind an opaque
 // keyset cursor.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if s.events == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "event history not available",
-			"set console.database.mode in the console config (Helm: console.database.mode) to enable GET /api/v1/events")
+		writeProblem(w, http.StatusServiceUnavailable, "event history not available", eventsUnavailableDetail)
 		return
 	}
 

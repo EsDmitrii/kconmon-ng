@@ -40,7 +40,7 @@ func newChecksDB(t *testing.T) (*store.DB, string) {
 
 // mustCreateRun creates a run with a fresh random UUID and a minimal, valid
 // spec, and returns it.
-func mustCreateRun(t *testing.T, ctx context.Context, db *store.DB, pairTotal int32) store.Run {
+func mustCreateRun(ctx context.Context, t *testing.T, db *store.DB, pairTotal int32) store.Run {
 	t.Helper()
 	id := uuid.NewString()
 	run, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{"source":"a"}`), "user", "u-1", pairTotal, time.Now().Add(time.Hour))
@@ -55,7 +55,7 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 3)
+	run := mustCreateRun(ctx, t, db, 3)
 	if run.Status != "pending" {
 		t.Fatalf("CreateRun: status = %q, want pending", run.Status)
 	}
@@ -89,7 +89,7 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 		{"node-a", "node-d", false},
 	}
 	for _, p := range pairs {
-		res, err := db.UpsertRunResult(ctx, store.RunResultInput{
+		res, upsertErr := db.UpsertRunResult(ctx, store.RunResultInput{
 			RunID:           run.ID,
 			SourceNode:      p.source,
 			DestinationNode: p.dest,
@@ -97,8 +97,8 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 			DurationNs:      1_500_000,
 			Result:          json.RawMessage(`{"ok":true}`),
 		})
-		if err != nil {
-			t.Fatalf("UpsertRunResult(%s->%s): %v", p.source, p.dest, err)
+		if upsertErr != nil {
+			t.Fatalf("UpsertRunResult(%s->%s): %v", p.source, p.dest, upsertErr)
 		}
 		if res.RunID != run.ID {
 			t.Errorf("UpsertRunResult(%s->%s): RunID = %q, want %q", p.source, p.dest, res.RunID, run.ID)
@@ -113,7 +113,7 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 		t.Fatalf("GetRunResults: got %d rows, want 3", len(results))
 	}
 
-	if err := db.FinishRun(ctx, run.ID, "partial", 2, 1); err != nil {
+	if err = db.FinishRun(ctx, run.ID, "partial", 2, 1); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
 	finished, err := db.GetRun(ctx, run.ID)
@@ -136,7 +136,7 @@ func TestUpsertRunResultTwiceForSamePairOverwrites(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 1)
+	run := mustCreateRun(ctx, t, db, 1)
 
 	first, err := db.UpsertRunResult(ctx, store.RunResultInput{
 		RunID:           run.ID,
@@ -225,7 +225,7 @@ func TestFinishRunOnPendingRunReturnsErrWrongState(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 1)
+	run := mustCreateRun(ctx, t, db, 1)
 
 	err := db.FinishRun(ctx, run.ID, "succeeded", 1, 0)
 	if !errors.Is(err, store.ErrWrongState) {
@@ -250,7 +250,7 @@ func TestFinishRunTwiceReturnsErrWrongStateAndKeepsFirstValues(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 3)
+	run := mustCreateRun(ctx, t, db, 3)
 	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestMarkRunStartedAfterFinishReturnsErrWrongState(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 1)
+	run := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestListRunsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 	ctx := context.Background()
 
 	const total = 250
-	for i := 0; i < total; i++ {
+	for range total {
 		if _, err := db.CreateRun(ctx, uuid.NewString(), "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
@@ -416,7 +416,7 @@ func TestDeleteRunCascadesResults(t *testing.T) {
 	db, dsn := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 1)
+	run := mustCreateRun(ctx, t, db, 1)
 	if _, err := db.UpsertRunResult(ctx, store.RunResultInput{
 		RunID: run.ID, SourceNode: "a", DestinationNode: "b", Success: true, Result: json.RawMessage(`{}`),
 	}); err != nil {
@@ -433,7 +433,7 @@ func TestDeleteRunCascadesResults(t *testing.T) {
 		t.Fatalf("DeleteRunsBefore: deleted = %d, want 1", deleted)
 	}
 
-	if _, err := db.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+	if _, err = db.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetRun after delete: err = %v, want store.ErrNotFound", err)
 	}
 
@@ -456,13 +456,13 @@ func TestPrunerRemovesOldRunsAndResults(t *testing.T) {
 	db, dsn := newChecksDB(t)
 	ctx := context.Background()
 
-	oldRun := mustCreateRun(t, ctx, db, 1)
+	oldRun := mustCreateRun(ctx, t, db, 1)
 	if _, err := db.UpsertRunResult(ctx, store.RunResultInput{
 		RunID: oldRun.ID, SourceNode: "a", DestinationNode: "b", Success: true, Result: json.RawMessage(`{}`),
 	}); err != nil {
 		t.Fatalf("UpsertRunResult(old): %v", err)
 	}
-	freshRun := mustCreateRun(t, ctx, db, 1)
+	freshRun := mustCreateRun(ctx, t, db, 1)
 
 	// Backdate oldRun.created_at well past a 90d retention window; freshRun
 	// keeps its real created_at (now), well inside it.
@@ -471,7 +471,7 @@ func TestPrunerRemovesOldRunsAndResults(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer pool.Close()
-	if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '200 days' WHERE id = $1`, oldRun.ID); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '200 days' WHERE id = $1`, oldRun.ID); err != nil {
 		t.Fatalf("backdate oldRun: %v", err)
 	}
 
@@ -506,7 +506,7 @@ func TestFinishRunAcceptsRunningToCancelled(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
 
-	run := mustCreateRun(t, ctx, db, 5)
+	run := mustCreateRun(ctx, t, db, 5)
 	if err := db.FinishRun(ctx, run.ID, "cancelled", 0, 0); !errors.Is(err, store.ErrWrongState) {
 		t.Fatalf("FinishRun(pending -> cancelled) err = %v, want store.ErrWrongState", err)
 	}
@@ -538,16 +538,16 @@ func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 	db, dsn := newChecksDB(t)
 	ctx := context.Background()
 
-	stuck := mustCreateRun(t, ctx, db, 1)
+	stuck := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, stuck.ID); err != nil {
 		t.Fatalf("MarkRunStarted(stuck): %v", err)
 	}
-	healthy := mustCreateRun(t, ctx, db, 1)
+	healthy := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, healthy.ID); err != nil {
 		t.Fatalf("MarkRunStarted(healthy): %v", err)
 	}
-	pending := mustCreateRun(t, ctx, db, 1)
-	finished := mustCreateRun(t, ctx, db, 1)
+	pending := mustCreateRun(ctx, t, db, 1)
+	finished := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, finished.ID); err != nil {
 		t.Fatalf("MarkRunStarted(finished): %v", err)
 	}
@@ -564,7 +564,7 @@ func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 	}
 	defer pool.Close()
 	for _, id := range []string{stuck.ID, pending.ID, finished.ID} {
-		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
+		if _, err = pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
 			t.Fatalf("backdate %s: %v", id, err)
 		}
 	}
@@ -585,9 +585,9 @@ func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 		stuck.ID: "cancelled", healthy.ID: "running", pending.ID: "cancelled", finished.ID: "succeeded",
 	}
 	for id, wantStatus := range want {
-		got, err := db.GetRun(ctx, id)
-		if err != nil {
-			t.Fatalf("GetRun(%s): %v", id, err)
+		got, getErr := db.GetRun(ctx, id)
+		if getErr != nil {
+			t.Fatalf("GetRun(%s): %v", id, getErr)
 		}
 		if got.Status != wantStatus {
 			t.Errorf("run %s status = %q, want %q", id, got.Status, wantStatus)
@@ -625,12 +625,12 @@ func TestReapStuckRunsHonoursLimit(t *testing.T) {
 	}
 	defer pool.Close()
 
-	for i := 0; i < 5; i++ {
-		run := mustCreateRun(t, ctx, db, 1)
-		if err := db.MarkRunStarted(ctx, run.ID); err != nil {
+	for range 5 {
+		run := mustCreateRun(ctx, t, db, 1)
+		if err = db.MarkRunStarted(ctx, run.ID); err != nil {
 			t.Fatalf("MarkRunStarted: %v", err)
 		}
-		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, run.ID); err != nil {
+		if _, err = pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, run.ID); err != nil {
 			t.Fatalf("backdate: %v", err)
 		}
 	}
@@ -664,20 +664,20 @@ func upSQLOf(t *testing.T, name string) string {
 	return body[start+len("-- +goose Up") : end]
 }
 
-// seedSample writes one probe of one pair.
-func seedSample(t *testing.T, ctx context.Context, db *store.DB, runID, src, dst string, seq int32, ok bool) {
+// seedSample writes one probe of the pair a→dst.
+func seedSample(ctx context.Context, t *testing.T, db *store.DB, runID, dst string, seq int32, ok bool) {
 	t.Helper()
 	if _, err := db.UpsertRunResult(ctx, store.RunResultInput{
-		RunID: runID, SourceNode: src, DestinationNode: dst,
+		RunID: runID, SourceNode: "a", DestinationNode: dst,
 		Success: ok, DurationNs: 1_000, Result: json.RawMessage(`{}`), SampleSeq: seq,
 	}); err != nil {
-		t.Fatalf("UpsertRunResult(%s→%s seq %d): %v", src, dst, seq, err)
+		t.Fatalf("UpsertRunResult(a→%s seq %d): %v", dst, seq, err)
 	}
 }
 
 // pairCounts reads one run's two counters straight out of the table, so the
 // assertion cannot be satisfied by a projection that fixed things on the way out.
-func pairCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runID string) (int32, int32) {
+func pairCounts(ctx context.Context, t *testing.T, pool *pgxpool.Pool, runID string) (int32, int32) {
 	t.Helper()
 	var ok, failed int32
 	if err := pool.QueryRow(ctx, `SELECT pair_ok, pair_failed FROM check_runs WHERE id = $1`, runID).Scan(&ok, &failed); err != nil {
@@ -705,44 +705,44 @@ func TestMigration00010RecomputesPairCountsFromLatestSample(t *testing.T) {
 
 	// ── the relic: an interval run over TWO pairs, probed five times between
 	// them, finished with the sample tallies in the pair columns.
-	relic := mustCreateRun(t, ctx, db, 2)
+	relic := mustCreateRun(ctx, t, db, 2)
 	if err := db.MarkRunStarted(ctx, relic.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
 	// a→b recovered: its LAST sample is the successful one.
-	seedSample(t, ctx, db, relic.ID, "a", "b", 0, false)
-	seedSample(t, ctx, db, relic.ID, "a", "b", 1, false)
-	seedSample(t, ctx, db, relic.ID, "a", "b", 2, true)
+	seedSample(ctx, t, db, relic.ID, "b", 0, false)
+	seedSample(ctx, t, db, relic.ID, "b", 1, false)
+	seedSample(ctx, t, db, relic.ID, "b", 2, true)
 	// a→c broke: its last sample failed, however well it started.
-	seedSample(t, ctx, db, relic.ID, "a", "c", 0, true)
-	seedSample(t, ctx, db, relic.ID, "a", "c", 1, false)
+	seedSample(ctx, t, db, relic.ID, "c", 0, true)
+	seedSample(ctx, t, db, relic.ID, "c", 1, false)
 	if err := db.FinishRun(ctx, relic.ID, "partial", 3, 2); err != nil { // 3 ok + 2 failed SAMPLES
 		t.Fatalf("FinishRun: %v", err)
 	}
 
 	// ── a run that was always right: one pair, one sample, counted as a pair.
-	fine := mustCreateRun(t, ctx, db, 1)
+	fine := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, fine.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
-	seedSample(t, ctx, db, fine.ID, "a", "b", 0, true)
+	seedSample(ctx, t, db, fine.ID, "b", 0, true)
 	if err := db.FinishRun(ctx, fine.ID, "succeeded", 1, 0); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
 
 	// ── a run still in flight: its counters belong to FinishRun, not to this.
-	inFlight := mustCreateRun(t, ctx, db, 4)
+	inFlight := mustCreateRun(ctx, t, db, 4)
 	if err := db.MarkRunStarted(ctx, inFlight.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
-	seedSample(t, ctx, db, inFlight.ID, "a", "b", 0, true)
+	seedSample(ctx, t, db, inFlight.ID, "b", 0, true)
 	if _, err := pool.Exec(ctx,
 		`UPDATE check_runs SET pair_ok = 7, pair_failed = 7 WHERE id = $1`, inFlight.ID); err != nil {
 		t.Fatalf("dirty the in-flight run: %v", err)
 	}
 
 	// ── a terminal run that never got a single result back.
-	silent := mustCreateRun(t, ctx, db, 3)
+	silent := mustCreateRun(ctx, t, db, 3)
 	if err := db.MarkRunStarted(ctx, silent.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
@@ -755,17 +755,17 @@ func TestMigration00010RecomputesPairCountsFromLatestSample(t *testing.T) {
 	}
 
 	// The relic now counts PAIRS by their latest sample: a→b ended OK, a→c ended failed.
-	if ok, failed := pairCounts(t, ctx, pool, relic.ID); ok != 1 || failed != 1 {
+	if ok, failed := pairCounts(ctx, t, pool, relic.ID); ok != 1 || failed != 1 {
 		t.Errorf("relic run: pair_ok/pair_failed = %d/%d, want 1/1", ok, failed)
 	}
-	if ok, failed := pairCounts(t, ctx, pool, fine.ID); ok != 1 || failed != 0 {
+	if ok, failed := pairCounts(ctx, t, pool, fine.ID); ok != 1 || failed != 0 {
 		t.Errorf("already-correct run: pair_ok/pair_failed = %d/%d, want 1/0 (untouched)", ok, failed)
 	}
-	if ok, failed := pairCounts(t, ctx, pool, inFlight.ID); ok != 7 || failed != 7 {
+	if ok, failed := pairCounts(ctx, t, pool, inFlight.ID); ok != 7 || failed != 7 {
 		t.Errorf("running run: pair_ok/pair_failed = %d/%d, want 7/7 (left to FinishRun)", ok, failed)
 	}
 	// Not skipped, zeroed: "no pair reported" is a count, and 5 was never one.
-	if ok, failed := pairCounts(t, ctx, pool, silent.ID); ok != 0 || failed != 0 {
+	if ok, failed := pairCounts(ctx, t, pool, silent.ID); ok != 0 || failed != 0 {
 		t.Errorf("resultless terminal run: pair_ok/pair_failed = %d/%d, want 0/0", ok, failed)
 	}
 }
@@ -782,12 +782,12 @@ func TestMigration00010IsIdempotent(t *testing.T) {
 	}
 	defer pool.Close()
 
-	run := mustCreateRun(t, ctx, db, 1)
+	run := mustCreateRun(ctx, t, db, 1)
 	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
-	seedSample(t, ctx, db, run.ID, "a", "b", 0, true)
-	seedSample(t, ctx, db, run.ID, "a", "b", 1, false)
+	seedSample(ctx, t, db, run.ID, "b", 0, true)
+	seedSample(ctx, t, db, run.ID, "b", 1, false)
 	if err := db.FinishRun(ctx, run.ID, "partial", 1, 1); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestMigration00010IsIdempotent(t *testing.T) {
 		if _, err := pool.Exec(ctx, up); err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
-		if ok, failed := pairCounts(t, ctx, pool, run.ID); ok != 0 || failed != 1 {
+		if ok, failed := pairCounts(ctx, t, pool, run.ID); ok != 0 || failed != 1 {
 			t.Fatalf("pass %d: pair_ok/pair_failed = %d/%d, want 0/1", pass, ok, failed)
 		}
 	}
@@ -816,13 +816,13 @@ func TestMigration00010HandlesPre00009SingleRowRuns(t *testing.T) {
 	}
 	defer pool.Close()
 
-	run := mustCreateRun(t, ctx, db, 2)
+	run := mustCreateRun(ctx, t, db, 2)
 	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
 	// Exactly what the old unique constraint allowed: one row per pair, seq 0.
-	seedSample(t, ctx, db, run.ID, "a", "b", 0, true)
-	seedSample(t, ctx, db, run.ID, "a", "c", 0, false)
+	seedSample(ctx, t, db, run.ID, "b", 0, true)
+	seedSample(ctx, t, db, run.ID, "c", 0, false)
 	if err := db.FinishRun(ctx, run.ID, "partial", 1, 1); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestMigration00010HandlesPre00009SingleRowRuns(t *testing.T) {
 	if _, err := pool.Exec(ctx, upSQLOf(t, "00010_backfill_pair_counts.sql")); err != nil {
 		t.Fatalf("apply migration 00010: %v", err)
 	}
-	if ok, failed := pairCounts(t, ctx, pool, run.ID); ok != 1 || failed != 1 {
+	if ok, failed := pairCounts(ctx, t, pool, run.ID); ok != 1 || failed != 1 {
 		t.Errorf("pre-00009 run: pair_ok/pair_failed = %d/%d, want 1/1", ok, failed)
 	}
 }

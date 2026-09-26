@@ -1,19 +1,23 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -31,8 +35,7 @@ const exportBundleVersion = 1
 // exportUnavailableDetail is served whenever any config seam is unwired; the bundle is the WHOLE
 // declarative configuration.
 const exportUnavailableDetail = "configuration export/import reads every persisted config table and has no " +
-	"in-memory fallback: set console.database.mode in the console config (Helm: console.database.mode) to " +
-	"enable /api/v1/export and /api/v1/import"
+	"in-memory fallback: " + databaseKnob + " to enable /api/v1/export and /api/v1/import"
 
 // exportPageLimit is the page size the paged list seams are walked with; the cap exists so a
 // pathological table cannot turn one request into an unbounded read.
@@ -114,28 +117,47 @@ type exportBinding struct {
 
 // exportRBAC is the bundle's access-control section.
 //
-// It is PRESENT only when the caller holds rbac:manage. Everything else in the bundle needs
-// settings:write, and a grant list is strictly more sensitive than a target list: it names people
-// and says what they can do. A custom role carrying settings:write without rbac:manage would
-// otherwise read the whole access map through the export route.
+// It is PRESENT only when the caller holds rbac:manage, as every section is present only for a caller
+// holding its own read permission (exportSectionGates): a grant list names people and says what they
+// can do, and a custom role carrying settings:write without rbac:manage would otherwise read the whole
+// access map through the export route.
 type exportRBAC struct {
 	Roles    []exportRole    `json:"roles"`
 	Bindings []exportBinding `json:"bindings"`
 }
 
 // exportBundle is GET /api/v1/export's body and POST /api/v1/import's `bundle`.
+//
+// A section the caller may not read through its own route is nil, which omitzero leaves out of the
+// file, and is named in Omitted; a readable empty section is [], so "absent" and "none defined" stay
+// distinguishable to whoever reads the file.
 type exportBundle struct {
 	Version            int                   `json:"version"`
 	ExportedAt         time.Time             `json:"exportedAt"`
-	Targets            []targetResponse      `json:"targets"`
-	CheckDefinitions   []definitionResponse  `json:"checkDefinitions"`
-	CheckSchedules     []exportSchedule      `json:"checkSchedules"`
-	AlertRules         []exportAlertRule     `json:"alertRules"`
-	Webhooks           []exportWebhook       `json:"webhooks"`
-	MaintenanceWindows []maintenanceResponse `json:"maintenanceWindows"`
-	// RBAC is omitted rather than empty when the caller may not see it, so "absent" and "none
-	// defined" stay distinguishable to whoever reads the file.
-	RBAC *exportRBAC `json:"rbac,omitempty"`
+	Targets            []targetResponse      `json:"targets,omitzero"`
+	CheckDefinitions   []definitionResponse  `json:"checkDefinitions,omitzero"`
+	CheckSchedules     []exportSchedule      `json:"checkSchedules,omitzero"`
+	AlertRules         []exportAlertRule     `json:"alertRules,omitzero"`
+	Webhooks           []exportWebhook       `json:"webhooks,omitzero"`
+	MaintenanceWindows []maintenanceResponse `json:"maintenanceWindows,omitzero"`
+	RBAC               *exportRBAC           `json:"rbac,omitempty"`
+	// Omitted names the sections withheld from this caller, in bundle order. Import ignores it.
+	Omitted []string `json:"omitted,omitzero"`
+}
+
+// exportSectionGates are the bundle's sections and the permission each one's own read route
+// requires; the export gives a section only to a caller who could read it there.
+var exportSectionGates = []struct {
+	name string
+	perm authz.Permission
+}{
+	{"targets", authz.PermTargetsRead},
+	{"checkDefinitions", authz.PermChecksRead},
+	{"checkSchedules", authz.PermChecksRead},
+	{"alertRules", authz.PermAlertsRead},
+	{"webhooks", authz.PermWebhooksManage},
+	{"maintenanceWindows", authz.PermMaintenanceRead},
+	{"rbac", authz.PermRBACManage},
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +180,13 @@ type importItemNote struct {
 
 // importCollectionResult is one collection's outcome.
 type importCollectionResult struct {
-	Created  int              `json:"created"`
-	Updated  int              `json:"updated"`
-	Skipped  int              `json:"skipped"`
-	Errors   []importItemNote `json:"errors"`
-	Warnings []importItemNote `json:"warnings"`
+	Created int `json:"created"`
+	Updated int `json:"updated"`
+	// Unchanged counts rows that already match the bundle; they are not written.
+	Unchanged int              `json:"unchanged"`
+	Skipped   int              `json:"skipped"`
+	Errors    []importItemNote `json:"errors"`
+	Warnings  []importItemNote `json:"warnings"`
 }
 
 // newImportCollectionResult keeps errors and warnings non-nil: the schema declares both as REQUIRED
@@ -182,7 +206,7 @@ func (r *importCollectionResult) warn(name, reason string) {
 // counts renders this collection's three counters plus its error/warning tallies for the audit row.
 func (r *importCollectionResult) counts() map[string]int {
 	return map[string]int{
-		"created": r.Created, "updated": r.Updated, "skipped": r.Skipped,
+		"created": r.Created, "updated": r.Updated, "unchanged": r.Unchanged, "skipped": r.Skipped,
 		"errors": len(r.Errors), "warnings": len(r.Warnings),
 	}
 }
@@ -242,13 +266,22 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if s.configUnavailable(w) {
 		return
 	}
-	bundle, err := s.buildExportBundle(r.Context())
+	readable := map[string]bool{}
+	var omitted []string
+	for _, gate := range exportSectionGates {
+		readable[gate.name] = s.callerCan(r, gate.perm)
+		if !readable[gate.name] {
+			omitted = append(omitted, gate.name)
+		}
+	}
+	bundle, err := s.buildExportBundle(r.Context(), readable)
 	if err != nil {
 		slog.Error("httpapi: export failed", "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
 		writeProblem(w, http.StatusBadGateway, "export unavailable", "failed to read the configuration to export")
 		return
 	}
-	if s.mayManageRBAC(r) {
+	bundle.Omitted = omitted
+	if readable["rbac"] {
 		if err := s.appendRBAC(r.Context(), &bundle); err != nil {
 			slog.Error("httpapi: export rbac failed", "error", err) //nolint:gosec // G706: structured slog fields
 			writeProblem(w, http.StatusBadGateway, "export unavailable", "failed to read the access control to export")
@@ -258,36 +291,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, bundle)
 }
 
-// mayManageRBAC reports whether THIS request's caller holds rbac:manage — the gate on the bundle's
-// access-control section, in both directions.
-func (s *Server) mayManageRBAC(r *http.Request) bool {
-	return s.callerCan(r, authz.PermRBACManage)
-}
-
-/*
-callerCan answers "does the caller of THIS request hold p".
-
-The import route is one permission at the door (settings:write), and for a long time that was the
-whole story: every section of the bundle was then applied with no further question. That made the
-route a way around every other permission in the system — the sharp example is webhooks, whose CRUD
-routes require webhooks:manage: a bundle naming an existing endpoint rewrote its delivery URL, so a
-subject with settings:write and nothing else could point every incident notification at a host of
-their choosing, with the stored secret carried along to sign the deliveries. The same shape applied
-to check definitions, targets, schedules and alert rules.
-
-A section is now applied only if the caller could have written the same thing through that
-section's own routes; otherwise it is skipped with a reason, which is exactly how the RBAC section
-has always behaved.
-*/
-/*
-importItemDetail is what a per-item failure tells the client.
-
-publicValidationDetail only trims the "store: " prefix, so a driver error went out verbatim: a role
-name carrying a NUL answered with `upsert role: ERROR: invalid byte sequence for encoding "UTF8":
-0x00 (SQLSTATE 22021)` — PostgreSQL's own words, SQLSTATE included, in a response body. A validation
-error is the client's own input described back to them and belongs there; anything else is this
-console's internals and belongs in the log.
-*/
+// importItemDetail is what a per-item failure tells the client: a validation error describes the
+// client's own input back to them, anything else is this console's internals and goes to the log.
 func importItemDetail(err error) string {
 	if isStoreValidationError(err) {
 		return publicValidationDetail(err)
@@ -318,6 +323,9 @@ func importAuthor(r *http.Request) string {
 	return annotationAuthor(subject)
 }
 
+// callerCan reports whether the caller of this request holds p. The export and the import ask it per
+// section, beyond the route's own gate: a section is read or written only by a caller who could do the
+// same through that section's own routes.
 func (s *Server) callerCan(r *http.Request, p authz.Permission) bool {
 	subject, ok := SubjectFrom(r.Context())
 	return ok && s.policy != nil && s.policy.Can(subject, p)
@@ -363,68 +371,77 @@ func (s *Server) appendRBAC(ctx context.Context, bundle *exportBundle) error {
 	return nil
 }
 
-func (s *Server) buildExportBundle(ctx context.Context) (exportBundle, error) {
-	bundle := exportBundle{
-		Version:    exportBundleVersion,
-		ExportedAt: time.Now().UTC(),
-		// Every collection is a non-nil empty slice so an empty console
-		// exports [] rather than null: the bundle is round-tripped through
-		// clients that iterate these, and null is not iterable.
-		Targets:            []targetResponse{},
-		CheckDefinitions:   []definitionResponse{},
-		CheckSchedules:     []exportSchedule{},
-		AlertRules:         []exportAlertRule{},
-		Webhooks:           []exportWebhook{},
-		MaintenanceWindows: []maintenanceResponse{},
+// buildExportBundle reads the sections readable names; the others stay nil and are left out.
+func (s *Server) buildExportBundle(ctx context.Context, readable map[string]bool) (exportBundle, error) {
+	bundle := exportBundle{Version: exportBundleVersion, ExportedAt: time.Now().UTC()}
+
+	// Every readable collection is a non-nil empty slice so an empty console exports [] rather than
+	// null: the bundle is round-tripped through clients that iterate these, and null is not iterable.
+	if readable["targets"] {
+		targets, err := s.listAllTargets(ctx)
+		if err != nil {
+			return exportBundle{}, err
+		}
+		bundle.Targets = []targetResponse{}
+		for i := range targets {
+			bundle.Targets = append(bundle.Targets, targetResponseFrom(&targets[i]))
+		}
 	}
 
-	targets, err := s.listAllTargets(ctx)
-	if err != nil {
-		return exportBundle{}, err
-	}
-	for i := range targets {
-		bundle.Targets = append(bundle.Targets, targetResponseFrom(&targets[i]))
-	}
-
-	defs, err := s.listAllDefinitions(ctx)
-	if err != nil {
-		return exportBundle{}, err
-	}
-	for i := range defs {
-		bundle.CheckDefinitions = append(bundle.CheckDefinitions, definitionResponseFrom(&defs[i]))
+	if readable["checkDefinitions"] {
+		defs, err := s.listAllDefinitions(ctx)
+		if err != nil {
+			return exportBundle{}, err
+		}
+		bundle.CheckDefinitions = []definitionResponse{}
+		for i := range defs {
+			bundle.CheckDefinitions = append(bundle.CheckDefinitions, definitionResponseFrom(&defs[i]))
+		}
 	}
 
-	scheds, err := s.listAllSchedules(ctx)
-	if err != nil {
-		return exportBundle{}, err
-	}
-	for i := range scheds {
-		bundle.CheckSchedules = append(bundle.CheckSchedules, exportScheduleFrom(&scheds[i]))
-	}
-
-	rules, err := s.alertRules.ListAlertRules(ctx, false)
-	if err != nil {
-		return exportBundle{}, fmt.Errorf("list alert rules: %w", err)
-	}
-	for i := range rules {
-		bundle.AlertRules = append(bundle.AlertRules, exportAlertRuleFrom(&rules[i]))
+	if readable["checkSchedules"] {
+		scheds, err := s.listAllSchedules(ctx)
+		if err != nil {
+			return exportBundle{}, err
+		}
+		bundle.CheckSchedules = []exportSchedule{}
+		for i := range scheds {
+			bundle.CheckSchedules = append(bundle.CheckSchedules, exportScheduleFrom(&scheds[i]))
+		}
 	}
 
-	hooks, err := s.webhooks.ListWebhooks(ctx)
-	if err != nil {
-		return exportBundle{}, fmt.Errorf("list webhooks: %w", err)
-	}
-	for i := range hooks {
-		bundle.Webhooks = append(bundle.Webhooks, exportWebhookFrom(&hooks[i]))
+	if readable["alertRules"] {
+		rules, err := s.alertRules.ListAlertRules(ctx, false)
+		if err != nil {
+			return exportBundle{}, fmt.Errorf("list alert rules: %w", err)
+		}
+		bundle.AlertRules = []exportAlertRule{}
+		for i := range rules {
+			bundle.AlertRules = append(bundle.AlertRules, exportAlertRuleFrom(&rules[i]))
+		}
 	}
 
-	// Only windows that have NOT ENDED.
-	windows, err := s.listMaintenanceWindows(ctx, store.MaintenanceFilter{From: time.Now().UTC()})
-	if err != nil {
-		return exportBundle{}, err
+	if readable["webhooks"] {
+		hooks, err := s.webhooks.ListWebhooks(ctx)
+		if err != nil {
+			return exportBundle{}, fmt.Errorf("list webhooks: %w", err)
+		}
+		bundle.Webhooks = []exportWebhook{}
+		for i := range hooks {
+			bundle.Webhooks = append(bundle.Webhooks, exportWebhookFrom(&hooks[i]))
+		}
 	}
-	for i := range windows {
-		bundle.MaintenanceWindows = append(bundle.MaintenanceWindows, maintenanceResponseFrom(&windows[i]))
+
+	if readable["maintenanceWindows"] {
+		// Only windows that have NOT ENDED.
+		windows, err := s.listMaintenanceWindows(ctx, store.MaintenanceFilter{From: time.Now().UTC()})
+		if err != nil {
+			return exportBundle{}, err
+		}
+		bundle.MaintenanceWindows = []maintenanceResponse{}
+		for i := range windows {
+			bundle.MaintenanceWindows = append(bundle.MaintenanceWindows, maintenanceResponseFrom(&windows[i]))
+		}
 	}
 
 	return bundle, nil
@@ -566,14 +583,14 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 	imp := &importer{
 		server: s, ctx: r.Context(), dryRun: req.DryRun,
-		mayManageRBAC:       s.mayManageRBAC(r),
+		mayManageRBAC:       s.callerCan(r, authz.PermRBACManage),
 		importedBy:          importAuthor(r),
 		mayWriteTargets:     s.callerCan(r, authz.PermTargetsWrite),
 		mayWriteChecks:      s.callerCan(r, authz.PermChecksWrite),
 		mayWriteSchedules:   s.callerCan(r, authz.PermSchedulesWrite),
 		mayWriteMaintenance: s.callerCan(r, authz.PermMaintenanceWrite),
 		mayManageAlerts:     s.callerCan(r, authz.PermAlertsManage),
-		mayManageWebhook:    s.callerCan(r, authz.PermWebhooksManage),
+		mayManageWebhooks:   s.callerCan(r, authz.PermWebhooksManage),
 	}
 	res, err := imp.run(req.Bundle)
 	if err != nil {
@@ -601,33 +618,66 @@ type importer struct {
 	// importedBy is the AUTHENTICATED caller, as the server sees them; it is what every imported row
 	// that records an author is attributed to.
 	importedBy string
-	/* The same rule, for every other section. The import route's own gate is settings:write, and
-	   that used to be the ONLY check — so the route applied targets, check definitions, schedules,
-	   alert rules and webhooks that the caller could not have written through their own routes.
-	   Each section is now gated on the permission its CRUD routes require, and a section the caller
-	   may not write is skipped with a reason rather than silently applied. */
+	// The same rule for every other section: each is gated on the permission its own routes require,
+	// beyond the import route's settings:write.
 	mayWriteTargets     bool
 	mayWriteChecks      bool
 	mayWriteSchedules   bool
 	mayWriteMaintenance bool
 	mayManageAlerts     bool
-	mayManageWebhook    bool
+	mayManageWebhooks   bool
 
 	// targetIDs and defIDs are bundle id -> destination id; on a dry run the value for a would-be
 	// create is the bundle's own id: nothing is written.
 	targetIDs map[string]string
 	defIDs    map[string]string
 
+	// defShapes is definition id (as defIDs gives it) -> the check a schedule of it would run, as the
+	// import leaves the definition: a schedule is refused when its kind cannot run that check.
+	defShapes map[string]definitionShape
+
 	// defNames is bundle definition id -> definition name, so a schedule --
 	// which has no name of its own -- can be reported by the definition it
 	// belongs to rather than by a UUID.
 	defNames map[string]string
+
+	// previewRoles holds, on a dry run, the roles the import would already have written, so each
+	// later role's last-admin guard sees them as the real import's guard will.
+	previewRoles map[string][]authz.Permission
+
+	// previewTargets is previewRoles for targets: live (or, for a would-be create, bundle) id ->
+	// the row a dry run would have written, so a definition is judged against it.
+	previewTargets map[string]store.Target
+	// bundleDefinitions are the definitions this import may write (the bundle's, when the caller holds
+	// checks:write); a target edit does not answer for one the import will rewrite (rewrittenDefinitions).
+	bundleDefinitions []definitionResponse
+	// liveDefinitions caches liveDefinitionsByName.
+	liveDefinitions map[string]store.Definition
+	// topo and topoErr memoise projectionTopology once topoRead is set: every definition in the
+	// bundle is judged against the same fleet, so a large bundle costs one controller read.
+	topo     *controllerclient.Topology
+	topoErr  error
+	topoRead bool
+}
+
+// projectionTopology is Server.projectionTopology read once per import, error included.
+func (i *importer) projectionTopology() (*controllerclient.Topology, error) {
+	if !i.topoRead {
+		i.topo, i.topoErr = i.server.projectionTopology(i.ctx)
+		i.topoRead = true
+	}
+	return i.topo, i.topoErr
 }
 
 func (i *importer) run(bundle *exportBundle) (importResponse, error) {
 	i.targetIDs = map[string]string{}
 	i.defIDs = map[string]string{}
 	i.defNames = map[string]string{}
+	i.defShapes = map[string]definitionShape{}
+	i.previewTargets = map[string]store.Target{}
+	if i.mayWriteChecks {
+		i.bundleDefinitions = bundle.CheckDefinitions
+	}
 
 	res := importResponse{
 		DryRun:             i.dryRun,
@@ -653,10 +703,6 @@ func (i *importer) run(bundle *exportBundle) (importResponse, error) {
 		i.mapExistingDefinitions); err != nil {
 		return importResponse{}, err
 	}
-	/* schedules:write is its OWN permission, and this used to pass mayWriteChecks while WARNING about
-	   schedules:write — a caller holding checks:write and not schedules:write had the section applied
-	   under a message naming a permission nobody checked, and one holding schedules:write and not
-	   checks:write was refused a section they were entitled to. */
 	if err := i.section(i.mayWriteSchedules, authz.PermSchedulesWrite, len(bundle.CheckSchedules), &res.CheckSchedules,
 		func() error { return i.importSchedules(bundle.CheckSchedules, &res.CheckSchedules) }, nil); err != nil {
 		return importResponse{}, err
@@ -665,14 +711,10 @@ func (i *importer) run(bundle *exportBundle) (importResponse, error) {
 		func() error { return i.importAlertRules(bundle.AlertRules, &res.AlertRules) }, nil); err != nil {
 		return importResponse{}, err
 	}
-	if err := i.section(i.mayManageWebhook, authz.PermWebhooksManage, len(bundle.Webhooks), &res.Webhooks,
+	if err := i.section(i.mayManageWebhooks, authz.PermWebhooksManage, len(bundle.Webhooks), &res.Webhooks,
 		func() error { return i.importWebhooks(bundle.Webhooks, &res.Webhooks) }, nil); err != nil {
 		return importResponse{}, err
 	}
-	/* Maintenance windows were the one section with NO gate: POST /api/v1/maintenance requires
-	   maintenance:write, and the import created the same rows for a caller holding settings:write
-	   alone — a window suppresses alerting for its scope, so writing one is exactly the kind of act
-	   the permission exists to hold. */
 	if err := i.section(i.mayWriteMaintenance, authz.PermMaintenanceWrite, len(bundle.MaintenanceWindows), &res.MaintenanceWindows,
 		func() error { return i.importMaintenanceWindows(bundle.MaintenanceWindows, &res.MaintenanceWindows) }, nil); err != nil {
 		return importResponse{}, err
@@ -688,22 +730,20 @@ section applies one bundle section if the caller may write it, and skips it with
 
 An empty section is a no-op either way: reporting "you may not import webhooks" to a bundle that
 carries none would be noise, and would leak which permissions the caller lacks for no purpose.
+
+always runs on every path, empty and skipped sections included: it maps the rows this console already
+holds, which a later section may reference whether or not this one was written. Reading them needs
+no permission, and a failed read fails the import like any other.
 */
 func (i *importer) section(
 	allowed bool, p authz.Permission, count int, res *importCollectionResult, apply, always func() error,
-) error {
-	/* `always` runs on EVERY path, and forgetting that was a real defect.
-
-	   importTargets and importDefinitions end by recording identity mappings for every row this
-	   console ALREADY has — that is what lets a bundle reference a target or a definition that
-	   exists here under the same name but a different id, which docs/console-api.yaml promises in so
-	   many words. Those mappings were built inside apply(), so an empty section (a bundle that
-	   carries no targets) or one the caller may not write skipped them — and the NEXT section then
-	   rejected every reference with "neither in the bundle nor in this console", which was simply
-	   false. Reading a table to learn what is already here needs no permission; only WRITING does. */
+) (err error) {
 	defer func() {
-		if always != nil {
-			_ = always()
+		if always == nil {
+			return
+		}
+		if aerr := always(); err == nil {
+			err = aerr
 		}
 	}()
 	if count == 0 {
@@ -722,13 +762,11 @@ func (i *importer) section(
 // sectionNoPermissionReason names the permission a section needs, for the skip warning.
 func sectionNoPermissionReason(p authz.Permission) string {
 	return "skipped: importing this section requires " + string(p) +
-		", and this caller holds only settings:write — apply it through the section's own routes, " +
-		"or have the permission granted"
+		", which this caller does not hold; apply it through the section's own routes, or have the permission granted"
 }
 
-// rbacImportNoPermissionReason is why a section was left alone.
-const rbacImportNoPermissionReason = "skipped: importing access control requires rbac:manage, and this caller " +
-	"holds only settings:write"
+// rbacImportNoPermissionReason is the skip warning of an access-control section.
+var rbacImportNoPermissionReason = sectionNoPermissionReason(authz.PermRBACManage)
 
 // rbacImportBindingReason is why a binding is NEVER applied, however authorised the caller is.
 const rbacImportBindingReason = "not imported by design: a binding names a person in the SOURCE console's identity " +
@@ -757,8 +795,10 @@ func (i *importer) importRBAC(section *exportRBAC, roles, bindings *importCollec
 		return fmt.Errorf("list roles: %w", err)
 	}
 	known := make(map[string]bool, len(existing))
+	stored := make(map[string][]string, len(existing))
 	for idx := range existing {
 		known[existing[idx].Name] = true
+		stored[existing[idx].Name] = existing[idx].Permissions
 	}
 
 	for idx := range section.Roles {
@@ -770,43 +810,43 @@ func (i *importer) importRBAC(section *exportRBAC, roles, bindings *importCollec
 			roles.warn(item.Name, "skipped: built-in roles are compiled in and cannot be redefined by a bundle")
 			continue
 		}
-		/* THE SAME NAME BOUND the create route applies. A bundle is not a trusted input just because
-		   importing one is deliberate: it is a file, often produced by another console and edited by
-		   hand on the way. Without this an imported role could carry a name of any length —
-		   POST /api/v1/rbac/roles answers 422 past 63 bytes, and the row it refuses is the row the
-		   import wrote. */
-		/* The SAME name rules the create route applies, all of them.
-		   An empty name produced a row DELETE /api/v1/rbac/roles/{name} can never address — the
-		   pattern does not match an empty segment — so the only way to remove it was direct SQL. A
-		   control character rendered into the RBAC page and every export from then on, and could not
-		   be deleted either, because the path carrying it is now refused at the door. */
-		if strings.TrimSpace(item.Name) == "" {
-			roles.fail("(empty)", "role: name must not be empty")
+		// The create route's name rules; the name is the DELETE route's path segment.
+		if problem := roleNameProblem(item.Name); problem != "" {
+			label := item.Name
+			if strings.TrimSpace(label) == "" {
+				label = "(empty)"
+			}
+			roles.fail(label, problem)
 			continue
 		}
-		if idx := strings.IndexFunc(item.Name, unicode.IsControl); idx >= 0 {
-			roles.fail(item.Name, fmt.Sprintf("role: name contains a control character at byte %d", idx))
-			continue
-		}
-		// A "/" makes the role undeletable for the same reason an empty name does: the name IS the
-		// delete route's path segment, and neither spelling of it addresses the row.
-		if strings.Contains(item.Name, "/") {
-			roles.fail(item.Name, `role: name may not contain "/" — the name addresses the role in its own API path`)
-			continue
-		}
-		if len(item.Name) > roleNameMaxLen {
-			roles.fail(item.Name, fmt.Sprintf("role: name is %d bytes, limit is %d", len(item.Name), roleNameMaxLen))
-			continue
-		}
-		/* Same closed set the create route enforces (a bundle from a NEWER build naming a permission
-		   this one does not have would otherwise store a role granting a string nothing checks), and
-		   the same dedup, which is what bounds the stored array. */
+		// The create route's closed permission set and dedup: a newer build's permission would grant a
+		// string nothing here checks.
 		perms, unknown := sanitizeRolePermissions(item.Permissions)
 		if unknown != "" {
 			roles.fail(item.Name, "unknown permission: "+unknown)
 			continue
 		}
+		if cur, ok := stored[item.Name]; ok && sameStringSet(cur, perms) {
+			roles.Unchanged++
+			continue
+		}
+		// The same last-admin guard POST /api/v1/rbac/roles applies. A dry run has written none of the
+		// bundle's earlier roles, so they are laid over the stored ones.
+		var guard func(context.Context) error
+		if !slices.Contains(perms, string(authz.PermUsersManage)) {
+			guard = i.server.rbacLastAdminGuard(rbacChange{role: item.Name, permissions: perms, pendingRoles: i.previewRoles})
+		}
 		if i.dryRun {
+			if guard != nil {
+				if err := guard(i.ctx); err != nil {
+					roles.fail(item.Name, importRoleDetail(err))
+					continue
+				}
+			}
+			if i.previewRoles == nil {
+				i.previewRoles = map[string][]authz.Permission{}
+			}
+			i.previewRoles[item.Name] = asPermissions(perms)
 			if known[item.Name] {
 				roles.Updated++
 			} else {
@@ -814,8 +854,8 @@ func (i *importer) importRBAC(section *exportRBAC, roles, bindings *importCollec
 			}
 			continue
 		}
-		if _, err := i.server.roleAdmin.UpsertRole(i.ctx, item.Name, perms); err != nil {
-			roles.fail(item.Name, importItemDetail(err))
+		if _, err := i.server.roleAdmin.UpsertRoleGuarded(i.ctx, item.Name, perms, guard); err != nil {
+			roles.fail(item.Name, importRoleDetail(err))
 			continue
 		}
 		if known[item.Name] {
@@ -826,21 +866,26 @@ func (i *importer) importRBAC(section *exportRBAC, roles, bindings *importCollec
 		}
 	}
 
-	/* And the SAME KICK the direct route publishes. Without it an import that narrows a role's
-	   permission set answered 200 with the new set while every replica went on authorizing against
-	   the old one until the 60s refresh — a revoked permission still working, with the API and the
-	   UI both showing it revoked. A bundle is a bulk edit of the access map; it is the last place
-	   that window belongs. */
+	// The same kick the direct route publishes, so no replica keeps authorizing against the old roles.
 	if !i.dryRun && (roles.Created > 0 || roles.Updated > 0) {
 		i.server.publishRBACChanged(i.ctx)
 	}
 
-	for idx := range section.Bindings {
-		b := &section.Bindings[idx]
-		bindings.Skipped++
-		bindings.warn(b.RoleName+"="+b.SubjectID, rbacImportBindingReason)
+	// Said once for the section: the reason is the same for every binding.
+	if n := len(section.Bindings); n > 0 {
+		bindings.Skipped += n
+		bindings.warn(fmt.Sprintf("%d role bindings", n), rbacImportBindingReason)
 	}
 	return nil
+}
+
+// importRoleDetail is importItemDetail plus the last-admin guard's refusal, which is the caller's
+// to act on and so is named rather than logged.
+func importRoleDetail(err error) string {
+	if errors.Is(err, errLastAdmin) {
+		return "skipped: this change leaves no enabled user who can manage users; grant users:manage to someone else first"
+	}
+	return importItemDetail(err)
 }
 
 // remember records a bundle id -> destination id mapping, skipping the empty
@@ -873,34 +918,40 @@ func (i *importer) importTargets(items []targetResponse, res *importCollectionRe
 			res.fail(item.Name, importItemDetail(err))
 			continue
 		}
-		/* The IDENTITY MAPPING first, whatever the gate below decides.
-		   A bundle from another console carries its own ids, and remember() is what lets a check
-		   definition in that bundle reference a target this console already holds under the same
-		   name. Failing the target BEFORE the mapping cascaded: the definition was then refused with
-		   "neither in the bundle nor in this console" -- about a target sitting right there, which
-		   the direct route would happily accept. Reading what this console already holds needs no
-		   permission and no gate; only WRITING does. */
+		// The identity mapping first, whatever the gates below decide: a definition in the bundle may
+		// reference this target even when the target itself is refused.
 		cur, found := byName[item.Name]
 		if found {
 			remember(i.targetIDs, item.ID, cur.ID)
 		}
-		/* THE SAME REACHABILITY GATE the direct route applies.
-		   POST /api/v1/targets answers 422 for an address outside config.checkers.external
-		   .allowedCidrs, because no agent could ever probe it and every check against it would time
-		   out with no explanation. A bundle went straight to the store and skipped that entirely, so
-		   an import could plant such a target -- or, through the update branch, re-point an existing
-		   endpoint at one -- which is precisely the failure the create-time guard exists to prevent.
-		   This is the ResponseWriter-free half of refuseUnreachableTarget, the way overProjection is
-		   the ResponseWriter-free half of enforceProjection, and it fails OPEN on an unknown or
-		   unreadable allowlist for the same reason the direct route does. */
+		// POST /api/v1/targets' reachability gate (refuseUnreachableTarget without a ResponseWriter),
+		// failing open on an unknown or unreadable allowlist as it does.
 		if list, outside := i.server.targetOutsideAllowlist(i.ctx, item.Address); outside {
 			res.fail(item.Name, "target: "+strconv.Quote(item.Address)+
 				" is outside the addresses this fleet's agents may probe ("+strings.Join(list.raw, ", ")+
 				"), so every check against it would time out")
 			continue
 		}
-		if found {
+		if found && cur.Kind == in.Kind && cur.Address == in.Address && sameJSON(cur.Labels, in.Labels) {
 			if i.dryRun {
+				i.previewTargets[cur.ID] = store.Target{ID: cur.ID, Name: in.Name, Kind: in.Kind, Address: in.Address}
+			}
+			res.Unchanged++
+			continue
+		}
+		if found {
+			// The direct route's guard: an edit must not leave a definition pointing here unrunnable.
+			names, exact, reason := i.server.definitionsBrokenByTargetEdit(i.ctx, cur.ID, &in, nil)
+			if reason != nil && len(i.bundleDefinitions) > 0 {
+				names, exact, reason = i.server.definitionsBrokenByTargetEdit(i.ctx, cur.ID, &in,
+					i.rewrittenDefinitions(cur.ID, item.ID, &in))
+			}
+			if reason != nil {
+				res.fail(item.Name, targetEditBreaksDetail(&in, names, exact, reason))
+				continue
+			}
+			if i.dryRun {
+				i.previewTargets[cur.ID] = store.Target{ID: cur.ID, Name: in.Name, Kind: in.Kind, Address: in.Address}
 				res.Updated++
 				continue
 			}
@@ -919,6 +970,7 @@ func (i *importer) importTargets(items []targetResponse, res *importCollectionRe
 			// predicted as two creates and applied as a create plus an
 			// update; recording the would-be row keeps the two identical.
 			byName[item.Name] = store.Target{ID: item.ID, Name: item.Name}
+			i.previewTargets[item.ID] = store.Target{ID: item.ID, Name: in.Name, Kind: in.Kind, Address: in.Address}
 			res.Created++
 			continue
 		}
@@ -934,6 +986,98 @@ func (i *importer) importTargets(items []targetResponse, res *importCollectionRe
 	}
 
 	return nil
+}
+
+/*
+rewrittenDefinitions names the bundled definitions that excuse editing the live target liveID (the
+bundle's bundleID) into next: the ones importDefinitions will write, judged here as it will judge
+them. One it would refuse leaves the live row in place, still pointing at the edited target, so it
+excuses nothing. A reference to a target the import has not mapped yet is not resolved here, and
+that definition does not excuse the edit either; nor does any, when the live definitions cannot be
+read.
+*/
+func (i *importer) rewrittenDefinitions(liveID, bundleID string, next *store.TargetInput) map[string]bool {
+	out := map[string]bool{}
+	live, err := i.liveDefinitionsByName()
+	if err != nil {
+		slog.Warn("httpapi: import could not read the definitions a target edit would affect", "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		return out
+	}
+	for idx := range i.bundleDefinitions {
+		item := &i.bundleDefinitions[idx]
+		targetID := item.DestinationTargetID
+		switch targetID {
+		case "":
+		case bundleID, liveID:
+			targetID = liveID
+		default:
+			mapped, ok := i.targetIDs[targetID]
+			if !ok {
+				continue
+			}
+			targetID = mapped
+		}
+		in := definitionInputFrom(item, targetID)
+		if in.Validate() != nil || i.projectionRefuses(&in) {
+			continue
+		}
+		cur, found := live[item.Name]
+		if !found || in.Enabled {
+			if in.DestinationKind == "target" && targetID == liveID {
+				if runsAsExternalCheck(in.CheckType, in.DestinationKind) &&
+					externalSpecError(in.CheckType, in.Params, next.Name, next.Kind, next.Address) != nil {
+					continue
+				}
+			} else if i.unrunnableDefinition(&in) != nil {
+				continue
+			}
+		}
+		if found {
+			if _, reason := i.server.scheduleBrokenByDefinitionEdit(i.ctx, cur.ID, &in); reason != nil {
+				continue
+			}
+		}
+		out[item.Name] = true
+	}
+	return out
+}
+
+// liveDefinitionsByName reads this console's definitions once per import, keyed by the name
+// importDefinitions matches a bundled one on.
+func (i *importer) liveDefinitionsByName() (map[string]store.Definition, error) {
+	if i.liveDefinitions != nil {
+		return i.liveDefinitions, nil
+	}
+	existing, err := i.server.listAllDefinitions(i.ctx)
+	if err != nil {
+		return nil, err
+	}
+	i.liveDefinitions = make(map[string]store.Definition, len(existing))
+	for idx := range existing {
+		i.liveDefinitions[existing[idx].Name] = existing[idx]
+	}
+	return i.liveDefinitions, nil
+}
+
+// definitionInputFrom is the row the import writes for item, its target reference already mapped to
+// this console's targetID; rewrittenDefinitions has to judge exactly that row.
+func definitionInputFrom(item *definitionResponse, targetID string) store.DefinitionInput {
+	return store.DefinitionInput{
+		Name: item.Name, SourceSelection: item.SourceSelection,
+		DestinationKind: item.DestinationKind, DestinationTargetID: targetID,
+		DestinationAddress: item.DestinationAddress, CheckType: item.CheckType,
+		Plane: item.Plane, Params: item.Params, Enabled: item.Enabled,
+	}
+}
+
+// projectionRefuses is overProjection without its log line and metric, which the definitions section
+// records when it judges the same row.
+func (i *importer) projectionRefuses(in *store.DefinitionInput) bool {
+	if !in.Enabled {
+		return false
+	}
+	topo, err := i.projectionTopology()
+	return err == nil && projectDefinitionOn(topo, in).OverLimit
 }
 
 /*
@@ -966,17 +1110,30 @@ func (i *importer) overProjection(in *store.DefinitionInput) (over bool, detail 
 	if !in.Enabled {
 		return false, ""
 	}
-	proj, err := i.server.projectDefinition(i.ctx, in)
+	topo, err := i.projectionTopology()
 	if err != nil {
 		i.server.metrics.ProjectionGuardFailOpen.WithLabelValues().Inc()
 		slog.Warn("httpapi: import projection guard could not read the topology, allowing the write", //nolint:gosec // G706: structured slog fields, not string-built log injection
 			"definition", in.Name, "error", err)
 		return false, ""
 	}
+	proj := projectDefinitionOn(topo, in)
 	if !proj.OverLimit {
 		return false, ""
 	}
 	return true, projectionDetail(in.SourceSelection, proj)
+}
+
+// unrunnableDefinition is the server's guard, reading a target a dry run has only previewed from
+// the preview, so the dry run and the real import give the same answer.
+func (i *importer) unrunnableDefinition(in *store.DefinitionInput) error {
+	if t, ok := i.previewTargets[in.DestinationTargetID]; ok && in.DestinationKind == "target" {
+		if !runsAsExternalCheck(in.CheckType, in.DestinationKind) {
+			return nil
+		}
+		return externalSpecError(in.CheckType, in.Params, t.Name, t.Kind, t.Address)
+	}
+	return i.server.unrunnableDefinition(i.ctx, in)
 }
 
 // --- check definitions -----------------------------------------------------
@@ -1008,34 +1165,42 @@ func (i *importer) importDefinitions(items []definitionResponse, res *importColl
 			targetID = live
 		}
 
-		in := store.DefinitionInput{
-			Name: item.Name, SourceSelection: item.SourceSelection,
-			DestinationKind: item.DestinationKind, DestinationTargetID: targetID,
-			DestinationAddress: item.DestinationAddress, CheckType: item.CheckType,
-			Plane: item.Plane, Params: item.Params, Enabled: item.Enabled,
-		}
+		in := definitionInputFrom(item, targetID)
 		if err := in.Validate(); err != nil {
 			res.fail(item.Name, importItemDetail(err))
 			continue
 		}
-		/* THE PROJECTION CEILING, which the direct route enforces and this one used to walk past.
-
-		   POST /api/v1/checks refuses an ENABLED definition whose source selection projects more
-		   continuous external series than the per-definition ceiling allows — it is what stops one
-		   definition from assigning a probe to every agent on a large fleet. The identical definition
-		   arriving in a bundle was created and left enabled, so the bound was a property of one
-		   route rather than of the table.
-
-		   It fails OPEN when the topology cannot be read, for the same reason the direct route does:
-		   a controller outage must not become a config-write outage. */
+		// Before the create/edit guards: leaving a row as it is edits nothing they protect.
+		if cur, found := byName[item.Name]; found && sameDefinition(&cur, &in) {
+			remember(i.defIDs, item.ID, cur.ID)
+			i.defShapes[cur.ID] = definitionShape{in.CheckType, in.DestinationKind}
+			res.Unchanged++
+			continue
+		}
+		// POST /api/v1/checks' projection ceiling, failing open on an unreadable topology as it does.
 		if over, detail := i.overProjection(&in); over {
 			res.fail(item.Name, detail)
 			continue
 		}
+		// The routes' runnability guard: always on a create, on an update only when it leaves the row enabled.
+		cur, found := byName[item.Name]
+		if !found || in.Enabled {
+			if err := i.unrunnableDefinition(&in); err != nil {
+				res.fail(item.Name, unrunnableDefinitionDetail(err))
+				continue
+			}
+		}
 
-		if cur, found := byName[item.Name]; found {
+		shape := definitionShape{in.CheckType, in.DestinationKind}
+		if found {
 			remember(i.defIDs, item.ID, cur.ID)
+			// And PUT /api/v1/checks/{id}'s: the edit may not leave one of its schedules unable to run it.
+			if kind, reason := i.server.scheduleBrokenByDefinitionEdit(i.ctx, cur.ID, &in); reason != nil {
+				res.fail(item.Name, definitionEditBreaksScheduleDetail(kind, reason))
+				continue
+			}
 			if i.dryRun {
+				i.defShapes[cur.ID] = shape
 				res.Updated++
 				continue
 			}
@@ -1044,12 +1209,14 @@ func (i *importer) importDefinitions(items []definitionResponse, res *importColl
 				res.fail(item.Name, importItemDetail(err))
 				continue
 			}
+			i.defShapes[cur.ID] = shape
 			byName[item.Name] = row
 			res.Updated++
 			continue
 		}
 		if i.dryRun {
 			remember(i.defIDs, item.ID, item.ID)
+			i.defShapes[item.ID] = shape
 			byName[item.Name] = store.Definition{ID: item.ID, Name: item.Name}
 			res.Created++
 			continue
@@ -1060,6 +1227,7 @@ func (i *importer) importDefinitions(items []definitionResponse, res *importColl
 			continue
 		}
 		remember(i.defIDs, item.ID, row.ID)
+		i.defShapes[row.ID] = shape
 		byName[row.Name] = row
 		byID[row.ID] = true
 		res.Created++
@@ -1079,9 +1247,18 @@ func (i *importer) mapExistingDefinitions() error {
 		if _, mapped := i.defIDs[existing[idx].ID]; !mapped {
 			i.defIDs[existing[idx].ID] = existing[idx].ID
 		}
+		if _, shaped := i.defShapes[existing[idx].ID]; !shaped {
+			i.defShapes[existing[idx].ID] = definitionShape{existing[idx].CheckType, existing[idx].DestinationKind}
+		}
 		remember(i.defNames, existing[idx].ID, existing[idx].Name)
 	}
 	return nil
+}
+
+// definitionShape is what decides whether a schedule of some kind can run a definition.
+type definitionShape struct {
+	checkType       string
+	destinationKind string
 }
 
 // --- check schedules -------------------------------------------------------
@@ -1128,13 +1305,25 @@ func (i *importer) importSchedules(items []exportSchedule, res *importCollection
 			res.fail(label, importItemDetail(err))
 			continue
 		}
+		key := defID + "\x00" + item.Kind
+		matches := byKey[key]
+		if len(matches) == 1 && sameSchedule(&matches[0], &in) {
+			res.Unchanged++
+			continue
+		}
+		// The routes' guard, against the definition as this import leaves it: always on a create, on an
+		// update only when it leaves the schedule enabled.
+		if shape, ok := i.defShapes[defID]; ok && (len(matches) == 0 || in.Enabled) {
+			if err := scheduleCannotRun(item.Kind, shape.checkType, shape.destinationKind); err != nil {
+				res.fail(label, "schedule: "+err.Error())
+				continue
+			}
+		}
 		// nextFireAt is re-seeded, never imported: the bundle carries no
 		// scheduler bookkeeping (exportSchedule's doc comment) and this is the
 		// same seed POST /api/v1/schedules applies.
 		in.NextFireAt = seedNextFireAt(&in)
 
-		key := defID + "\x00" + item.Kind
-		matches := byKey[key]
 		switch {
 		case len(matches) > 1:
 			res.fail(label, fmt.Sprintf(
@@ -1185,17 +1374,8 @@ func (i *importer) importAlertRules(items []exportAlertRule, res *importCollecti
 
 	for idx := range items {
 		item := &items[idx]
-		/* RE-RENDERED from the bundle's own kind/params, never copied from it.
-
-		   renderedExpr is a DERIVED column: the reconciler builds the desired bundle from kind and
-		   params and ignores the stored string entirely. Copying the caller's value therefore stored
-		   an expression that no longer follows from its own builder fields — the console displayed
-		   one PromQL expression, Prometheus evaluated another, and the rule reported syncStatus
-		   "synced" the whole time, because from the reconciler's point of view nothing was wrong.
-		   A bundle is a file; the rule's own fields are the only thing that decides its expression.
-
-		   The metric prefix is this console's, which is the other half of it: a bundle from a console
-		   publishing under a different prefix carried expressions that match nothing here. */
+		// Re-rendered from the bundle's kind and params with this console's metric prefix, never copied:
+		// renderedExpr is derived, and the reconciler builds the rule from the builder fields alone.
 		expr, rerr := i.server.renderer().Render(alerting.Rule{
 			Name: item.Name, Kind: item.Kind, Params: mustDecodeObjectMap(item.Params),
 			Severity: item.Severity, ForNS: item.ForNs,
@@ -1216,8 +1396,21 @@ func (i *importer) importAlertRules(items []exportAlertRule, res *importCollecti
 			continue
 		}
 		key := strings.ToLower(item.Name)
+		// The store refuses a clash of Prometheus alert names; a dry run never reaches it, so it asks the
+		// store's own check against the rows it would have written.
+		if i.dryRun {
+			if err := store.AlertNameConflict(slices.Collect(maps.Values(byName)), byName[key].ID, item.Name); err != nil {
+				res.fail(item.Name, publicValidationDetail(err))
+				continue
+			}
+		}
+		if cur, found := byName[key]; found && sameAlertRule(&cur, &in) {
+			res.Unchanged++
+			continue
+		}
 		if cur, found := byName[key]; found {
 			if i.dryRun {
+				byName[key] = store.AlertRule{ID: cur.ID, Name: item.Name}
 				res.Updated++
 				continue
 			}
@@ -1231,7 +1424,9 @@ func (i *importer) importAlertRules(items []exportAlertRule, res *importCollecti
 			continue
 		}
 		if i.dryRun {
-			byName[key] = store.AlertRule{ID: item.ID, Name: item.Name}
+			// A placeholder id of its own: a bundle's ids may be missing or repeated, and
+			// AlertNameConflict reads a shared id as the same rule.
+			byName[key] = store.AlertRule{ID: "dry-run:" + key, Name: item.Name}
 			res.Created++
 			continue
 		}
@@ -1301,6 +1496,10 @@ func (i *importer) importWebhooks(items []exportWebhook, res *importCollectionRe
 			res.fail(item.Name, importItemDetail(err))
 			continue
 		}
+		if cur.URL == in.URL && cur.Enabled == in.Enabled && sameStringSet(cur.Events, in.Events) {
+			res.Unchanged++
+			continue
+		}
 		if i.dryRun {
 			res.Updated++
 			continue
@@ -1351,20 +1550,17 @@ func (i *importer) importMaintenanceWindows(items []maintenanceResponse, res *im
 	if err != nil {
 		return err
 	}
-	seen := make(map[string]bool, len(existing))
+	// The reason each window here carries, by scope and span.
+	seen := make(map[string]string, len(existing))
 	for idx := range existing {
-		seen[maintenanceKey(existing[idx].Scope, existing[idx].StartAt, existing[idx].EndAt)] = true
+		seen[maintenanceKey(existing[idx].Scope, existing[idx].StartAt, existing[idx].EndAt)] = existing[idx].Reason
 	}
 
 	for idx := range items {
 		item := &items[idx]
 		label := maintenanceLabel(item.Scope, item.StartAt)
-		/* createdBy is THIS console's view of who did it, never the bundle's claim about it.
-		   POST /api/v1/maintenance derives it from the authenticated subject and offers the client no
-		   way to set it; the import copied the field straight out of the file, so a bundle could
-		   assert that any name at all had opened a maintenance window here. Attribution that a caller
-		   can choose is not attribution. The bundle's value is dropped, exactly as the direct route
-		   would drop it. */
+		// createdBy is the authenticated caller, as on POST /api/v1/maintenance; the bundle's claim is
+		// dropped.
 		in := store.MaintenanceInput{
 			Scope: item.Scope, StartAt: item.StartAt, EndAt: item.EndAt,
 			Reason: item.Reason, CreatedBy: i.importedBy,
@@ -1374,13 +1570,18 @@ func (i *importer) importMaintenanceWindows(items []maintenanceResponse, res *im
 			continue
 		}
 		key := maintenanceKey(item.Scope, item.StartAt, item.EndAt)
-		if seen[key] {
-			// SKIPPED, never updated: store.MaintenanceStore has no update by design.
+		if reason, ok := seen[key]; ok {
+			// Never updated: store.MaintenanceStore has no update by design.
+			if reason == item.Reason {
+				res.Unchanged++
+				continue
+			}
 			res.Skipped++
+			res.warn(label, maintenanceImportExistsReason)
 			continue
 		}
 		if i.dryRun {
-			seen[key] = true
+			seen[key] = item.Reason
 			res.Created++
 			continue
 		}
@@ -1388,8 +1589,61 @@ func (i *importer) importMaintenanceWindows(items []maintenanceResponse, res *im
 			res.fail(label, importItemDetail(err))
 			continue
 		}
-		seen[key] = true
+		seen[key] = item.Reason
 		res.Created++
 	}
 	return nil
+}
+
+// maintenanceImportExistsReason is why a window whose scope and span exist here with another reason
+// is left alone.
+const maintenanceImportExistsReason = "skipped: a window with this scope, start and end already exists " +
+	"with a different reason, and an import never rewrites a maintenance window; delete it first to replace it"
+
+// --- unchanged rows ----------------------------------------------------------
+
+// sameJSON compares two JSON documents by value; empty and null read as {}, as the store writes them.
+func sameJSON(a, b json.RawMessage) bool {
+	av, aok := decodeJSONValue(a)
+	bv, bok := decodeJSONValue(b)
+	return aok && bok && reflect.DeepEqual(av, bv)
+}
+
+func decodeJSONValue(raw json.RawMessage) (any, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return map[string]any{}, true
+	}
+	var v any
+	if err := json.Unmarshal(trimmed, &v); err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// sameStringSet compares two lists as sets: the order of permissions or events carries no meaning.
+func sameStringSet(a, b []string) bool {
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(slices.Compact(as), slices.Compact(bs))
+}
+
+func sameDefinition(cur *store.Definition, in *store.DefinitionInput) bool {
+	return cur.Name == in.Name && cur.SourceSelection == in.SourceSelection &&
+		cur.DestinationKind == in.DestinationKind && cur.DestinationTargetID == in.DestinationTargetID &&
+		cur.DestinationAddress == in.DestinationAddress && cur.CheckType == in.CheckType &&
+		cur.Plane == in.Plane && cur.Enabled == in.Enabled && sameJSON(cur.Params, in.Params)
+}
+
+func sameSchedule(cur *store.Schedule, in *store.ScheduleInput) bool {
+	sameRunAt := (cur.RunAt == nil) == (in.RunAt == nil) && (cur.RunAt == nil || cur.RunAt.Equal(*in.RunAt))
+	return cur.Kind == in.Kind && cur.IntervalNs == in.IntervalNs && cur.Enabled == in.Enabled && sameRunAt
+}
+
+// sameAlertRule compares the builder fields; the name exactly, since a change of case is a rename.
+func sameAlertRule(cur *store.AlertRule, in *store.AlertRuleInput) bool {
+	return cur.Name == in.Name && cur.Kind == in.Kind && cur.Severity == in.Severity &&
+		cur.ForNs == in.ForNs && cur.Enabled == in.Enabled && cur.RenderedExpr == in.RenderedExpr &&
+		sameJSON(cur.Params, in.Params) && sameJSON(cur.Labels, in.Labels) && sameJSON(cur.Annotations, in.Annotations)
 }

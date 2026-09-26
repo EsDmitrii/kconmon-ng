@@ -888,3 +888,20 @@ func TestExecuteRunsAnOnDemandPMTUProbe(t *testing.T) {
 		t.Errorf("pmtu probed %q, want the peer's pod IP", got)
 	}
 }
+
+// A refused external probe still names the operator's target: the CheckResult feeds the response,
+// the CheckObserved event and the Console's run row, and an empty destination there says nothing
+// about which target was refused.
+func TestExternalRefusalNamesTheTarget(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("denied", "tcp", "169.254.169.254"))
+	var decoded model.CheckResult
+	if err := json.Unmarshal(res.GetDetailsJson(), &decoded); err != nil {
+		t.Fatalf("DetailsJson does not decode as a CheckResult: %v", err)
+	}
+	if decoded.Success || decoded.Destination != "edge-gw" {
+		t.Errorf("refusal = success %v destination %q, want a failure naming edge-gw", decoded.Success, decoded.Destination)
+	}
+}

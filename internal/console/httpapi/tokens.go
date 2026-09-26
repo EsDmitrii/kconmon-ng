@@ -34,12 +34,13 @@ type TokenAdmin interface {
 // tokenSecretBytes).
 const tokenSecretBytes = 32
 
-// tokensUnavailable answers 503 and reports true when s.tokens is nil
-// (database.mode=disabled).
+const tokensUnavailableDetail = databaseKnob + " to enable /api/v1/tokens"
+
+// tokensUnavailable answers 503 and reports true when s.tokens is nil (no database configured:
+// database.dsnFile unset).
 func (s *Server) tokensUnavailable(w http.ResponseWriter) bool {
 	if s.tokens == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "token admin not available",
-			"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/tokens")
+		writeProblem(w, http.StatusServiceUnavailable, "token admin not available", tokensUnavailableDetail)
 		return true
 	}
 	return false
@@ -98,17 +99,13 @@ type tokenCreateResponse struct {
 
 // ownerFor derives api_tokens.owner (migration 00002: "creator subject id (users.id UUID for local
 // users, token id for token-created tokens) or 'system'") from the creating subject alone;
-// DisplayName is NEVER used here, unlike the pre-fix version of this function.
+// DisplayName is never used: it is caller-shaped text.
 func ownerFor(subject authz.Subject) string { //nolint:gocritic // Subject is a value type by design
 	if (subject.Kind == authz.SubjectUser || subject.Kind == authz.SubjectToken) && subject.ID != "" {
 		return subject.ID
 	}
 	return "system"
 }
-
-// tokenNameMaxLen bounds a token name, mirroring store.nameMaxLen (the CHECK targets and check
-// definitions carry). The name is display text — see the check in handleTokensCreate.
-const tokenNameMaxLen = 63
 
 // handleTokensCreate mints a new API token; MUST use authn.HashTokenSecret + authn.EncodeToken.
 func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
@@ -117,29 +114,21 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	var req tokenCreateRequest
 	const bodyShape = `body must be JSON with a non-empty "name"`
-	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err, bodyShape))
+	if !decodeMutationBody(w, r, &req, bodyShape) {
 		return
 	}
 	if req.Name == "" {
 		writeProblem(w, http.StatusBadRequest, "invalid request", bodyShape)
 		return
 	}
-	/* A BOUND on the name, because the name is printed.
-	   Nothing limited it before, and a 4 000-character token name is stored, listed, and rendered
-	   into every row of /settings and into the label of that row's Revoke button — one such name
-	   widened the page to ~950 000 pixels and left the whole console scrolling sideways. The limit
-	   matches the one targets and check definitions carry, so every name in this API is bounded by
-	   the same number. */
-	/* And no control characters, like every other name in this API. A NUL reached CreateToken,
-	   PostgreSQL refused the row, and the handler answered 502 "tokens unavailable" — after the
-	   secret had already been generated, so a refused request still burned a credential. */
+	// The name is printed on every row of /settings, so it is bounded and free of control characters
+	// like every other name in this API.
 	if rejectControlChars(w, "name", req.Name) {
 		return
 	}
-	if len(req.Name) > tokenNameMaxLen {
+	if len(req.Name) > nameMaxLen {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid token",
-			fmt.Sprintf("token: name is %d bytes, limit is %d", len(req.Name), tokenNameMaxLen))
+			fmt.Sprintf("token: name is %d bytes, limit is %d", len(req.Name), nameMaxLen))
 		return
 	}
 	// An expiry already in the past mints a credential that can never authenticate, so the
@@ -189,8 +178,8 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveInheritedOwner is the mint-time half of the owner-inheritance fix; falls back to fallback
-// whenever the parent cannot be attributed with confidence.
+// resolveInheritedOwner is the owner a token minted by token parentID inherits from it, so disabling
+// that owner revokes the new token too; fallback whenever the parent cannot be attributed.
 func (s *Server) resolveInheritedOwner(ctx context.Context, parentID, fallback string) string {
 	parent, err := s.tokens.GetTokenByID(ctx, parentID)
 	switch {
@@ -207,6 +196,38 @@ func (s *Server) resolveInheritedOwner(ctx context.Context, parentID, fallback s
 	}
 }
 
+// revokeOwnedTokens revokes every active token userID owns, directly or through a token of theirs
+// that minted it before owners were inherited (resolveInheritedOwner).
+func (s *Server) revokeOwnedTokens(ctx context.Context, userID string) error {
+	if s.tokens == nil {
+		return nil
+	}
+	tokens, err := s.tokens.ListTokens(ctx)
+	if err != nil {
+		return fmt.Errorf("list tokens: %w", err)
+	}
+	owned := map[string]bool{userID: true}
+	for grew := true; grew; {
+		grew = false
+		for i := range tokens {
+			if owned[tokens[i].Owner] && !owned[tokens[i].ID] {
+				owned[tokens[i].ID], grew = true, true
+			}
+		}
+	}
+	now := time.Now()
+	for i := range tokens {
+		t := &tokens[i]
+		if !owned[t.Owner] || tokenIsSpent(t, now) {
+			continue
+		}
+		if err := s.tokens.RevokeToken(ctx, t.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("revoke token %s: %w", t.ID, err)
+		}
+	}
+	return nil
+}
+
 // tokenIsSpent reports whether a token can no longer authenticate anything -- revoked outright,
 // or past an expiry it carries.
 func tokenIsSpent(t *store.Token, now time.Time) bool {
@@ -220,11 +241,7 @@ func (s *Server) handleTokensDelete(w http.ResponseWriter, r *http.Request) {
 	if s.tokensUnavailable(w) {
 		return
 	}
-	/* A MALFORMED id is a 404, not an outage report. The path parameter went to the store raw, the
-	   UUID parse failed there and came back as a plain error, and this handler mapped every non
-	   ErrNotFound error to 502 "tokens unavailable — failed to read token": a typo told the operator
-	   the token store was down and wrote an ERROR log line for it. Every sibling resource validates
-	   the id first. */
+	// A malformed id names no token: a 404, not a store error.
 	id := chi.URLParam(r, "id")
 	if _, perr := uuid.Parse(id); perr != nil {
 		writeProblem(w, http.StatusNotFound, "not found", "no token with that id")

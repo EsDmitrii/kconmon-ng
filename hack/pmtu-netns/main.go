@@ -1,5 +1,6 @@
 // Command pmtu-netns runs one side of the pmtu real-kernel check: an echo responder or a single
-// probe that prints its verdict as JSON. run.sh wires the two across network namespaces.
+// probe (pmtu, or udp with -mode udp) that prints its result as JSON. run.sh wires the two across
+// network namespaces.
 package main
 
 import (
@@ -17,10 +18,10 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "", "echo | probe")
-	addr := flag.String("addr", "", "peer address (probe mode)")
+	mode := flag.String("mode", "", "echo | probe | udp")
+	addr := flag.String("addr", "", "peer address (probe and udp modes)")
 	port := flag.Int("port", 19090, "echo port")
-	size := flag.Int("size", 0, "probe size, 0 = interface MTU")
+	size := flag.Int("size", 0, "probe size, 0 = the MTU of the route to the peer")
 	flag.Parse()
 
 	switch *mode {
@@ -34,8 +35,13 @@ func main() {
 		res := c.Check(context.Background(), checker.Target{NodeName: "pb", PodIP: *addr})
 		out, _ := json.Marshal(map[string]any{"success": res.Success, "error": res.Error, "details": res.Details})
 		fmt.Println(string(out))
+	case "udp":
+		c := checker.NewUDPChecker(300*time.Millisecond, 5, *port)
+		res := c.Check(context.Background(), checker.Target{NodeName: "pb", PodIP: *addr, UDPPort: *port})
+		out, _ := json.Marshal(map[string]any{"success": res.Success, "error": res.Error})
+		fmt.Println(string(out))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: pmtu-netns -mode echo|probe [-addr IP] [-port N] [-size N]")
+		fmt.Fprintln(os.Stderr, "usage: pmtu-netns -mode echo|probe|udp [-addr IP] [-port N] [-size N]")
 		os.Exit(2)
 	}
 }

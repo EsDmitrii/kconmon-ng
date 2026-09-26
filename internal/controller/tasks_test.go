@@ -43,7 +43,7 @@ func TestTaskManagerDispatchReportRoundtrip(t *testing.T) {
 	}
 
 	// Agent reports the result back keyed by the same task ID.
-	tm.Report(&pb.TaskResult{TaskId: dispatched.GetTaskId(), Success: true, DetailsJson: []byte(`{"ok":true}`)})
+	tm.Report(&pb.TaskResult{TaskId: dispatched.GetTaskId(), AgentId: "agent-1", Success: true, DetailsJson: []byte(`{"ok":true}`)})
 
 	select {
 	case res := <-resultCh:
@@ -85,7 +85,7 @@ func TestTaskManagerDispatchKeepsCallerTaskID(t *testing.T) {
 	}
 
 	// The result is still correlated under the caller's ID.
-	tm.Report(&pb.TaskResult{TaskId: "caller-supplied-id", Success: true})
+	tm.Report(&pb.TaskResult{TaskId: "caller-supplied-id", AgentId: "agent-1", Success: true})
 }
 
 func TestTaskManagerDispatchTimeout(t *testing.T) {
@@ -172,7 +172,7 @@ func TestTaskManagerSecondSubscriberCannotDisplaceTheFirst(t *testing.T) {
 	go func() {
 		select {
 		case req := <-victim:
-			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), Success: true})
+			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), AgentId: "agent-1", Success: true})
 		case <-time.After(2 * time.Second):
 		}
 	}()
@@ -203,7 +203,7 @@ func TestTaskManagerSecondSubscriberCannotDisplaceTheFirst(t *testing.T) {
 	go func() {
 		select {
 		case req := <-victim:
-			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), Success: true})
+			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), AgentId: "agent-1", Success: true})
 		case <-time.After(2 * time.Second):
 		}
 	}()
@@ -271,5 +271,45 @@ func TestTaskManagerDispatchRacesCleanup(t *testing.T) {
 	}
 	if n := tm.PendingCount(); n != 0 {
 		t.Errorf("expected 0 pending tasks after races, got %d", n)
+	}
+}
+
+// A task id leaks to anyone who sees the dispatch (events, logs), so a result is accepted only
+// from the agent the task was dispatched to; any other reporter must not complete the dispatch.
+func TestTaskManagerReportFromAnotherAgentIsDropped(t *testing.T) {
+	tm := NewTaskManager()
+
+	sub, unsub := tm.Subscribe("agent-1")
+	defer unsub()
+
+	resultCh := make(chan *pb.TaskResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		res, err := tm.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "icmp"})
+		if err != nil {
+			t.Errorf("Dispatch: %v", err)
+		}
+		resultCh <- res
+	}()
+
+	var req *pb.TaskRequest
+	select {
+	case req = <-sub:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not receive dispatched task")
+	}
+
+	tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), AgentId: "ext-1-x", Success: true, DetailsJson: []byte(`{"forged":true}`)})
+	tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), Success: true, DetailsJson: []byte(`{"forged":true}`)})
+	tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), AgentId: "agent-1", Success: true, DetailsJson: []byte(`{"real":true}`)})
+
+	select {
+	case res := <-resultCh:
+		if got := string(res.GetDetailsJson()); got != `{"real":true}` {
+			t.Fatalf("Dispatch returned %s, want the dispatched agent's own result", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dispatch did not return")
 	}
 }

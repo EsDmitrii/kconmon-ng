@@ -13,28 +13,17 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-/*
-The socket carries the same bytes the REST routes do, so it has to ask the same questions.
-
-It used to ask one: whoever held events:read got a nil authorizer, i.e. the whole static topic
-allowlist -- including the topology and matrix snapshots, which push/topology.go and push/matrix.go
-marshal from the very calls GET /api/v1/topology and GET /api/v1/matrix make. A custom role holding
-events:read but not topology:read read the fleet's inventory over the socket after the REST route had
-answered 403, and the read left no audit row. Symmetrically, a subject holding topology:read but not
-events:read was refused a topic it was entitled to.
-*/
-
 // wsTopicPermission maps one subscribable topic to the permission it requires, mirroring routeTable's
-// split for the REST routes that serve the same bytes. A run:{id} topic answers "": it is covered by
-// the /ws upgrade gate itself (events:read OR runs:read) and by nothing narrower.
+// split for the REST routes that serve the same bytes: the socket must answer the questions they do. A run:{id} topic asks runs:read, as GET
+// /api/v1/runs/{id} does; events:read alone opens the socket but not a run's progress.
 //
-// The matrix arm matches the PREFIX rather than today's three MatrixTopic values, so adding a
+// The matrix arm matches the PREFIX rather than today's MatrixTopic values, so adding a
 // protocol to the allowlist cannot silently fall through to events:read. The hub checks that static
 // allowlist before it calls this, so the default arm only ever sees the live feed.
 func wsTopicPermission(topic string) authz.Permission {
 	switch {
 	case ws.IsRunTopic(topic):
-		return ""
+		return authz.PermRunsRead
 	case topic == ws.TopicTopology:
 		return authz.PermTopologyRead
 	case strings.HasPrefix(topic, "matrix:"):
@@ -49,13 +38,10 @@ func wsTopicPermission(topic string) authz.Permission {
 func (s *Server) wsTopicAuthorizer(current *atomic.Pointer[authz.Subject]) ws.TopicAuthorizer {
 	return func(topic string) error {
 		perm := wsTopicPermission(topic)
-		/* The CURRENT subject, not the upgrade-time snapshot.
-		   This closure used to capture the subject by value, so a narrowed role binding left the gate
-		   answering from the roles the user held when the tab was opened: a fresh `subscribe topology`
-		   on that same socket was still admitted after GET /api/v1/topology had started answering 403.
-		   The revalidator publishes here on every ping tick. */
+		// The current subject, which the revalidator refreshes on every ping tick, so a narrowed binding
+		// narrows the gate too.
 		subject := current.Load()
-		if perm == "" || (subject != nil && s.policy.Can(*subject, perm)) {
+		if subject != nil && s.policy.Can(*subject, perm) {
 			return nil
 		}
 		// Delivered verbatim to the client as the error frame's detail (ws.TopicAuthorizer's contract).

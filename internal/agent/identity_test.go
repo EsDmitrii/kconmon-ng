@@ -124,8 +124,8 @@ func TestResolveIdentityHostNetworkEnvSetsLabel(t *testing.T) {
 // Precedence for the advertise address: explicit config, then the Downward API
 // pod IP, then outbound-interface autodetect — and every failure names a fix.
 func TestResolveAdvertiseAddressPrecedence(t *testing.T) {
-	// A loopback listener gives autodetect a real, routable destination; UDP
-	// dial sends nothing, so nothing needs to answer.
+	// A loopback listener gives autodetect a real destination; UDP dial sends
+	// nothing, so nothing needs to answer.
 	var lc net.ListenConfig
 	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
@@ -154,9 +154,20 @@ func TestResolveAdvertiseAddressPrecedence(t *testing.T) {
 			want:     "10.42.0.17",
 		},
 		{
-			name:           "autodetect from the route to the controller",
+			// Peers would dial 127.0.0.1 and reach their own agent: a false-healthy pair.
+			name:           "autodetect over a loopback route is refused",
 			controllerAddr: loopbackController,
-			want:           "127.0.0.1",
+			wantErr:        "advertiseAddress",
+		},
+		{
+			name:     "loopback pod IP env is refused",
+			podIPEnv: "127.0.0.1",
+			wantErr:  "KCONMON_NG_POD_IP",
+		},
+		{
+			name:     "unspecified pod IP env is refused",
+			podIPEnv: "::",
+			wantErr:  "KCONMON_NG_POD_IP",
 		},
 		{
 			name:    "nothing available is a clear error",
@@ -204,6 +215,35 @@ func TestResolveAdvertiseAddressPrecedence(t *testing.T) {
 	}
 }
 
+// routedControllerAddress is a controller address whose route leaves through a real interface: UDP
+// autodetect only asks the kernel for the source address, so nothing has to listen there.
+func routedControllerAddress(t *testing.T) string {
+	t.Helper()
+	const addr = "192.0.2.1:9443" // TEST-NET-1
+	var d net.Dialer
+	conn, err := d.DialContext(context.Background(), "udp", addr)
+	if err != nil {
+		t.Skipf("no route off this host to autodetect from: %v", err)
+	}
+	_ = conn.Close()
+	return addr
+}
+
+func TestAutodetectAdvertisesTheRouteSourceAddress(t *testing.T) {
+	clearPodEnv(t)
+	cfg := config.DefaultConfig()
+	cfg.ControllerAddress = routedControllerAddress(t)
+
+	got, err := resolveAdvertiseAddress(cfg)
+	if err != nil {
+		t.Fatalf("resolveAdvertiseAddress: %v", err)
+	}
+	ip := net.ParseIP(got)
+	if ip == nil || config.UnreachableAdvertiseAddress(ip) != "" {
+		t.Fatalf("autodetect advertised %q, want an address peers can reach", got)
+	}
+}
+
 /*
 M6-1's contract: the server side needs NO changes for external agents. A registration built from
 hostname identity, an autodetected address and an explicit zone must pass the UNMODIFIED controller
@@ -228,9 +268,11 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 	t.Cleanup(gs.Stop)
 
 	// A bare host: no Downward API env at all, only a controller address and a zone.
+	// The address is autodetected over a real route, since a loopback one is refused; the client
+	// then dials the loopback listener.
 	clearPodEnv(t)
 	cfg := config.DefaultConfig()
-	cfg.ControllerAddress = lis.Addr().String()
+	cfg.ControllerAddress = routedControllerAddress(t)
 	cfg.Agent.Zone = "dc-east"
 
 	info, err := resolveIdentity(cfg)
@@ -238,8 +280,11 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 		t.Fatalf("resolveIdentity on a bare host: %v", err)
 	}
 	advertiseListenerPorts(&info, cfg)
+	if info.Labels[model.LabelExternal] != "true" {
+		t.Errorf("a bare-host identity must claim the external marker, labels: %v", info.Labels)
+	}
 
-	client, err := NewGRPCClient(cfg.ControllerAddress, ClientSecurity{})
+	client, err := NewGRPCClient(lis.Addr().String(), ClientSecurity{})
 	if err != nil {
 		t.Fatalf("NewGRPCClient: %v", err)
 	}
@@ -261,9 +306,8 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 	if net.ParseIP(got.PodIP) == nil {
 		t.Errorf("registered address %q is not an IP literal", got.PodIP)
 	}
-	if got.Labels[model.LabelExternal] != "true" {
-		t.Errorf("the external marker did not survive the register path, labels: %v", got.Labels)
-	}
+	// The registry's external marker is the listener's call (the gateway sets it), not the agent's
+	// claim, so it is not asserted over this in-cluster listener.
 	if got.Zone != "dc-east" {
 		t.Errorf("registered zone = %q, want dc-east", got.Zone)
 	}

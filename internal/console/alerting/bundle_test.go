@@ -86,7 +86,7 @@ const bundleGolden = `{
         "rules": [
           {
             "alert": "AgentsMissing",
-            "expr": "kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents",
+            "expr": "(kconmon_ng_controller_expected_agents - (kconmon_ng_controller_registered_agents - (kconmon_ng_controller_external_agents or kconmon_ng_controller_registered_agents * 0)) > 0) and (kconmon_ng_controller_leader == 1)",
             "labels": {
               "kconmon_ng_rule_id": "d4e5f6a7-0000-4000-8000-000000000004",
               "severity": "info"
@@ -144,7 +144,7 @@ func TestRenderBundleGoldenExpressions(t *testing.T) {
 	rules, _ := groups[0].(map[string]any)["rules"].([]any)
 
 	want := []string{
-		`kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents`,
+		`(kconmon_ng_controller_expected_agents - (kconmon_ng_controller_registered_agents - (kconmon_ng_controller_external_agents or kconmon_ng_controller_registered_agents * 0)) > 0) and (kconmon_ng_controller_leader == 1)`,
 		`kconmon_ng_udp_packet_loss_ratio * 100 > 50`,
 		`histogram_quantile(0.95, sum by (le, source_zone, destination_zone) ` +
 			`(rate(kconmon_ng_udp_rtt_seconds_bucket[5m]))) * 1000 > 25`,

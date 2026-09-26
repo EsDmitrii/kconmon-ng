@@ -25,7 +25,7 @@ const (
 	exitCheck = 2 // check ran but result.success == false
 )
 
-// checkFailedError signals that a diagnostic completed but reported failure, so
+// errCheckFailed signals that a diagnostic completed but reported failure, so
 // Execute can map it to exit code 2 for scripting.
 var errCheckFailed = errors.New("check reported failure")
 
@@ -52,16 +52,25 @@ func Execute() int {
 
 	root := newRootCmd()
 	err := root.ExecuteContext(ctx)
-	if err == nil {
+	code := exitCode(err)
+	if code == exitError {
+		// Cobra already prints usage/flag errors; surface everything else as a
+		// single clean line on stderr without Go stack noise.
+		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+	}
+	return code
+}
+
+// exitCode maps a command's error to the process exit code.
+func exitCode(err error) int {
+	switch {
+	case err == nil:
 		return exitOK
-	}
-	if errors.Is(err, errCheckFailed) {
+	case errors.Is(err, errCheckFailed):
 		return exitCheck
+	default:
+		return exitError
 	}
-	// Cobra already prints usage/flag errors; surface everything else as a
-	// single clean line on stderr without Go stack noise.
-	fmt.Fprintln(os.Stderr, "error: "+err.Error())
-	return exitError
 }
 
 func newRootCmd() *cobra.Command {
@@ -81,17 +90,19 @@ func newRootCmd() *cobra.Command {
 topology and run one-shot connectivity checks between any two nodes, without
 opening Grafana.
 
-The plugin locates the kconmon-ng controller Service in your cluster
-(label app.kubernetes.io/name=kconmon-ng; every namespace is searched unless
--n is given), opens a temporary port-forward to it with your kubeconfig
-credentials, and drives the controller's diagnostics API. The controller
-dispatches each check to the agent running on the source node and streams the
-result back. Nothing is installed or changed in the cluster.
+The plugin finds the running kconmon-ng controller pods (labels
+app.kubernetes.io/name=kconmon-ng, app.kubernetes.io/component=controller;
+every namespace is searched unless -n is given), starts with the Lease holder,
+and port-forwards to its http port with your kubeconfig credentials. A
+standby's answer moves it to the next replica. The controller dispatches each
+check to the agent running on the source node and returns the result. Nothing
+is installed or changed in the cluster.
 
 Check types:
   tcp    TCP connect to the destination agent, connect time + total RTT
   udp    UDP packet burst, RTT / jitter / packet loss
   icmp   ICMP echo, RTT + loss
+  pmtu   DF-marked UDP datagrams, path MTU verdict (ok|reduced|blackhole)
   dns    resolve the configured hostnames from the source node (DST ignored)
   http   probe the configured HTTP targets from the source node (DST ignored)
   mtr    per-hop trace to the destination, hop-by-hop RTT and loss
@@ -147,13 +158,25 @@ func (o *globalOptions) validateOutput() error {
 	}
 }
 
-// withClient opens a connection, invokes fn with a Client, and always closes
-// the connection afterward.
+// withClient opens a connection, invokes fn with a Client, and always closes the connection
+// afterward. A standby's answer moves fn to the next controller pod the connection offers: without
+// leases RBAC the pod picked first can be the standby.
 func withClient(ctx context.Context, opts *globalOptions, fn func(context.Context, *Client) error) error {
 	conn, err := connectorFactory(opts).Connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	return fn(ctx, NewClient(conn.BaseURL))
+	for {
+		err = fn(ctx, NewClient(conn.BaseURL))
+		if !isStandbyAnswer(err) || conn.Next == nil {
+			conn.Close()
+			return err
+		}
+		next, nerr := conn.Next(ctx)
+		conn.Close()
+		if nerr != nil {
+			return fmt.Errorf("%w; the next controller pod could not be reached: %w", err, nerr)
+		}
+		conn = next
+	}
 }

@@ -116,15 +116,11 @@ func TestComputeTreatsNaNAndInfAsNoData(t *testing.T) {
 	}
 }
 
-func sampleSrc(src, value string) string {
-	return `{"metric":{"source_node":"` + src + `"},"value":[1767225600,"` + value + `"]}`
-}
-
 func TestComputePMTU(t *testing.T) {
 	q := &fakeQuerier{byContains: map[string]string{
-		"pmtu_results_total":     vec(sample("a", "b", "1"), sample("b", "a", "0"), sample("a", "c", "0")),
-		"_pmtu_bytes)":           vec(sample("a", "b", "1400"), sample("b", "a", "1500"), sample("a", "c", "1450")),
-		"agent_pmtu_probe_bytes": vec(sampleSrc("a", "1500"), sampleSrc("b", "1500")),
+		"pmtu_results_total": vec(sample("a", "b", "1"), sample("b", "a", "0"), sample("a", "c", "0")),
+		"_pmtu_bytes)":       vec(sample("a", "b", "1400"), sample("b", "a", "1500"), sample("a", "c", "1450")),
+		"pmtu_probe_bytes":   vec(sample("a", "b", "1500"), sample("b", "a", "1500"), sample("a", "c", "1500")),
 	}}
 	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "pmtu")
 	if err != nil {
@@ -148,5 +144,101 @@ func TestComputePMTU(t *testing.T) {
 	}
 	if ab.RTTP95 != nil || ab.LossRatio != nil {
 		t.Errorf("pmtu carries no rtt or loss: %+v", ab)
+	}
+}
+
+// The pmtu_bytes gauge keeps its last value while a pair's probes are all unreachable (those write no
+// result), so a gauge without a verdict in the window is stale and must read as no data.
+func TestComputePMTUWithoutAVerdictHasNoCell(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{
+		"pmtu_results_total": vec(sample("a", "b", "NaN"), sample("b", "a", "0")),
+		"_pmtu_bytes)":       vec(sample("a", "b", "1500"), sample("b", "a", "1500"), sample("a", "c", "1400")),
+		"pmtu_probe_bytes":   vec(sample("a", "b", "1500"), sample("b", "a", "9000"), sample("a", "c", "1500")),
+	}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "pmtu")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	cells := map[string]matrix.Cell{}
+	for _, c := range m.Cells {
+		cells[c.Source+"->"+c.Destination] = c
+	}
+	for _, k := range []string{"a->b", "a->c"} {
+		if c, ok := cells[k]; ok {
+			t.Errorf("%s has no pmtu verdict in the window and must have no cell, got failRatio=%v mtu=%v",
+				k, c.FailRatio, c.MTUBytes)
+		}
+	}
+	if ba, ok := cells["b->a"]; !ok || ba.MTUBytes == nil || *ba.MTUBytes != 1500 {
+		t.Errorf("b->a has a verdict and must keep its MTU, got %+v", ba)
+	}
+}
+
+// The probe size comes from the route to each peer: a 1420-byte VPN route and a 1500-byte LAN route
+// from the same agent. Each pair is compared with its own probe size, never the agent's max.
+func TestComputePMTUComparesEachPairWithItsOwnProbeSize(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{
+		"pmtu_results_total": vec(sample("a", "vpn", "0"), sample("a", "lan", "0")),
+		"_pmtu_bytes)":       vec(sample("a", "vpn", "1420"), sample("a", "lan", "1400")),
+		"pmtu_probe_bytes":   vec(sample("a", "vpn", "1420"), sample("a", "lan", "1500")),
+	}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "pmtu")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	cells := map[string]matrix.Cell{}
+	for _, c := range m.Cells {
+		cells[c.Destination] = c
+	}
+	if c := cells["vpn"]; c.ProbeMTUBytes == nil || *c.ProbeMTUBytes != 1420 {
+		t.Errorf("a->vpn probeMtuBytes = %v, want its own 1420: the healthy VPN path is not reduced", c.ProbeMTUBytes)
+	}
+	if c := cells["lan"]; c.ProbeMTUBytes == nil || *c.ProbeMTUBytes != 1500 {
+		t.Errorf("a->lan probeMtuBytes = %v, want 1500: 1400 on it is a real reduction", c.ProbeMTUBytes)
+	}
+}
+
+// The 5m fail ratio cannot tell a recovered pair from an ECMP-split black hole whose last probe
+// crossed; the recent window can. It rides on pmtu cells only and never makes a cell of its own.
+func TestComputePMTURecentFailRatio(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{
+		"[5m]":             vec(sample("a", "b", "0.4"), sample("a", "c", "0.4"), sample("a", "d", "0.2")),
+		"[3m]":             vec(sample("a", "b", "0"), sample("a", "c", "0.5"), sample("a", "d", "NaN"), sample("x", "y", "0")),
+		"_pmtu_bytes)":     vec(sample("a", "b", "1500"), sample("a", "c", "1500"), sample("a", "d", "1500")),
+		"pmtu_probe_bytes": vec(sample("a", "b", "1500"), sample("a", "c", "1500"), sample("a", "d", "1500")),
+	}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "pmtu")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	cells := map[string]matrix.Cell{}
+	for _, c := range m.Cells {
+		cells[c.Source+"->"+c.Destination] = c
+	}
+	if c := cells["a->b"]; c.RecentFailRatio == nil || *c.RecentFailRatio != 0 {
+		t.Errorf("a->b recentFailRatio = %v, want 0: failures in the window, clean since", c.RecentFailRatio)
+	}
+	if c := cells["a->c"]; c.RecentFailRatio == nil || *c.RecentFailRatio != 0.5 {
+		t.Errorf("a->c recentFailRatio = %v, want 0.5", c.RecentFailRatio)
+	}
+	if c := cells["a->d"]; c.RecentFailRatio != nil {
+		t.Errorf("a->d recentFailRatio = %v, want none: no probe in the recent window", *c.RecentFailRatio)
+	}
+	if _, ok := cells["x->y"]; ok {
+		t.Error("a recent-window sample alone must not make a cell")
+	}
+	if len(m.Nodes) != 4 {
+		t.Errorf("nodes = %v, want a, b, c, d", m.Nodes)
+	}
+}
+
+func TestComputeTCPHasNoRecentFailRatio(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{"results_total": vec(sample("a", "b", "0.25"))}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "tcp")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if len(m.Cells) != 1 || m.Cells[0].RecentFailRatio != nil {
+		t.Errorf("tcp cells = %+v, want no recentFailRatio", m.Cells)
 	}
 }

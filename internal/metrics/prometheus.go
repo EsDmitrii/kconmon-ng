@@ -1,6 +1,7 @@
 package metrics //nolint:revive // intentional: "metrics" is clearer than alternatives for this package
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,12 +39,16 @@ type PrometheusMetrics struct {
 	// full-size one did. fail is a black hole; a reduced path counts as success.
 	PMTUBytes   *prometheus.GaugeVec
 	PMTUResults *prometheus.CounterVec
+	// PMTUProbeBytes is the size the source probed the pair at, from its route to that peer. Write it
+	// with SetPMTUProbe, which also keeps AgentPMTUProbeBytes at the max over the pairs.
+	PMTUProbeBytes *prometheus.GaugeVec
+	pmtuProbeMu    sync.Mutex
+	pmtuProbe      map[[4]string]float64
 
 	/* ProbeIntended is the topology PLAN, scrapable: 1 for every directed pair this agent is
 	   assigned to probe. Under a sparse mesh "no results for a pair" is either a failure or the
-	   plan, and only this family tells them apart — PairWentSilent joins on it, which is why it
-	   ships in the same release as sparse mode. Only the two node names: the join needs exactly
-	   the labels the results families group by. */
+	   plan, and only this family tells them apart; PairWentSilent joins on it. Only the two node
+	   names: the join needs exactly the labels the results families group by. */
 	ProbeIntended *prometheus.GaugeVec
 
 	/* The zone family is the SECOND write of every peer probe, aggregated at the source into
@@ -86,12 +91,11 @@ type PrometheusMetrics struct {
 	ExternalResults        *prometheus.CounterVec
 	ExternalHTTPStatusCode *prometheus.GaugeVec
 	ExternalDenied         *prometheus.CounterVec
-	/* ExternalSpecsRejected counts assignment entries THIS agent could not parse.
-	   A definition the Console accepts and schedules but every agent refuses (checkType=http against
-	   a target of kind host, checkType=dns with no params.query) was dropped with nothing but an
-	   agent-local WARN: no metric, no feedback to the controller, and the Console went on showing the
-	   check as enabled and healthy. It is re-dropped on every assignment push, forever, so the
-	   counter climbs for as long as the definition sits there broken. */
+	/* ExternalSpecsRejected counts assignment entries THIS agent could not parse: a definition the
+	   Console schedules but every agent refuses (checkType=http against a host target, dns without
+	   params.query) otherwise shows only as an agent-local WARN while the Console calls it healthy.
+	   It is re-dropped on every assignment push, so the counter climbs while the definition stays
+	   broken. */
 	ExternalSpecsRejected *prometheus.CounterVec
 
 	MTRHops      *prometheus.GaugeVec
@@ -111,8 +115,8 @@ type PrometheusMetrics struct {
 	// by reason: "cooldown" (a trace for that destination already ran or runs
 	// inside the cooldown window) or "saturated" (all reactive-trace slots busy).
 	AgentMTRReactiveCoalesced *prometheus.CounterVec
-	// AgentPMTUProbeBytes is the size this agent probes at, keyed by source_node so a PromQL join
-	// tells a reduced path (pmtu_bytes below it) from a healthy one.
+	// AgentPMTUProbeBytes is the largest size this agent probes any peer at: the one probe-size series
+	// agent.metrics.detail=zone-only keeps. A reduced path is told per pair, against PMTUProbeBytes.
 	AgentPMTUProbeBytes *prometheus.GaugeVec
 
 	ControllerRegisteredAgents *prometheus.GaugeVec
@@ -131,13 +135,15 @@ type PrometheusMetrics struct {
 	ControllerExternalAssignments *prometheus.GaugeVec
 }
 
+// peerLabels is the label order of every per-pair family, and of a pmtuProbe key.
+var peerLabels = []string{"source_node", "destination_node", "source_zone", "destination_zone"}
+
 func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusMetrics {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer
 	}
 	factory := promauto.With(reg)
 
-	peerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone"}
 	resultPeerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone", "result"}
 
 	/* An agent without a zone carries source_zone="" on its per-pair series, and the zone family
@@ -150,11 +156,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 	   check_type is the probe's own type; none carries an address, and both derived labels come from
 	   the check rather than off the wire.
 
-	   check_type is here because target_kind alone could not separate two checks on one target:
-	   everything that is not http collapses to "host", so an icmp, a tcp and a dns check on the same
-	   target wrote ONE series between them. Their successes and failures were averaged together, and
-	   the ExternalChecksFailing rule -- which sums by exactly these labels -- stayed silent while one
-	   of the three was failing 100%, because the other two diluted it below the threshold. */
+	   check_type separates checks that share a target: every check but http has target_kind host, so
+	   without it an icmp, a tcp and a dns check on one target would write one series, and
+	   ExternalChecksFailing, which sums by exactly these labels, would dilute a failing check with
+	   healthy ones. */
 	externalLabels := []string{"source_node", "source_zone", "target", "target_kind", "check_type"}
 	resultExternalLabels := []string{"source_node", "source_zone", "target", "target_kind", "check_type", "result"}
 	deniedExternalLabels := []string{"source_node", "source_zone", "target", "target_kind", "check_type", "reason"}
@@ -222,6 +227,11 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_pmtu_results_total",
 			Help: "Total path MTU probe results; fail means full-size datagrams are lost with no ICMP frag-needed (a black hole)",
 		}, resultPeerLabels),
+		PMTUProbeBytes: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_pmtu_probe_bytes",
+			Help: "IP datagram size in bytes the source probes the pair's path MTU at: the MTU of its route to the peer (the route's mtu, never above the egress device's) or checkers.pmtu.size",
+		}, peerLabels),
+		pmtuProbe: map[[4]string]float64{},
 
 		ProbeIntended: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_probe_intended",
@@ -394,7 +404,7 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 		}, []string{"reason"}),
 		AgentPMTUProbeBytes: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_agent_pmtu_probe_bytes",
-			Help: "IP datagram size in bytes this agent probes the path MTU at: its interface MTU or checkers.pmtu.size",
+			Help: "Largest IP datagram size in bytes this agent probes the path MTU at, the max over its peers; compare pmtu_bytes with the per-pair pmtu_probe_bytes instead",
 		}, []string{"source_node"}),
 
 		ControllerRegisteredAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
@@ -483,7 +493,7 @@ PeerResultCounter returns the *_results_total counter for a check type whose ser
 PAIR of nodes, and nil for one whose series are not.
 
 The caller pre-creates both result="success" and result="fail" for every peer, and it can only do
-that for the check types that carry destination_node at all: tcp, udp and icmp. DNS keys on
+that for the check types that carry destination_node at all: tcp, udp, icmp and pmtu. DNS keys on
 host/resolver and HTTP on url — a pair pre-init means nothing there, and MTR is not in the checker
 map to begin with.
 */
@@ -534,83 +544,179 @@ func (m *PrometheusMetrics) ZonePacketCounters(checkType string) (sent, received
 }
 
 /*
-ForgetPeer drops the gauge series for ONE departed destination; a counter is cumulative and is never
-dropped here.
-
-This used to be a single ResetPeerGauges() that called Reset() on every one of these vectors,
-wholesale, from the peer-update callback. Two things were wrong with that, and both showed up as
-holes in exactly the series alerts fire on:
-
-  - It wiped peers that had not gone anywhere. Nothing repopulates a gauge except the next probe of
-    that pair (syncPeerMetrics pre-creates counters, not gauges), so every peer update blanked the
-    fleet's loss and jitter readings for up to a full check interval. A peer update fires per pod
-    add and per pod delete — a rolling DaemonSet restart is one per node, back to back.
-  - It wiped the EXTERNAL gauges too, which are keyed by (source_node, source_zone, target,
-    target_kind) and have no destination_node at all. An external target's packet loss vanished
-    because some unrelated agent pod restarted.
-
-DeletePartialMatch takes the label the departure is actually about and leaves every other series
-standing.
+ForgetPeer drops the gauge series of ONE departed destination; its counters and histograms wait for
+RetirePeer. Every other pair keeps its gauges, since nothing but the next probe of a pair writes one
+again, and so do the external gauges, which carry no destination_node.
 
 The zone family is deliberately absent here: zones outlive peers, and its cumulative counters feed
-the rate() expressions zone alerts evaluate — deleting them on peer churn would reset those series
+the rate() expressions zone alerts evaluate, so deleting them on peer churn would reset those series
 once per pod event.
 */
 func (m *PrometheusMetrics) ForgetPeer(destinationNode string) {
 	labels := prometheus.Labels{"destination_node": destinationNode}
-	m.UDPLossRatio.DeletePartialMatch(labels)
-	m.UDPJitter.DeletePartialMatch(labels)
-	m.ICMPLossRatio.DeletePartialMatch(labels)
-	m.PMTUBytes.DeletePartialMatch(labels)
-	m.MTRHops.DeletePartialMatch(labels)
+	m.forgetPairGauges(labels)
 	m.MTRHopRTT.DeletePartialMatch(labels)
 	// The plan gauge goes with the peer: a departed destination is by definition no longer
 	// assigned, and a stale 1 here keeps PairWentSilent armed for a pair nothing probes.
 	m.ProbeIntended.DeletePartialMatch(labels)
 }
 
-// ForgetExternalTarget drops the gauge series for one target that left the controller's assignment.
-// Nothing did this before: the external gauges were only ever cleared as collateral damage from a
-// peer update, so a target removed from the assignment kept reporting its last reading forever if
-// the peer list happened to stay still.
-func (m *PrometheusMetrics) ForgetExternalTarget(target string) {
+// ForgetPlane drops the gauges of a probe plane a config reload switched off. Nothing writes them
+// again, so a last loss ratio or path MTU would keep serving, and alerting, as a current reading.
+// Counters and histograms stay: they only stop growing.
+func (m *PrometheusMetrics) ForgetPlane(checkType string) {
+	switch checkType {
+	case "udp":
+		m.UDPLossRatio.Reset()
+		m.UDPJitter.Reset()
+	case "icmp":
+		m.ICMPLossRatio.Reset()
+	case "pmtu":
+		m.PMTUBytes.Reset()
+		m.pmtuProbeMu.Lock()
+		m.PMTUProbeBytes.Reset()
+		m.AgentPMTUProbeBytes.Reset()
+		clear(m.pmtuProbe)
+		m.pmtuProbeMu.Unlock()
+	}
+}
+
+// RetireExternalTarget drops every series of a target that left the assignment: gauges, counters and
+// histograms alike.
+func (m *PrometheusMetrics) RetireExternalTarget(target string) {
 	labels := prometheus.Labels{"target": target}
 	m.ExternalPacketLoss.DeletePartialMatch(labels)
 	m.ExternalHTTPStatusCode.DeletePartialMatch(labels)
+	m.ExternalDuration.DeletePartialMatch(labels)
+	m.ExternalRtt.DeletePartialMatch(labels)
+	m.ExternalResults.DeletePartialMatch(labels)
+	m.ExternalDenied.DeletePartialMatch(labels)
 }
 
-/*
-ForgetExternalCheck retires ONE check's gauges: the (target, target_kind, check_type) triple, not the
-name alone.
-
-A target NAME can carry more than one check — retireDepartedExternalTargets' own comment says so: a
-host probe and a URL probe share the `target` label and differ in `target_kind`. So deleting by name
-is right when the target leaves the assignment entirely (every check on it goes), and wrong when a
-single probe is DENIED: the allowlist refusing the icmp check took the healthy http check's
-packet-loss and status-code series with it, and those came back only on that check's next successful
-probe. A denial is a fact about one check.
-*/
+// ForgetExternalCheck retires ONE check's gauges, keyed by (target, target_kind, check_type): a target
+// name can carry several checks, and a denial is a fact about one of them. Deleting by name would drop
+// a healthy sibling's packet-loss and status-code series until its next probe.
 func (m *PrometheusMetrics) ForgetExternalCheck(target, targetKind, checkType string) {
 	labels := prometheus.Labels{"target": target, "target_kind": targetKind, "check_type": checkType}
 	m.ExternalPacketLoss.DeletePartialMatch(labels)
 	m.ExternalHTTPStatusCode.DeletePartialMatch(labels)
 }
 
-/*
-ForgetPeerTrace retires the per-hop RTT series of ONE (source, destination) pair.
-
-MTRHopRTT is keyed by (source_node, destination_node, hop_number, hop_ip) and was only ever Set. A
-route change therefore left BOTH paths' series live and current: after a trace through 10.0.0.5 and
-a later one through 10.0.0.9, both hop_ip values sat at hop_number=3 with a fresh reading, and a
-panel grouping by hop_ip drew a path the packets have not taken since. Only ForgetPeer cleared them,
-and that fires when the peer leaves the topology — not when its route changes, which is the event
-the whole feature exists to show.
-
-Called before publishing a trace's hops, so the series that remain are exactly the trace just taken.
-*/
+// ForgetPeerTrace retires the per-hop RTT series of ONE (source, destination) pair. It runs before a
+// trace's hops are published, so the series left are exactly that trace: after a route change the old
+// path's hop_ip series would otherwise stay live next to the new one.
 func (m *PrometheusMetrics) ForgetPeerTrace(sourceNode, destinationNode string) {
 	m.MTRHopRTT.DeletePartialMatch(prometheus.Labels{
 		"source_node":      sourceNode,
 		"destination_node": destinationNode,
 	})
+}
+
+// RetirePeer drops the per-pair counters and histograms of a destination that is gone for good
+// (ForgetPeer drops the gauges). The zone family stays: zones outlive peers.
+func (m *PrometheusMetrics) RetirePeer(destinationNode string) {
+	m.retirePairs(prometheus.Labels{"destination_node": destinationNode})
+}
+
+// RetirePeerZone drops every series a destination has under a zone it no longer has, gauges,
+// counters and histograms alike: the pair goes on under the new zone, and nothing writes the old
+// series again.
+func (m *PrometheusMetrics) RetirePeerZone(destinationNode, destinationZone string) {
+	labels := prometheus.Labels{"destination_node": destinationNode, "destination_zone": destinationZone}
+	m.forgetPairGauges(labels)
+	m.retirePairs(labels)
+}
+
+// RetireSourceZone is RetirePeerZone for the zone this agent just left, and also takes its DNS, HTTP
+// and external series, which carry the source zone too.
+func (m *PrometheusMetrics) RetireSourceZone(sourceNode, sourceZone string) {
+	labels := prometheus.Labels{"source_node": sourceNode, "source_zone": sourceZone}
+	m.forgetPairGauges(labels)
+	m.ExternalPacketLoss.DeletePartialMatch(labels)
+	m.ExternalHTTPStatusCode.DeletePartialMatch(labels)
+	m.retirePairs(labels)
+	for _, c := range []*prometheus.CounterVec{m.DNSResults, m.HTTPResults, m.ExternalResults, m.ExternalDenied} {
+		c.DeletePartialMatch(labels)
+	}
+	for _, h := range []*prometheus.HistogramVec{
+		m.DNSDuration, m.HTTPDNSDuration, m.HTTPConnectDuration, m.HTTPTLSDuration, m.HTTPTTFBDuration,
+		m.HTTPTotalDuration, m.ExternalDuration, m.ExternalRtt,
+	} {
+		h.DeletePartialMatch(labels)
+	}
+}
+
+func (m *PrometheusMetrics) retirePairs(labels prometheus.Labels) {
+	for _, c := range []*prometheus.CounterVec{m.TCPResults, m.UDPResults, m.ICMPResults, m.PMTUResults, m.MTRTriggered} {
+		c.DeletePartialMatch(labels)
+	}
+	for _, h := range []*prometheus.HistogramVec{m.TCPConnectDuration, m.TCPTotalDuration, m.UDPRtt, m.ICMPRtt} {
+		h.DeletePartialMatch(labels)
+	}
+}
+
+// forgetPairGauges drops the per-pair gauges, the ones carrying all four peer labels, that match
+// labels, probe sizes included.
+func (m *PrometheusMetrics) forgetPairGauges(labels prometheus.Labels) {
+	for _, g := range []*prometheus.GaugeVec{m.UDPLossRatio, m.UDPJitter, m.ICMPLossRatio, m.PMTUBytes, m.MTRHops} {
+		g.DeletePartialMatch(labels)
+	}
+	m.forgetPMTUProbe(labels)
+}
+
+// SetPMTUProbe records the size one pair was probed at, labels in PMTUProbeBytes order, and sets the
+// source's AgentPMTUProbeBytes to the max over its pairs.
+func (m *PrometheusMetrics) SetPMTUProbe(labels []string, size float64) {
+	m.pmtuProbeMu.Lock()
+	defer m.pmtuProbeMu.Unlock()
+	m.PMTUProbeBytes.WithLabelValues(labels...).Set(size)
+	m.pmtuProbe[[4]string(labels)] = size
+	m.refreshAgentPMTUProbeLocked(labels[0])
+}
+
+// forgetPMTUProbe drops the per-pair probe sizes matching every label in match and recomputes the
+// per-agent max of each source it touched.
+func (m *PrometheusMetrics) forgetPMTUProbe(match prometheus.Labels) {
+	m.pmtuProbeMu.Lock()
+	defer m.pmtuProbeMu.Unlock()
+	m.PMTUProbeBytes.DeletePartialMatch(match)
+	touched := map[string]struct{}{}
+	for key := range m.pmtuProbe {
+		if pmtuProbeMatches(key, match) {
+			delete(m.pmtuProbe, key)
+			touched[key[0]] = struct{}{}
+		}
+	}
+	for source := range touched {
+		m.refreshAgentPMTUProbeLocked(source)
+	}
+}
+
+// pmtuProbeMatches reports whether key carries every label in match; a label that is not a peer
+// label never matches.
+func pmtuProbeMatches(key [4]string, match prometheus.Labels) bool {
+	matched := 0
+	for i, name := range peerLabels {
+		if value, ok := match[name]; ok {
+			if key[i] != value {
+				return false
+			}
+			matched++
+		}
+	}
+	return matched == len(match)
+}
+
+func (m *PrometheusMetrics) refreshAgentPMTUProbeLocked(source string) {
+	biggest, found := 0.0, false
+	for key, size := range m.pmtuProbe {
+		if key[0] == source && (!found || size > biggest) {
+			biggest, found = size, true
+		}
+	}
+	if found {
+		m.AgentPMTUProbeBytes.WithLabelValues(source).Set(biggest)
+		return
+	}
+	m.AgentPMTUProbeBytes.DeleteLabelValues(source)
 }

@@ -61,6 +61,17 @@ func (s *session) do(method, path string, body any) (int, []byte) {
 	return resp.StatusCode, buf.Bytes()
 }
 
+// holdsSessionCookie reports whether the jar still carries a cookie other than the csrf one.
+func (s *session) holdsSessionCookie() bool {
+	u, _ := url.Parse(s.base)
+	for _, c := range s.c.Jar.Cookies(u) {
+		if c.Name != "csrf" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *session) login(user, pass string) int {
 	code, _ := s.do(http.MethodPost, "/api/v1/auth/login", map[string]string{"username": user, "password": pass})
 	return code
@@ -108,10 +119,28 @@ func TestConsoleLocalUsers(t *testing.T) {
 	if code, body := admin.do(http.MethodPatch, "/api/v1/users/"+created.ID, map[string]bool{"disabled": true}); code != http.StatusOK {
 		t.Fatalf("disable = %d %s", code, body)
 	}
-	if code, _ := op.do(http.MethodGet, "/api/v1/topology", nil); code == http.StatusOK {
-		t.Fatal("a disabled user's session still reads the API")
+	if code, _ := op.do(http.MethodGet, "/api/v1/topology", nil); code != http.StatusUnauthorized {
+		t.Fatalf("a disabled user's session reads the API with %d, want 401", code)
 	}
-	if code := newSession(t).login("e2e-operator", "operator password 2"); code == http.StatusNoContent {
-		t.Fatal("a disabled user can still log in")
+	if code := newSession(t).login("e2e-operator", "operator password 2"); code != http.StatusUnauthorized {
+		t.Fatalf("a disabled user's login answered %d, want 401", code)
+	}
+
+	// Re-enabling brings the account back, not the sessions it held before the disable.
+	if !op.holdsSessionCookie() {
+		t.Fatal("the pre-disable session cookie is gone from the jar, so a 401 below would prove nothing")
+	}
+	if code, body := admin.do(http.MethodPatch, "/api/v1/users/"+created.ID, map[string]bool{"disabled": false}); code != http.StatusOK {
+		t.Fatalf("re-enable = %d %s", code, body)
+	}
+	if code, _ := op.do(http.MethodGet, "/api/v1/topology", nil); code != http.StatusUnauthorized {
+		t.Fatalf("a session opened before the disable reads the API with %d after the re-enable, want 401", code)
+	}
+	fresh := newSession(t)
+	if code := fresh.login("e2e-operator", "operator password 2"); code != http.StatusNoContent {
+		t.Fatalf("login after the re-enable = %d, want 204", code)
+	}
+	if code, _ := fresh.do(http.MethodGet, "/api/v1/topology", nil); code != http.StatusOK {
+		t.Fatalf("the session opened after the re-enable reads the API with %d, want 200", code)
 	}
 }

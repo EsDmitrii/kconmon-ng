@@ -72,6 +72,8 @@ type PMTUDetails struct {
 	Verdict  string `json:"verdict"`
 	Steps    int    `json:"steps"`
 	// Truncated means the bisection hit its time budget: PathMTU is a lower bound, not the answer.
+	// With verdict unreachable it means the budget ran out before any size above the 64-byte base
+	// crossed, and PathMTU is 0.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -87,10 +89,8 @@ type HTTPDetails struct {
 	Method       string `json:"method"`
 	StatusCode   int    `json:"statusCode"`
 	BodyMismatch bool   `json:"bodyMismatch,omitempty"`
-	/* StatusMismatch is the target's own expectStatus being violated. The metric handler used to
-	   re-derive the outcome from the status code alone (`>= 400`), so a target expecting 204 that
-	   answered 200 was counted as a success by the very counter an alert on expectStatus reads. The
-	   checker decides; nothing downstream re-decides. */
+	// StatusMismatch is the target's own expectStatus being violated. The checker decides it, and
+	// nothing downstream re-derives the outcome from the status code.
 	StatusMismatch bool          `json:"statusMismatch,omitempty"`
 	DNSTime        time.Duration `json:"dnsTime"`
 	/* Timed says which phases actually RAN. httptrace fires no TLS callback for a plain-http target

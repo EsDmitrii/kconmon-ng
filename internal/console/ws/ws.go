@@ -4,6 +4,8 @@ package ws
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -88,6 +90,10 @@ var allowedTopics = map[string]struct{}{
 	MatrixTopic("icmp"): {},
 	MatrixTopic("pmtu"): {},
 }
+
+// unknownTopicError answers a subscribe to a topic that is neither on allowedTopics nor a run.
+var unknownTopicError = "unknown topic; subscribable topics are " +
+	strings.Join(slices.Sorted(maps.Keys(allowedTopics)), ", ")
 
 // errorPayload is the Data of an Envelope{Type: TypeError}.
 type errorPayload struct {

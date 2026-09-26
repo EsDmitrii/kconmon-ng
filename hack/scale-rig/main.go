@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
 
 func main() {
@@ -25,33 +24,25 @@ func main() {
 }
 
 func run() error {
-	n := flag.Int("n", 100, "fleet size (number of in-process agent clients)")
-	cold := flag.Duration("cold", 10*time.Second, "cold-start window: N registrations spread over this")
-	churnFrac := flag.Float64("churn-frac", 0.10, "fraction of the fleet restarted during the churn phase")
-	churnSpread := flag.Duration("churn", 30*time.Second, "churn window: restarts spread over this")
-	steady := flag.Duration("steady", 60*time.Second, "steady-state heartbeat phase duration")
-	probes := flag.Int("probes", 40, "sequential propagation probes after the scenarios")
-	spacing := flag.Duration("probe-spacing", 300*time.Millisecond, "gap between probes (> the 200ms coalescing window)")
-	hb := flag.Duration("heartbeat", 5*time.Second, "agent heartbeat interval (internal/agent.Run uses 5s)")
+	cfg := defaultRigConfig(100)
+	flag.IntVar(&cfg.N, "n", cfg.N, "fleet size (number of in-process agent clients)")
+	flag.DurationVar(&cfg.ColdSpread, "cold", cfg.ColdSpread, "cold-start window: N registrations spread over this")
+	flag.Float64Var(&cfg.ChurnFraction, "churn-frac", cfg.ChurnFraction, "fraction of the fleet restarted during the churn phase")
+	flag.DurationVar(&cfg.ChurnSpread, "churn", cfg.ChurnSpread, "churn window: restarts spread over this")
+	flag.DurationVar(&cfg.Steady, "steady", cfg.Steady, "steady-state heartbeat phase duration")
+	flag.IntVar(&cfg.Probes, "probes", cfg.Probes, "sequential propagation probes after the scenarios")
+	flag.DurationVar(&cfg.ProbeSpacing, "probe-spacing", cfg.ProbeSpacing, "gap between probes (> the 200ms coalescing window)")
+	flag.DurationVar(&cfg.HeartbeatInterval, "heartbeat", cfg.HeartbeatInterval, "agent heartbeat interval (internal/agent.Run uses 5s)")
 	flag.Parse()
 
-	if *n < 1 {
-		return fmt.Errorf("-n must be >= 1, got %d", *n)
+	if cfg.N < 1 {
+		return fmt.Errorf("-n must be >= 1, got %d", cfg.N)
 	}
 
 	raiseNoFile()
 
 	logs := newLogCounter(os.Stderr)
 	slog.SetDefault(slog.New(logs))
-
-	cfg := defaultRigConfig(*n)
-	cfg.ColdSpread = *cold
-	cfg.ChurnFraction = *churnFrac
-	cfg.ChurnSpread = *churnSpread
-	cfg.Steady = *steady
-	cfg.Probes = *probes
-	cfg.ProbeSpacing = *spacing
-	cfg.HeartbeatInterval = *hb
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

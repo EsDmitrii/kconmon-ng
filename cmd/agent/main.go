@@ -34,16 +34,17 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	if err := loader.WatchForChanges(); err != nil {
-		slog.Warn("config hot-reload not available", "error", err)
-	}
-
 	a, err := agent.New(cfg)
 	if err != nil {
 		slog.Error("failed to create agent", "error", err)
 		cancel()
-		_ = loader.Close()
 		os.Exit(1)
+	}
+
+	// Subscribed before the watch starts, so no reload lands between New and the subscription.
+	loader.OnChange(a.ApplyConfig)
+	if err := loader.WatchForChanges(); err != nil {
+		slog.Warn("config hot-reload not available", "error", err)
 	}
 
 	if err := a.Run(ctx); err != nil {

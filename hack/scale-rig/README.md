@@ -1,4 +1,4 @@
-# scale-rig — control-plane saturation measurements (roadmap M10-4)
+# scale-rig — control-plane saturation measurements
 
 One process, one machine: a **real controller** (`internal/controller`, wired exactly like
 `cmd/controller` — `config.DefaultConfig()` + `controller.New` + `Run`, leader election off,
@@ -15,8 +15,8 @@ not the data plane.
 go run ./hack/scale-rig -n 1000
 ```
 
-One N per process (so peak RSS and heap describe that N alone). Defaults implement the roadmap
-scenarios; every window is a flag (see `-help`). A run takes ~2.5 minutes:
+One N per process (so peak RSS and heap describe that N alone). Every window below is a flag (see
+`-help`); with the defaults a run takes ~2.5 minutes:
 
 1. **cold start** — N agents register over 10s (`-cold`), each starting its watch + heartbeat loops;
 2. **rolling churn** — 10% of the fleet restarts over 30s (`-churn-frac`, `-churn`): graceful
@@ -33,9 +33,12 @@ scenarios; every window is a flag (see `-help`). A run takes ~2.5 minutes:
   registry is unexported; the driver's own count is exact.
 - **broadcasts** — two *observer* streams (raw `WatchPeers` subscribers outside the fleet) count
   post-initial receives; the max of the two is the flush count. The same received messages give the
-  real **FULL_SYNC wire size** (`proto.Size` of the received update = its marshaled size; the narrow
-  `peerToProto` projection: id, nodeName, podIp, zone) and the flush→receive delivery delay (one
-  process, one clock). `coalesce` = changes : broadcasts — the M9 trailing-edge window at work.
+  real **FULL_SYNC wire size** (`proto.Size` of the received update = its marshaled size) and the
+  flush→receive delivery delay (one process, one clock). The size covers the `peerToProto`
+  projection of each peer (id, nodeName, podIp, zone, ports) plus `fleet_echoes`, the echo endpoint
+  of every registered agent (~20 B each over IPv4), so even a sparse plan's FULL_SYNC grows O(N):
+  about 20 KB of echoes at 1000 agents. `coalesce` = changes : broadcasts — the controller's 200ms
+  trailing-edge coalescing window at work.
 - **propagation p95** — probes register one at a time into a stable fleet, so every watcher's peer
   list length crosses a strictly increasing threshold; a watcher proves receipt by an O(1) length
   check in its `OnPeersUpdate` callback (no per-peer scanning that would distort CPU). The clock

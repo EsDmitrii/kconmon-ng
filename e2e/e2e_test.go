@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -17,15 +18,8 @@ func getBaseURL() string {
 	return "http://localhost:8080"
 }
 
-func TestControllerPodsRunning(t *testing.T) {
-	// This test assumes kubectl/kubernetes context is available.
-	// In CI, we verify pods via the helm install wait and smoke test steps.
-	// This is a placeholder for future kubectl-based pod checks.
-	t.Skip("pod status checked via kubectl wait in workflow")
-}
-
-// Every request below goes through console_test.go's mustRequest helper (same package): it carries
-// a context.
+// Every request below goes through console_test.go's request helper, directly or via mustRequest, so
+// it carries a timeout.
 
 func TestHealthz(t *testing.T) {
 	baseURL := getBaseURL()
@@ -45,38 +39,42 @@ func TestReadyz(t *testing.T) {
 
 func TestMetrics(t *testing.T) {
 	baseURL := getBaseURL()
-	status, header, _ := mustRequest(t, http.MethodGet, baseURL+"/metrics", nil)
+	status, _, body := mustRequest(t, http.MethodGet, baseURL+"/metrics", nil)
 	if status != http.StatusOK {
 		t.Errorf("expected /metrics 200, got %d", status)
 	}
-
-	// Basic check for Prometheus format
-	ct := header.Get("Content-Type")
-	if !strings.Contains(ct, "text/plain") && !strings.Contains(ct, "text/html") {
-		t.Logf("metrics content-type: %s (prometheus may use text/plain)", ct)
+	// The controller sets this gauge at startup, so an exposition without it is not the controller's.
+	if !strings.Contains(string(body), "\nkconmon_ng_controller_registered_agents ") {
+		t.Errorf("/metrics lacks kconmon_ng_controller_registered_agents")
 	}
 }
 
 func TestTopology(t *testing.T) {
 	baseURL := getBaseURL()
 
-	// Allow time for agents to register
-	time.Sleep(2 * time.Second)
-
-	status, header, _ := mustRequest(t, http.MethodGet, baseURL+"/api/v1/topology", nil)
-	if status != http.StatusOK {
-		t.Errorf("expected /api/v1/topology 200, got %d", status)
-	}
-
-	ct := header.Get("Content-Type")
-	if !strings.Contains(ct, "application/json") {
-		t.Errorf("expected JSON response, got content-type: %s", ct)
-	}
+	// The kind config has two workers, so at least two agents must register.
+	var agents int
+	pollUntil(t, 60*time.Second, 2*time.Second, "at least two agents in /api/v1/topology", func() bool {
+		status, header, body, err := request(t, http.MethodGet, baseURL+"/api/v1/topology", nil)
+		if err != nil || status != http.StatusOK || !strings.Contains(header.Get("Content-Type"), "application/json") {
+			t.Logf("topology: status %d, content-type %q, err %v (will retry)", status, header.Get("Content-Type"), err)
+			return false
+		}
+		var topo struct {
+			Agents []json.RawMessage `json:"agents"`
+		}
+		if err := json.Unmarshal(body, &topo); err != nil {
+			t.Logf("decode topology failed (will retry): %v", err)
+			return false
+		}
+		agents = len(topo.Agents)
+		return agents >= 2
+	})
+	t.Logf("topology lists %d agents", agents)
 }
 
-// pollUntil polls fn every interval until it returns true or budget elapses; shared by this file
-// and console_test.go for asserting on eventually-consistent state (event history catching up, a
-// run reaching a terminal status) instead of each caller hand-rolling its own retry loop.
+// pollUntil polls fn every interval until it returns true or budget elapses; the package's retry
+// loop for eventually consistent state (event history catching up, a run reaching a terminal status).
 func pollUntil(t *testing.T, budget, interval time.Duration, what string, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(budget)

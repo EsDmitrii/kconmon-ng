@@ -45,8 +45,8 @@ type AlertNotifier interface {
 
 var _ AlertNotifier = (*Dispatcher)(nil)
 
-// RuleSource resolves the two facts /api/v1/alerts cannot carry: the rendered PromQL expression and
-// the console row's own name.
+// RuleSource resolves what /api/v1/alerts cannot carry: the rendered PromQL expression, the console
+// row's own name, and the rule's `for`, which the restart hold needs.
 type RuleSource interface {
 	ListAlertRules(ctx context.Context, enabledOnly bool) ([]store.AlertRule, error)
 }
@@ -101,6 +101,13 @@ type AlertWatcher struct {
 	// suppressed holds the fingerprints whose fired edge a window held back: their resolved edge is
 	// held too, and they are delivered as fired if the window closes while they still fire.
 	suppressed map[string]struct{}
+	// unchecked holds the baseline's fingerprints until a window read decides which of them a previous
+	// process held; suppressed lives in memory, so a restart would otherwise drop those fired edges.
+	unchecked map[string]struct{}
+	// pendingResolve holds the resolves of unchecked alerts that ended before that read succeeded,
+	// judged later by the windows open at baselineAt.
+	pendingResolve map[string]Alert
+	baselineAt     time.Time
 
 	// now and sleep are indirected for the tests, the dispatcher's idiom: a
 	// loop asserted against a real clock is a thirty-second test.
@@ -134,28 +141,35 @@ func NewAlertWatcher(d AlertWatcherDeps) (*AlertWatcher, error) { //nolint:gocri
 		interval:    interval,
 		firing:      map[string]Alert{},
 		suppressed:  map[string]struct{}{},
+		unchecked:   map[string]struct{}{},
 		now:         now,
 		sleep:       realSleep,
 		logs:        newWatcherLogLimiter(now),
+
+		pendingResolve: map[string]Alert{},
 	}, nil
 }
 
-// openWindows returns the maintenance windows open at now. A lookup failure fails OPEN: an edge a
-// window would have held back is noise, an edge lost to a database blip is an outage nobody hears of.
-func (w *AlertWatcher) openWindows(ctx context.Context, now time.Time) []store.MaintenanceWindow {
+// openWindows returns the maintenance windows open at now, and false when they could not be read. A
+// failed read fails OPEN for new edges only (a held-back edge is noise, a lost one is an outage nobody
+// hears of); an edge already held stays held until a read shows its window closed.
+func (w *AlertWatcher) openWindows(ctx context.Context, now time.Time) ([]store.MaintenanceWindow, bool) {
 	if w.maintenance == nil {
-		return nil
+		return nil, true
 	}
 	var open []store.MaintenanceWindow
 	f := store.MaintenanceFilter{From: now, To: now.Add(time.Nanosecond), Limit: maintenanceWindowsPageLimit}
 	for {
 		page, err := w.maintenance.ListMaintenanceWindows(ctx, f)
 		if err != nil {
-			if w.logs.allow("maintenance") {
-				slog.Warn("alert webhook watcher: reading maintenance windows failed, delivering "+
-					"without suppression", "error", err)
+			if w.metrics != nil {
+				w.metrics.WebhookMaintenanceReadErrors.WithLabelValues().Inc()
 			}
-			return nil
+			if w.logs.allow("maintenance") {
+				slog.Warn("alert webhook watcher: reading maintenance windows failed, new alerts are "+
+					"delivered without suppression and held ones stay held", "error", err)
+			}
+			return nil, false
 		}
 		for i := range page.Windows {
 			if mw := &page.Windows[i]; !now.Before(mw.StartAt) && now.Before(mw.EndAt) {
@@ -163,27 +177,157 @@ func (w *AlertWatcher) openWindows(ctx context.Context, now time.Time) []store.M
 			}
 		}
 		if page.NextCursor == "" {
-			return open
+			return open, true
 		}
 		f.Cursor = page.NextCursor
 	}
 }
 
+// windowsFor reads the open windows only when this poll has something they could decide: a new
+// fingerprint or a held one. Baseline alerts not yet checked are judged by baselineWindows instead.
+func (w *AlertWatcher) windowsFor(ctx context.Context, observed map[string]Alert) ([]store.MaintenanceWindow, bool) {
+	need := len(w.suppressed) > 0
+	for fp := range observed {
+		if _, known := w.firing[fp]; !known {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return nil, true
+	}
+	return w.openWindows(ctx, w.now())
+}
+
 // covered reports whether an open window's scope covers an alert: a global window, one of the
 // alert's two nodes, its directed pair, or its external target.
 func covered(windows []store.MaintenanceWindow, labels map[string]string) bool {
-	src, dst, target := labels["source_node"], labels["destination_node"], labels["target"]
 	for i := range windows {
-		switch scope := windows[i].Scope; {
-		case scope == "":
-			return true
-		case scope == src || scope == dst || scope == target:
-			return true
-		case src != "" && dst != "" && scope == src+pairArrow+dst:
+		if scopeCovers(windows[i].Scope, labels) {
 			return true
 		}
 	}
 	return false
+}
+
+func scopeCovers(scope string, labels map[string]string) bool {
+	src, dst, target := labels["source_node"], labels["destination_node"], labels["target"]
+	switch {
+	case scope == "":
+		return true
+	case scope == src || scope == dst || scope == target:
+		return true
+	case src != "" && dst != "" && scope == src+pairArrow+dst:
+		return true
+	}
+	return false
+}
+
+// holdUnchecked holds the baseline alerts a previous process held: those that fired after a covering
+// window open at the baseline was declared and started (pre-window alerts were delivered, so their
+// resolve must go out). firedAt is when the alert went pending, hence the rule's `for`, plus one
+// interval of poll lag. windows are the ones open at baselineAt, as for decidePendingResolves: the
+// first good read may come after the window closed, and a held alert that still fires then must be
+// delivered as fired, not forgotten.
+func (w *AlertWatcher) holdUnchecked(windows []store.MaintenanceWindow, rules ruleLookup) {
+	if len(w.unchecked) == 0 {
+		return
+	}
+	defer clear(w.unchecked)
+	var candidates []string
+	for fp := range w.unchecked {
+		if a, ok := w.firing[fp]; ok && covered(windows, a.Labels) {
+			candidates = append(candidates, fp)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	byID := rules()
+	for _, fp := range candidates {
+		if a := w.firing[fp]; w.heldBefore(&a, windows, byID) {
+			w.suppressed[fp] = struct{}{}
+			w.countSuppressed(store.WebhookEventAlertFired)
+		}
+	}
+}
+
+// heldBefore reports whether a previous process held a's fired edge: a covering window among windows
+// was declared and started before that process first saw a firing. A rule missing from rules (or an
+// unreadable table) is judged by activeAt alone.
+func (w *AlertWatcher) heldBefore(a *Alert, windows []store.MaintenanceWindow, rules map[string]*store.AlertRule) bool {
+	seenBy := a.FiredAt.Add(w.interval)
+	if row, ok := rules[a.RuleID]; ok {
+		seenBy = seenBy.Add(time.Duration(row.ForNs))
+	}
+	for i := range windows {
+		mw := &windows[i]
+		declared := mw.StartAt
+		if mw.CreatedAt.After(declared) {
+			declared = mw.CreatedAt
+		}
+		if scopeCovers(mw.Scope, a.Labels) && !seenBy.Before(declared) {
+			return true
+		}
+	}
+	return false
+}
+
+// decidePendingResolves settles the resolves of baseline alerts that ended before any window read
+// succeeded, judged by windows, the ones open when the baseline was taken.
+func (w *AlertWatcher) decidePendingResolves(ctx context.Context, windows []store.MaintenanceWindow, rules ruleLookup) {
+	var byID map[string]*store.AlertRule
+	if len(windows) > 0 {
+		byID = rules()
+	}
+	for _, fp := range slices.Sorted(maps.Keys(w.pendingResolve)) {
+		if a := w.pendingResolve[fp]; w.heldBefore(&a, windows, byID) {
+			w.countSuppressed(store.WebhookEventAlertResolved)
+		} else {
+			w.notifier.NotifyAlert(ctx, store.WebhookEventAlertResolved, a)
+		}
+	}
+	clear(w.pendingResolve)
+}
+
+// baselineWindows reads the windows open at baselineAt while a baseline alert is still undecided, once
+// per poll for holdUnchecked and decidePendingResolves both; false means nothing to decide or a failed
+// read, which keeps them waiting.
+func (w *AlertWatcher) baselineWindows(ctx context.Context) ([]store.MaintenanceWindow, bool) {
+	if len(w.unchecked) == 0 && len(w.pendingResolve) == 0 {
+		return nil, false
+	}
+	return w.openWindows(ctx, w.baselineAt)
+}
+
+// ruleLookup returns the alert_rules rows by id, read at most once per poll; nil means no rule
+// source or a failed read.
+type ruleLookup func() map[string]*store.AlertRule
+
+// rulesOnce is the poll's ruleLookup. Every rule, not just enabled ones: an alert can still be firing
+// in Prometheus for a rule an operator disabled seconds ago (the reconciler has not re-applied yet).
+// A failed read is logged and degrades each user: payloads go out without expr, and the restart hold
+// judges by activeAt alone.
+func (w *AlertWatcher) rulesOnce(ctx context.Context) ruleLookup {
+	return sync.OnceValue(func() map[string]*store.AlertRule {
+		if w.rules == nil {
+			return nil
+		}
+		rows, err := w.rules.ListAlertRules(ctx, false)
+		if err != nil {
+			if w.logs.allow("rules") {
+				slog.Warn("alert webhook watcher: reading alert rules failed — deliveries continue "+
+					"with the label set and an empty expr, and the restart hold judges by activeAt alone",
+					"error", err)
+			}
+			return nil
+		}
+		byID := make(map[string]*store.AlertRule, len(rows))
+		for i := range rows {
+			byID[rows[i].ID] = &rows[i]
+		}
+		return byID
+	})
 }
 
 func (w *AlertWatcher) countSuppressed(event string) {
@@ -233,19 +377,39 @@ func (w *AlertWatcher) poll(ctx context.Context) {
 	}
 
 	if !w.baselined {
-		w.firing, w.baselined = observed, true
+		w.firing, w.baselined, w.baselineAt = observed, true, w.now()
+		if w.maintenance != nil {
+			for fp := range observed {
+				w.unchecked[fp] = struct{}{}
+			}
+		}
+		if windows, ok := w.baselineWindows(pollCtx); ok {
+			w.holdUnchecked(windows, w.rulesOnce(pollCtx))
+		}
 		slog.Info("alert webhook watcher: baseline taken, no notifications will be sent for alerts "+
-			"that were already firing", "managedFiring", len(observed))
+			"that were already firing", "managedFiring", len(observed), "held", len(w.suppressed))
 		return
 	}
 
-	w.enrich(ctx, observed)
+	rules := w.rulesOnce(pollCtx)
+	enrich(observed, rules)
 
-	windows := w.openWindows(ctx, w.now())
+	// Before windowsFor: an alert holdUnchecked holds makes that read necessary, and its answer then
+	// decides whether the held alert.fired goes out on this poll.
+	baseline, baselineOK := w.baselineWindows(pollCtx)
+	if baselineOK {
+		w.holdUnchecked(baseline, rules)
+	}
+	windows, windowsOK := w.windowsFor(pollCtx, observed)
+	if baselineOK && len(w.pendingResolve) > 0 {
+		w.decidePendingResolves(ctx, baseline, rules)
+	}
 
 	// Sorted so a fan-out is deterministic.
 	for _, fp := range slices.Sorted(maps.Keys(observed)) {
 		a := observed[fp]
+		// Firing again: a late resolve of its earlier run would close the new one.
+		delete(w.pendingResolve, fp)
 		_, known := w.firing[fp]
 		_, held := w.suppressed[fp]
 		switch {
@@ -254,7 +418,7 @@ func (w *AlertWatcher) poll(ctx context.Context) {
 			w.countSuppressed(store.WebhookEventAlertFired)
 		case !known:
 			w.notifier.NotifyAlert(ctx, store.WebhookEventAlertFired, a)
-		case held && !covered(windows, a.Labels):
+		case held && windowsOK && !covered(windows, a.Labels):
 			// The window closed on an alert that kept firing: that is news now.
 			delete(w.suppressed, fp)
 			w.notifier.NotifyAlert(ctx, store.WebhookEventAlertFired, a)
@@ -263,6 +427,16 @@ func (w *AlertWatcher) poll(ctx context.Context) {
 	resolvedAt := w.now().UTC()
 	for _, fp := range slices.Sorted(maps.Keys(w.firing)) {
 		if _, still := observed[fp]; still {
+			continue
+		}
+		if _, undecided := w.unchecked[fp]; undecided {
+			// Only a failed window read leaves a baseline alert unchecked; whether the previous
+			// process held its fired edge is still unknown, so the resolve waits for a read.
+			delete(w.unchecked, fp)
+			a := w.firing[fp]
+			at := resolvedAt
+			a.ResolvedAt = &at
+			w.pendingResolve[fp] = a
 			continue
 		}
 		if _, held := w.suppressed[fp]; held {
@@ -338,27 +512,14 @@ func (w *AlertWatcher) decode(raw json.RawMessage) (map[string]Alert, error) {
 	return observed, nil
 }
 
-// enrich fills RuleName and Expr from the alert_rules rows, for the alerts that
-// have a row. A failure here is logged and IGNORED: the transition is the news
-// and the expression is decoration, so a degraded payload beats a dropped one.
-func (w *AlertWatcher) enrich(ctx context.Context, observed map[string]Alert) {
-	if w.rules == nil || len(observed) == 0 {
+// enrich fills RuleName and Expr from the alert_rules rows, for the alerts that have a row. An
+// unreadable table leaves them as decoded: the transition is the news and the expression is
+// decoration, so a degraded payload beats a dropped one.
+func enrich(observed map[string]Alert, rules ruleLookup) {
+	if len(observed) == 0 {
 		return
 	}
-	// Every rule, not just enabled ones: an alert can still be firing in Prometheus for a rule an
-	// operator disabled seconds ago (the reconciler has not re-applied yet).
-	rows, err := w.rules.ListAlertRules(ctx, false)
-	if err != nil {
-		if w.logs.allow("rules") {
-			slog.Warn("alert webhook watcher: reading alert rules for payload enrichment failed — "+
-				"deliveries continue with the label set and an empty expr", "error", err)
-		}
-		return
-	}
-	byID := make(map[string]*store.AlertRule, len(rows))
-	for i := range rows {
-		byID[rows[i].ID] = &rows[i]
-	}
+	byID := rules()
 	for fp, a := range observed {
 		row, ok := byID[a.RuleID]
 		if !ok {

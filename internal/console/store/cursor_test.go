@@ -249,3 +249,23 @@ func TestPairCursorRoundTripsFieldsContainingTheSeparator(t *testing.T) {
 		t.Error("a malformed cursor must be an error, not a silent reset to page one")
 	}
 }
+
+// The decoded pair goes into ListMTRDestinations' keyset predicate as two text parameters, and
+// PostgreSQL refuses a NUL or invalid UTF-8 there (SQLSTATE 22021): a crafted cursor came back as a
+// 502 and an ERROR log line. EncodePairCursor never produces such a pair, so it is a malformed cursor.
+func TestDecodePairCursorRefusesWhatATextColumnCannotHold(t *testing.T) {
+	for _, c := range [][2]string{
+		{"\x00", "dest"},
+		{"node", "de\x00st"},
+		{"\xff\xfe", "dest"},
+		{"node", "a\xc3"},
+	} {
+		if _, _, ok, err := DecodePairCursor(EncodePairCursor(c[0], c[1])); err == nil || ok {
+			t.Errorf("pair %q/%q: ok=%v err=%v, want a malformed-cursor error", c[0], c[1], ok, err)
+		}
+	}
+	// Valid multi-byte UTF-8 is an ordinary name.
+	if src, dst, ok, err := DecodePairCursor(EncodePairCursor("nóde", "dé")); err != nil || !ok || src != "nóde" || dst != "dé" {
+		t.Errorf("valid UTF-8 pair: %q/%q ok=%v err=%v", src, dst, ok, err)
+	}
+}

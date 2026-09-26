@@ -30,10 +30,21 @@ const (
 // cluster's history within a single scheduled sweep.
 const memorySnapshotRingSize = 500
 
-// memoryRunEntry is one ring slot: a run plus its per-pair results.
+// memoryRunEntry is one ring slot: a run plus its per-pair results, of which only the newest
+// store.RunResultsCap are kept (all a read returns anyway).
 type memoryRunEntry struct {
 	run     store.Run
 	results []store.RunResult
+	// index maps a retained result to its position in results plus evicted, so an upsert is O(1).
+	index   map[resultKey]int
+	evicted int
+}
+
+// resultKey is one result row's identity, mirroring check_results_pair_unique.
+type resultKey struct {
+	source      string
+	destination string
+	sampleSeq   int32
 }
 
 // snapshotKey is one path snapshot's identity, mirroring the SQL table's
@@ -93,7 +104,7 @@ func (m *MemoryStore) CreateRun(_ context.Context, id, checkType, plane string, 
 		InitiatorID:   initiatorID,
 		PairTotal:     pairTotal,
 	}
-	m.runs[id] = &memoryRunEntry{run: run}
+	m.runs[id] = &memoryRunEntry{run: run, index: make(map[resultKey]int)}
 	m.order = append(m.order, id)
 	if len(m.order) > memoryRingSize {
 		evicted := m.order[0]
@@ -225,16 +236,15 @@ func (m *MemoryStore) UpsertRunResult(_ context.Context, in store.RunResultInput
 	}
 
 	// The match key includes SampleSeq, mirroring check_results_pair_unique since migration 00009.
-	for i := range entry.results {
-		r := &entry.results[i]
-		if r.SourceNode == in.SourceNode && r.DestinationNode == in.DestinationNode && r.SampleSeq == in.SampleSeq {
-			r.Success = in.Success
-			r.DurationNs = in.DurationNs
-			r.Error = in.Error
-			r.Result = in.Result
-			r.RecordedAt = time.Now().UTC()
-			return *r, nil
-		}
+	key := resultKey{source: in.SourceNode, destination: in.DestinationNode, sampleSeq: in.SampleSeq}
+	if pos, ok := entry.index[key]; ok {
+		r := &entry.results[pos-entry.evicted]
+		r.Success = in.Success
+		r.DurationNs = in.DurationNs
+		r.Error = in.Error
+		r.Result = in.Result
+		r.RecordedAt = time.Now().UTC()
+		return *r, nil
 	}
 
 	m.nextRes++
@@ -250,7 +260,14 @@ func (m *MemoryStore) UpsertRunResult(_ context.Context, in store.RunResultInput
 		RecordedAt:      time.Now().UTC(),
 		SampleSeq:       in.SampleSeq,
 	}
+	entry.index[key] = entry.evicted + len(entry.results)
 	entry.results = append(entry.results, res)
+	if len(entry.results) > store.RunResultsCap {
+		old := entry.results[0]
+		delete(entry.index, resultKey{source: old.SourceNode, destination: old.DestinationNode, sampleSeq: old.SampleSeq})
+		entry.results = entry.results[1:]
+		entry.evicted++
+	}
 	return res, nil
 }
 
@@ -400,10 +417,10 @@ func (m *MemoryStore) ActiveRunsByInitiator(_ context.Context, initiatorKind, in
 	return n, nil
 }
 
-// GetRunResults returns the run's result rows in insertion order, bounded to the newest
-// store.RunResultsCap of them exactly as the database does, matching *store.DB's "no rows is not
-// itself a failure" contract: an id naming no run returns an empty, non-nil slice rather than an
-// error.
+// GetRunResults returns the run's result rows in insertion order. UpsertRunResult keeps only the
+// newest store.RunResultsCap of them per run, as the database read does, so truncation is reported
+// once any row was evicted. An id naming no run returns an empty, non-nil slice rather than an
+// error, matching *store.DB's "no rows is not itself a failure" contract.
 func (m *MemoryStore) GetRunResults(_ context.Context, id string) ([]store.RunResult, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -411,13 +428,7 @@ func (m *MemoryStore) GetRunResults(_ context.Context, id string) ([]store.RunRe
 	if !ok {
 		return []store.RunResult{}, false, nil
 	}
-	rows := entry.results
-	truncated := len(rows) > store.RunResultsCap
-	if truncated {
-		// The NEWEST cap, same as the query: a bounded read of a long run keeps its end.
-		rows = rows[len(rows)-store.RunResultsCap:]
-	}
-	out := make([]store.RunResult, len(rows))
-	copy(out, rows)
-	return out, truncated, nil
+	out := make([]store.RunResult, len(entry.results))
+	copy(out, entry.results)
+	return out, entry.evicted > 0, nil
 }

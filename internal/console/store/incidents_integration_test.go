@@ -288,13 +288,13 @@ func TestListIncidentsStatusAndScopeFilters(t *testing.T) {
 	if got := count(store.IncidentFilter{Status: store.IncidentStatusResolved}); got != 1 {
 		t.Errorf("status=resolved returned %d incidents, want 1", got)
 	}
-	if got := count(store.IncidentFilter{Scope: scopePtr("")}); got != 2 {
+	if got := count(store.IncidentFilter{Scope: new("")}); got != 2 {
 		t.Errorf("scope=\"\" returned %d incidents, want the 2 global ones", got)
 	}
-	if got := count(store.IncidentFilter{Scope: scopePtr("node-a")}); got != 1 {
+	if got := count(store.IncidentFilter{Scope: new("node-a")}); got != 1 {
 		t.Errorf("scope=node-a returned %d incidents, want 1", got)
 	}
-	if got := count(store.IncidentFilter{Status: store.IncidentStatusOpen, Scope: scopePtr("node-b")}); got != 1 {
+	if got := count(store.IncidentFilter{Status: store.IncidentStatusOpen, Scope: new("node-b")}); got != 1 {
 		t.Errorf("status+scope returned %d incidents, want 1", got)
 	}
 }
@@ -363,7 +363,7 @@ func TestListIncidentsPagesNewestFirst(t *testing.T) {
 
 	const total = 7
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if _, err := db.CreateIncident(ctx, incidentInput("incident-"+strconv.Itoa(i),
 			base.Add(time.Duration(i)*time.Minute))); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
@@ -442,7 +442,7 @@ func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIncident(resolved-long-ago): %v", err)
 	}
-	if _, _, err := db.UpdateIncidentStatus(ctx, resolvedOld.ID, store.IncidentStatusResolved, &ancient); err != nil {
+	if _, _, err = db.UpdateIncidentStatus(ctx, resolvedOld.ID, store.IncidentStatusResolved, &ancient); err != nil {
 		t.Fatalf("resolve resolved-long-ago: %v", err)
 	}
 
@@ -450,7 +450,7 @@ func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIncident(resolved-recently): %v", err)
 	}
-	if _, _, err := db.UpdateIncidentStatus(ctx, resolvedNew.ID, store.IncidentStatusResolved, &recent); err != nil {
+	if _, _, err = db.UpdateIncidentStatus(ctx, resolvedNew.ID, store.IncidentStatusResolved, &recent); err != nil {
 		t.Fatalf("resolve resolved-recently: %v", err)
 	}
 
@@ -475,5 +475,48 @@ func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	}
 	if _, err := db.GetIncident(ctx, stillOpen.ID); err != nil {
 		t.Errorf("an OPEN incident was pruned: %v -- open incidents are never pruned, at any age", err)
+	}
+}
+
+// What the pinned validator lets through, PostgreSQL's jsonb stores; what jsonb refuses (a lone
+// surrogate escape, a NUL escape) is a "store: incident: " validation error, never the driver's 22P02.
+func TestIncidentPinnedValidatorMatchesWhatJSONBStores(t *testing.T) {
+	db := newIncidentsDB(t)
+	ctx := context.Background()
+	from := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	// The escapes are built from bs so that a tool decoding escapes on write cannot turn them into
+	// the literal characters, which would leave the escaped pair untested.
+	const bs = `\`
+	for _, note := range []string{`"` + bs + `ud83d` + bs + `ude00"`, `"\\ud800"`, `"\\u0000"`, `"` + bs + `u00e9"`} {
+		in := incidentInput("storable "+note, from)
+		in.Pinned = json.RawMessage(`[{"kind":"event","id":"1","note":` + note + `}]`)
+		if _, err := db.CreateIncident(ctx, in); err != nil {
+			t.Errorf("CreateIncident(note %s) = %v, want stored", note, err)
+		}
+	}
+	for _, note := range []string{`"\ud800"`, `"\uDC00"`, `"a\ud83d"`, `"\u0000"`} {
+		in := incidentInput("refused "+note, from)
+		in.Pinned = json.RawMessage(`[{"kind":"event","id":"1","note":` + note + `}]`)
+		if _, err := db.CreateIncident(ctx, in); err == nil || !strings.HasPrefix(err.Error(), "store: incident: ") {
+			t.Errorf("CreateIncident(note %s) = %v, want a \"store: incident: \" validation error", note, err)
+		}
+	}
+	// A member PinnedRef does not know is ignored by the decode but stored all the same, numbers
+	// included; numeric refuses 1e131072 and 1e-16384 with 22003.
+	inc, err := db.CreateIncident(ctx, incidentInput("numbers", from))
+	if err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+	for _, num := range []string{"1e131071", "1e-16383"} {
+		pinned := json.RawMessage(`[{"kind":"event","id":"1","x":` + num + `}]`)
+		if _, err := db.UpdateIncidentPinned(ctx, inc.ID, pinned); err != nil {
+			t.Errorf("UpdateIncidentPinned(x %s) = %v, want stored", num, err)
+		}
+	}
+	for _, num := range []string{"1e131072", "1e200000", "1e-16384", "1e-20000"} {
+		pinned := json.RawMessage(`[{"kind":"event","id":"1","x":` + num + `}]`)
+		if _, err := db.UpdateIncidentPinned(ctx, inc.ID, pinned); err == nil || !strings.HasPrefix(err.Error(), "store: incident: ") {
+			t.Errorf("UpdateIncidentPinned(x %s) = %v, want a \"store: incident: \" validation error", num, err)
+		}
 	}
 }

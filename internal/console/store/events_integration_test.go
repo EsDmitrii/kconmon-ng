@@ -144,9 +144,9 @@ func TestListEventsFiltersByType(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "check_observed", "a→b"))
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "mtr_triggered", "a→b"))
-	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "topology_changed", "cluster"))
+	mustInsert(ctx, t, es, rec(1, base, "check_observed", "a→b"))
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Second), "mtr_triggered", "a→b"))
+	mustInsert(ctx, t, es, rec(3, base.Add(2*time.Second), "topology_changed", "cluster"))
 
 	page, err := es.ListEvents(ctx, store.EventFilter{Types: []string{"check_observed", "topology_changed"}})
 	if err != nil {
@@ -170,8 +170,8 @@ func TestListEventsFiltersByScope(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "check_observed", "a→b"))
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "c→d"))
+	mustInsert(ctx, t, es, rec(1, base, "check_observed", "a→b"))
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Second), "check_observed", "c→d"))
 
 	page, err := es.ListEvents(ctx, store.EventFilter{Scope: "a→b"})
 	if err != nil {
@@ -194,13 +194,13 @@ func TestListEventsFiltersByScopeNode(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "topology_changed", "a"))                      // the node's own scope
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "a→b"))     // pair, source side
-	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "c→a"))   // pair, destination side
-	mustInsert(t, ctx, es, rec(4, base.Add(3*time.Second), "check_observed", "c→d"))   // unrelated pair
-	mustInsert(t, ctx, es, rec(5, base.Add(4*time.Second), "check_observed", "a-x→b")) // near miss on the source side
-	mustInsert(t, ctx, es, rec(6, base.Add(5*time.Second), "check_observed", "b→x-a")) // near miss on the destination side
-	mustInsert(t, ctx, es, rec(7, base.Add(6*time.Second), "topology_changed", "ab"))  // near miss on the bare scope
+	mustInsert(ctx, t, es, rec(1, base, "topology_changed", "a"))                      // the node's own scope
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Second), "check_observed", "a→b"))     // pair, source side
+	mustInsert(ctx, t, es, rec(3, base.Add(2*time.Second), "check_observed", "c→a"))   // pair, destination side
+	mustInsert(ctx, t, es, rec(4, base.Add(3*time.Second), "check_observed", "c→d"))   // unrelated pair
+	mustInsert(ctx, t, es, rec(5, base.Add(4*time.Second), "check_observed", "a-x→b")) // near miss on the source side
+	mustInsert(ctx, t, es, rec(6, base.Add(5*time.Second), "check_observed", "b→x-a")) // near miss on the destination side
+	mustInsert(ctx, t, es, rec(7, base.Add(6*time.Second), "topology_changed", "ab"))  // near miss on the bare scope
 
 	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a"})
 	if err != nil {
@@ -230,10 +230,10 @@ func TestListEventsScopeNodeReturnsEachEventOnce(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "topology_changed", "a"))                    // both sides are "a"
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "a→a"))   // ... and so are these
-	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "a→b")) // one side
-	mustInsert(t, ctx, es, rec(4, base.Add(3*time.Second), "check_observed", "b→a")) // the other
+	mustInsert(ctx, t, es, rec(1, base, "topology_changed", "a"))                    // both sides are "a"
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Second), "check_observed", "a→a"))   // ... and so are these
+	mustInsert(ctx, t, es, rec(3, base.Add(2*time.Second), "check_observed", "a→b")) // one side
+	mustInsert(ctx, t, es, rec(4, base.Add(3*time.Second), "check_observed", "b→a")) // the other
 
 	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a"})
 	if err != nil {
@@ -273,7 +273,7 @@ func TestListEventsByScopeNodeUsesTheScopeSideIndexes(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	for i := range 5000 {
 		scope := fmt.Sprintf("node-%d→node-%d", i%200, (i+7)%200)
-		mustInsert(t, ctx, es, rec(int64(i+1), base.Add(time.Duration(i)*time.Second), "check_observed", scope))
+		mustInsert(ctx, t, es, rec(int64(i+1), base.Add(time.Duration(i)*time.Second), "check_observed", scope))
 	}
 
 	pool, err := pgxpool.New(ctx, testDSN(t))
@@ -327,9 +327,9 @@ func TestListEventsScopeNodeEscapesLIKEMetacharacters(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "check_observed", "abc→b"))                    // the wildcard victim
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "b→abc"))   // ... on the other side
-	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "a_c→b")) // the literal match
+	mustInsert(ctx, t, es, rec(1, base, "check_observed", "abc→b"))                    // the wildcard victim
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Second), "check_observed", "b→abc"))   // ... on the other side
+	mustInsert(ctx, t, es, rec(3, base.Add(2*time.Second), "check_observed", "a_c→b")) // the literal match
 
 	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a_c"})
 	if err != nil {
@@ -359,10 +359,10 @@ func TestListEventsFiltersByTimeWindow(t *testing.T) {
 	ctx := context.Background()
 
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, rec(1, base, "check_observed", "a→b"))                    // in window (From, inclusive)
-	mustInsert(t, ctx, es, rec(2, base.Add(time.Minute), "check_observed", "a→b"))   // in window
-	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Minute), "check_observed", "a→b")) // == To, excluded
-	mustInsert(t, ctx, es, rec(4, base.Add(-time.Minute), "check_observed", "a→b"))  // before From, excluded
+	mustInsert(ctx, t, es, rec(1, base, "check_observed", "a→b"))                    // in window (From, inclusive)
+	mustInsert(ctx, t, es, rec(2, base.Add(time.Minute), "check_observed", "a→b"))   // in window
+	mustInsert(ctx, t, es, rec(3, base.Add(2*time.Minute), "check_observed", "a→b")) // == To, excluded
+	mustInsert(ctx, t, es, rec(4, base.Add(-time.Minute), "check_observed", "a→b"))  // before From, excluded
 
 	page, err := es.ListEvents(ctx, store.EventFilter{
 		From: base,
@@ -392,8 +392,8 @@ func TestListEventsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 
 	const total = 250
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < total; i++ {
-		mustInsert(t, ctx, es, rec(int64(i), base.Add(time.Duration(i)*time.Second), "check_observed", "a→b"))
+	for i := range total {
+		mustInsert(ctx, t, es, rec(int64(i), base.Add(time.Duration(i)*time.Second), "check_observed", "a→b"))
 	}
 
 	var (
@@ -435,7 +435,7 @@ func TestListEventsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 	if len(seen) != total {
 		t.Errorf("saw %d distinct events across all pages, want %d (gaps present)", len(seen), total)
 	}
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if !seen[int64(i)] {
 			t.Errorf("EventSeq %d missing from paged results", i)
 		}
@@ -444,7 +444,7 @@ func TestListEventsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 
 // mustInsert is a small helper: most of these tests only care that seeding
 // succeeded, not about the returned inserted flag.
-func mustInsert(t *testing.T, ctx context.Context, es store.EventStore, ev store.EventRecord) {
+func mustInsert(ctx context.Context, t *testing.T, es store.EventStore, ev store.EventRecord) {
 	t.Helper()
 	if _, err := es.InsertEvent(ctx, ev); err != nil {
 		t.Fatalf("InsertEvent(seq=%d): %v", ev.EventSeq, err)
@@ -487,11 +487,11 @@ func TestTopologyAtThreeInstantsGiveThreeSets(t *testing.T) {
 	ctx := context.Background()
 
 	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
-	mustInsert(t, ctx, es, topoRec(2, t0.Add(time.Hour), "agent_registered", "node-b", "agent-b", "zone-b"))
-	mustInsert(t, ctx, es, topoRec(3, t0.Add(2*time.Hour), "agent_evicted", "node-a", "agent-a", "zone-a"))
+	mustInsert(ctx, t, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
+	mustInsert(ctx, t, es, topoRec(2, t0.Add(time.Hour), "agent_registered", "node-b", "agent-b", "zone-b"))
+	mustInsert(ctx, t, es, topoRec(3, t0.Add(2*time.Hour), "agent_evicted", "node-a", "agent-a", "zone-a"))
 	// A non-topology row at the same times must never reach the fold.
-	mustInsert(t, ctx, es, topoRecNoise(4, t0.Add(90*time.Minute)))
+	mustInsert(ctx, t, es, topoRecNoise(4, t0.Add(90*time.Minute)))
 
 	for _, tc := range []struct {
 		name  string
@@ -552,7 +552,7 @@ func TestTopologyAtBeforeAnyEventIsEmptyButRetentionAware(t *testing.T) {
 	ctx := context.Background()
 
 	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
+	mustInsert(ctx, t, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
 
 	snap, err := es.TopologyAt(ctx, t0.Add(-time.Hour))
 	if err != nil {
@@ -597,9 +597,9 @@ func TestTopologyAtTieBreaksOnID(t *testing.T) {
 	ctx := context.Background()
 
 	ts := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, ts, "agent_registered", "node-a", "agent-a", "zone-a"))
+	mustInsert(ctx, t, es, topoRec(1, ts, "agent_registered", "node-a", "agent-a", "zone-a"))
 	// Same event_time, different event_seq, so the natural key lets both in.
-	mustInsert(t, ctx, es, topoRec(2, ts, "agent_deregistered", "node-a", "agent-a", "zone-a"))
+	mustInsert(ctx, t, es, topoRec(2, ts, "agent_deregistered", "node-a", "agent-a", "zone-a"))
 
 	snap, err := es.TopologyAt(ctx, ts)
 	if err != nil {

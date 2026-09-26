@@ -25,8 +25,7 @@ var _ MaintenanceService = (*store.DB)(nil)
 // maintenanceUnavailableDetail is served whenever s.maintenance is nil, in
 // annotationsUnavailableDetail's shape.
 const maintenanceUnavailableDetail = "maintenance windows are persisted operator declarations with no " +
-	"in-memory fallback: set console.database.mode in the console config (Helm: console.database.mode) " +
-	"to enable /api/v1/maintenance"
+	"in-memory fallback: " + databaseKnob + " to enable /api/v1/maintenance"
 
 // maintenanceValidationPrefix is the prefix store.MaintenanceInput.Validate
 // builds every one of its errors with -- the only discriminator there is, same

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -45,15 +46,28 @@ func decodeMutationBody(w http.ResponseWriter, r *http.Request, req any, fallbac
 		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err, fallbackDetail))
 		return false
 	}
+	return !refuseTrailingJSON(w, dec)
+}
+
+// refuseTrailingJSON answers 400 and reports true when dec's body carries anything but whitespace
+// after the value just decoded. Handlers that inline strictJSONDecoder call it after their own checks.
+func refuseTrailingJSON(w http.ResponseWriter, dec *json.Decoder) bool {
 	/* Nothing may FOLLOW the value.
 	   Decode stops at the end of the first JSON value and the rest of the body was discarded in
 	   silence, so `{...}{...}` — a duplicated body, a concatenation, a proxy that stapled two
 	   requests together — was accepted as the first object alone. A body this handler cannot fully
-	   account for is not a body it should act on. */
-	if dec.More() {
+	   account for is not a body it should act on. dec.More() is not enough: it reports false for a
+	   stray '}' or ']', so only io.EOF from the next Token proves the body ended. */
+	_, err := dec.Token()
+	switch {
+	case errors.Is(err, io.EOF):
+		return false
+	case err == nil:
 		writeProblem(w, http.StatusBadRequest, "invalid request",
 			"body carries more than one JSON value; send exactly one object")
-		return false
+	default:
+		writeProblem(w, http.StatusBadRequest, "invalid request",
+			"body carries data after the JSON value; send exactly one object")
 	}
 	return true
 }

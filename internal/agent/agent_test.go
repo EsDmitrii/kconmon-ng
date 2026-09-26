@@ -675,7 +675,7 @@ func TestResultHandlerICMPUnreachableTargetReportsTotalLoss(t *testing.T) {
 	c := checker.NewICMPChecker(300 * time.Millisecond)
 	res := c.Check(context.Background(), checker.Target{PodIP: "192.0.2.1"})
 	if res.Success {
-		t.Fatal("192.0.2.1 (TEST-NET-1) answered an echo request; the pin is meaningless here")
+		t.Skip("192.0.2.1 (TEST-NET-1) answered an echo request (a VPN on this host routes it); the pin is meaningless here")
 	}
 	res.Source, res.Destination = "node-a", "node-b"
 	res.SourceZone, res.DestZone = "zone-a", "zone-b"
@@ -1230,6 +1230,70 @@ func TestResultHandlerPMTUUnreachableWritesNothing(t *testing.T) {
 		if strings.Contains(f.GetName(), "pmtu") && len(f.GetMetric()) > 0 {
 			t.Errorf("family %s has %d series after an unreachable probe, want none", f.GetName(), len(f.GetMetric()))
 		}
+	}
+}
+
+// gaugeByPeer reads one gauge family as destination_node -> value.
+func gaugeByPeer(t *testing.T, reg *prometheus.Registry, family string) map[string]float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering registry: %v", err)
+	}
+	out := map[string]float64{}
+	for _, f := range families {
+		if f.GetName() != family {
+			continue
+		}
+		for _, mtr := range f.GetMetric() {
+			for _, lp := range mtr.GetLabel() {
+				if lp.GetName() == "destination_node" {
+					out[lp.GetValue()] = mtr.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return out
+}
+
+// The probe size comes from the route to each peer, so one agent probes different peers at
+// different sizes; a single per-agent value would call a healthy 1420-byte VPN pair reduced.
+func TestResultHandlerPMTUProbeSizeIsPerPair(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	for _, p := range []struct {
+		dst  string
+		size int
+	}{{"lan-peer", 1500}, {"vpn-peer", 1420}} {
+		handle(model.CheckResult{
+			Type: model.CheckPMTU, Source: "node-a", Destination: p.dst,
+			SourceZone: "zone-a", DestZone: "zone-b", Success: true,
+			Details: &model.PMTUDetails{ProbeMTU: p.size, PathMTU: p.size, Verdict: model.PMTUVerdictOK},
+		})
+	}
+	got := gaugeByPeer(t, reg, "kconmon_ng_pmtu_probe_bytes")
+	if got["lan-peer"] != 1500 || got["vpn-peer"] != 1420 {
+		t.Errorf("pmtu_probe_bytes by peer = %v, want lan-peer 1500 and vpn-peer 1420", got)
+	}
+	if v := gaugeValue(t, reg, "kconmon_ng_agent_pmtu_probe_bytes"); v != 1500 {
+		t.Errorf("agent_pmtu_probe_bytes = %v, want 1500, the max over peers whatever finished last", v)
+	}
+}
+
+// A reload re-runs preinitSelfMetrics while detached reactive traces still run; each of them ends
+// with a Dec, so zeroing the gauge here left it negative for the life of the process.
+func TestPreinitSelfMetricsKeepsReactiveInflight(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.NewPrometheusMetrics("kconmon_ng", reg)
+	preinitSelfMetrics(m, nil, false)
+	m.AgentMTRReactiveInflight.WithLabelValues().Inc()
+
+	preinitSelfMetrics(m, nil, false)
+	if v := gaugeValue(t, reg, "kconmon_ng_agent_mtr_reactive_inflight"); v != 1 {
+		t.Errorf("inflight after a reload = %v, want the 1 trace still running", v)
+	}
+	m.AgentMTRReactiveInflight.WithLabelValues().Dec()
+	if v := gaugeValue(t, reg, "kconmon_ng_agent_mtr_reactive_inflight"); v != 0 {
+		t.Errorf("inflight after the trace finished = %v, want 0", v)
 	}
 }
 

@@ -1,6 +1,11 @@
 ---
-# Minimal values for e2e testing
+# Minimal values for e2e testing. Every install passes this file first, so the image names the
+# workflow builds or retags, and loads into kind, live here and nowhere else.
 controller:
+  image:
+    repository: kconmon-ng-controller
+    tag: test
+    pullPolicy: Never
   replicaCount: 1
   leaderElection: false
   # Inert at replicaCount 1 (the chart only renders it above that), kept explicit.
@@ -8,6 +13,10 @@ controller:
     enabled: false
 
 agent:
+  image:
+    repository: kconmon-ng-agent
+    tag: test
+    pullPolicy: Never
   resources:
     limits:
       cpu: 100m
@@ -16,14 +25,22 @@ agent:
       cpu: 10m
       memory: 32Mi
 
+console:
+  image:
+    repository: kconmon-ng-console
+    tag: test
+    pullPolicy: Never
+
 config:
   checkers:
     tcp:
       enabled: true
+    # UDP and ICMP are the control in TestFaultMTUBlackHole: they must stay green on the pair the
+    # length rule black-holes.
     udp:
-      enabled: false
+      enabled: true
     icmp:
-      enabled: false
+      enabled: true
     # Faster than production so the black-hole scenario fits the e2e budget: a 10s round, a 200ms
     # per-datagram timeout (the whole bisection stays under 4s).
     pmtu:

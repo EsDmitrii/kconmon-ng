@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
@@ -25,6 +26,9 @@ const (
 	// of its budget, and the response still has to be marshalled and pushed onto the wire after
 	// that; the grace is that tail, not extra dispatch time.
 	diagnosticsWriteGrace = 10 * time.Second
+
+	// maxDiagnosticsBodyBytes bounds the request body: a handful of names and one address.
+	maxDiagnosticsBodyBytes = 64 << 10
 )
 
 const (
@@ -49,9 +53,11 @@ const (
 	externalTargetDefaultPort = 0
 )
 
-// validCheckTypes is the set of diagnostic check types the API accepts. The
-// plane field is not validated here (host plane arrives with Epic A); it is
-// forwarded verbatim.
+// podPlane is the only network plane agents probe. They never read TaskRequest.plane, so a request
+// for any other plane would run a pod probe and publish it under that plane's name.
+const podPlane = "pod"
+
+// validCheckTypes is the set of diagnostic check types the API accepts.
 var validCheckTypes = map[string]struct{}{
 	string(model.CheckTCP):  {},
 	string(model.CheckUDP):  {},
@@ -59,6 +65,17 @@ var validCheckTypes = map[string]struct{}{
 	string(model.CheckPMTU): {},
 	string(model.CheckDNS):  {},
 	string(model.CheckHTTP): {},
+	string(model.CheckMTR):  {},
+}
+
+/*
+externalCapableDiagnosticTypes mirrors the agent's externalCapableChecks (internal/agent/tasks.go):
+the only types it runs against a destination that is not another agent. The agent refuses the rest
+with success=false, which the caller would read as a failed probe, so they are a 400 here.
+*/
+var externalCapableDiagnosticTypes = map[string]struct{}{
+	string(model.CheckTCP):  {},
+	string(model.CheckICMP): {},
 	string(model.CheckMTR):  {},
 }
 
@@ -90,12 +107,11 @@ type EventPublisher interface {
 // and destination nodes to registered agents, dispatches an on-demand task to
 // the source agent, and returns the resulting model.CheckResult verbatim.
 type DiagnosticsHandler struct {
-	registry       *Registry
-	dispatcher     TaskDispatcher
-	metrics        *metrics.PrometheusMetrics
-	leaderElection bool
-	isLeader       func() bool
-	events         EventPublisher
+	registry   *Registry
+	dispatcher TaskDispatcher
+	metrics    *metrics.PrometheusMetrics
+	gate       leaderGate
+	events     EventPublisher
 	// now is the clock the write deadline is computed against; overridden in tests.
 	now func() time.Time
 }
@@ -109,27 +125,24 @@ func NewDiagnosticsHandler(
 	events EventPublisher,
 ) *DiagnosticsHandler {
 	return &DiagnosticsHandler{
-		registry:       registry,
-		dispatcher:     dispatcher,
-		metrics:        m,
-		leaderElection: leaderElection,
-		isLeader:       isLeader,
-		events:         events,
-		now:            time.Now,
+		registry:   registry,
+		dispatcher: dispatcher,
+		metrics:    m,
+		gate:       leaderGate{enabled: leaderElection, isLeader: isLeader},
+		events:     events,
+		now:        time.Now,
 	}
 }
 
 func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only the leader holds an authoritative view of registered agents and
 	// their streams; non-leaders cannot dispatch.
-	if h.leaderElection && (h.isLeader == nil || !h.isLeader()) {
-		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+	if h.gate.refuse(w) {
 		return
 	}
 
 	var req diagnosticsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, maxDiagnosticsBodyBytes, &req) {
 		return
 	}
 
@@ -158,16 +171,40 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid check type", http.StatusBadRequest)
 		return
 	}
+	if req.Type == string(model.CheckPMTU) && destKind == destinationKindExternal {
+		http.Error(w, "pmtu probes another agent's echo listener; destinationKind must be node", http.StatusBadRequest)
+		return
+	}
+	if _, ok := externalCapableDiagnosticTypes[req.Type]; !ok && destKind == destinationKindExternal {
+		reason := req.Type + " is not a one-off external check; use destinationKind node, " +
+			"or a continuous external check for an external resolver or URL"
+		if req.Type == string(model.CheckUDP) {
+			reason = "udp counts replies from the kconmon probe server, which only another agent runs, " +
+				"so destinationKind must be node"
+		}
+		http.Error(w, "external destinations support tcp, icmp and mtr checks only; "+reason, http.StatusBadRequest)
+		return
+	}
 
-	plane := req.Plane
-	if plane == "" {
-		plane = "pod"
+	if req.Plane != "" && req.Plane != podPlane {
+		http.Error(w, `plane must be "pod": agents probe the pod network only`, http.StatusBadRequest)
+		return
 	}
 
 	source, ok := h.registry.GetByNodeName(req.Source)
 	if !ok {
 		h.count(req.Type, "not_found")
 		http.Error(w, "no agent registered on source node", http.StatusNotFound)
+		return
+	}
+	// An agent that lists its planes without this type would refuse the task with success=false, which
+	// a caller reads as a failed probe; answer 501 instead, like the external-checks gate below. External
+	// destinations are probed by the same checker, so the gate applies to them too.
+	if !advertisesPlane(source.Capabilities, req.Type) {
+		h.count(req.Type, "unsupported")
+		http.Error(w,
+			"agent on node "+source.NodeName+" does not run "+req.Type+" probes ("+planeGateReason(req.Type)+")",
+			http.StatusNotImplemented)
 		return
 	}
 
@@ -177,7 +214,7 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	task := &pb.TaskRequest{
 		TaskId:    uuid.NewString(),
 		CheckType: req.Type,
-		Plane:     plane,
+		Plane:     podPlane,
 	}
 
 	// destName is what every published event reports as destination_node; the address never appears —
@@ -236,12 +273,21 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.count(req.Type, "timeout")
 			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "timeout")
 			http.Error(w, "diagnostics dispatch timed out", http.StatusGatewayTimeout)
+		case errors.Is(err, context.Canceled):
+			// The caller went away (Ctrl-C, a cancelled Console run): nothing failed and nobody reads a reply.
+			h.count(req.Type, "cancelled")
 		case errors.Is(err, ErrAgentNotSubscribed):
 			// The source agent is registered but has no active task stream, so
 			// there is no agent able to run the check.
 			h.count(req.Type, "not_found")
 			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "error")
 			http.Error(w, "source agent has no active diagnostics stream", http.StatusNotFound)
+		case errors.Is(err, ErrLeadershipLost):
+			// Demoted while the task was in flight: the caller retries against the new leader, as it
+			// does for a standby's "not the leader".
+			h.count(req.Type, "error")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "error")
+			http.Error(w, "leadership lost", http.StatusServiceUnavailable)
 		default:
 			h.count(req.Type, "error")
 			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "error")
@@ -250,15 +296,14 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.publishObserved(task.GetTaskId(), req.Type, plane, req.Source, destName, res.GetDetailsJson())
+	body := diagnosticsBody(res, req.Type, req.Source, destName, h.now())
+	h.publishObserved(task.GetTaskId(), req.Type, req.Source, destName, body)
 	w.Header().Set("Content-Type", "application/json")
 	// nosniff pins the declared JSON type so no browser will ever interpret
 	// this response as HTML, closing the theoretical XSS vector gosec's taint
 	// analysis flags for echoing agent-produced bytes.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// details_json is the agent's serialized model.CheckResult; return it
-	// verbatim so the CLI sees exactly what the agent produced.
-	if err := h.deliver(w, diagnosticsBody(res)); err != nil {
+	if err := h.deliver(w, body); err != nil {
 		// The check RAN. Nothing downstream will ever see it: the Console records an MTR snapshot
 		// from this response body and from nothing else, and there is no store on this side to park
 		// it in. Say so loudly rather than let a completed trace disappear.
@@ -296,22 +341,59 @@ func (h *DiagnosticsHandler) deliver(w http.ResponseWriter, body []byte) error {
 	return nil
 }
 
-// diagnosticsBody returns the bytes to answer a successful dispatch with. An agent that reported no
-// payload at all would otherwise make this a 200 with an empty body, which every JSON client reads
-// as "unexpected end of JSON input" instead of the reason the agent actually gave.
-func diagnosticsBody(res *pb.TaskResult) []byte {
+/*
+diagnosticsBody returns the bytes a successful dispatch answers with and publishes its terminal event
+from: the agent's serialized model.CheckResult, verbatim, so the CLI sees exactly what the agent
+produced. An agent that reported no payload gets one built from the task instead; an empty 200 reads
+as "unexpected end of JSON input" to every JSON client, and the event would never be published.
+*/
+func diagnosticsBody(res *pb.TaskResult, checkType, source, destination string, now time.Time) []byte {
 	if len(res.GetDetailsJson()) > 0 {
 		return res.GetDetailsJson()
 	}
+	ts := now
+	if res.GetTimestamp() != nil {
+		ts = res.GetTimestamp().AsTime()
+	}
 	body, err := json.Marshal(model.CheckResult{
-		Success:   res.GetSuccess(),
-		Error:     res.GetError(),
-		Timestamp: res.GetTimestamp().AsTime(),
+		Type:        model.CheckType(checkType),
+		Success:     res.GetSuccess(),
+		Source:      source,
+		Destination: destination,
+		Error:       res.GetError(),
+		Timestamp:   ts,
 	})
 	if err != nil {
 		return []byte(`{"success":false,"error":"agent reported no result payload"}`)
 	}
 	return body
+}
+
+// advertisesPlane reports whether caps allow a task of this type. An agent advertising no plane:* at all
+// predates plane capabilities and is read as "all planes" (model.CapabilityPlanePrefix).
+func advertisesPlane(caps []string, checkType string) bool {
+	listed := false
+	for _, c := range caps {
+		if c == model.CapabilityPlanePrefix+checkType {
+			return true
+		}
+		if strings.HasPrefix(c, model.CapabilityPlanePrefix) {
+			listed = true
+		}
+	}
+	return !listed
+}
+
+// planeGateReason says why an agent that lists its planes can leave checkType out.
+func planeGateReason(checkType string) string {
+	switch checkType {
+	case string(model.CheckPMTU):
+		return "older than 2.5.0 or checkers.pmtu.enabled=false"
+	case string(model.CheckMTR):
+		return "the agent does not advertise plane:mtr"
+	default:
+		return "checkers." + checkType + ".enabled=false"
+	}
 }
 
 // resolveTimeout returns the dispatch timeout: the ?timeout= query value in
@@ -326,11 +408,8 @@ func (h *DiagnosticsHandler) resolveTimeout(r *http.Request) time.Duration {
 	if err != nil || secs <= 0 {
 		return defaultDiagnosticsTimeout
 	}
-	/* CLAMPED IN SECONDS, before the multiply. time.Duration is int64 nanoseconds, so anything past
-	   ~9.2e9 seconds overflows: ?timeout=9300000000 produced a large NEGATIVE Duration, sailed past
-	   the `> maxDiagnosticsTimeout` check below, and the request was served with an already-expired
-	   context — the client got a dropped connection and an empty reply instead of the documented
-	   clamp. Comparing the integer first cannot overflow. */
+	// Clamp in seconds before multiplying: past ~9.2e9 seconds time.Duration overflows to a negative
+	// value that would slip under the cap.
 	if int64(secs) > int64(maxDiagnosticsTimeout/time.Second) {
 		return maxDiagnosticsTimeout
 	}
@@ -353,11 +432,7 @@ func (h *DiagnosticsHandler) publishDispatched(taskID, checkType, source, destin
 		}})
 		return
 	}
-	h.events.PublishEvent(&pb.Event{Payload: &pb.Event_DiagnosticProgress{
-		DiagnosticProgress: &pb.DiagnosticProgress{
-			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, State: "dispatched",
-		},
-	}})
+	h.publishProgress(taskID, checkType, source, destination, "dispatched")
 }
 
 func (h *DiagnosticsHandler) publishProgress(taskID, checkType, source, destination, state string) {
@@ -373,67 +448,53 @@ func (h *DiagnosticsHandler) publishProgress(taskID, checkType, source, destinat
 
 // publishObserved decodes the agent's CheckResult and emits either a CheckObserved (non-mtr types)
 // or an MTRCompleted (mtr, with hops).
-func (h *DiagnosticsHandler) publishObserved(taskID, checkType, plane, source, destination string, detailsJSON []byte) {
+func (h *DiagnosticsHandler) publishObserved(taskID, checkType, source, destination string, body []byte) {
 	if h.events == nil {
-		return
-	}
-	var result model.CheckResult
-	if err := json.Unmarshal(detailsJSON, &result); err != nil {
-		slog.Warn("failed to decode CheckResult for event publishing", "error", err, "taskId", taskID)
 		return
 	}
 
 	if checkType == string(model.CheckMTR) {
+		// The outer Details is shallower than the embedded CheckResult's, so it takes the field.
+		var trace struct {
+			model.CheckResult
+			Details model.MTRDetails `json:"details"`
+		}
+		if err := json.Unmarshal(body, &trace); err != nil {
+			slog.Warn("failed to decode CheckResult for event publishing", "error", err, "taskId", taskID)
+			return
+		}
 		h.events.PublishEvent(&pb.Event{Payload: &pb.Event_MtrCompleted{
 			MtrCompleted: &pb.MTRCompleted{
 				TaskId: taskID, SourceNode: source, DestinationNode: destination,
-				Success: result.Success, Error: result.Error, Hops: mtrHopsFromDetails(result.Details),
+				Success: trace.Success, Error: trace.Error, Hops: mtrHopsToProto(trace.Details.Hops),
 			},
 		}})
 		return
 	}
 
+	var result model.CheckResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		slog.Warn("failed to decode CheckResult for event publishing", "error", err, "taskId", taskID)
+		return
+	}
 	h.events.PublishEvent(&pb.Event{Payload: &pb.Event_CheckObserved{
 		CheckObserved: &pb.CheckObserved{
-			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, Plane: plane,
+			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, Plane: podPlane,
 			Success: result.Success, DurationNs: result.Duration.Nanoseconds(), Error: result.Error,
 		},
 	}})
 }
 
-// mtrHopsFromDetails pulls the hop list out of a CheckResult.Details that was decoded into `any`.
-func mtrHopsFromDetails(details any) []*pb.MTRHop {
-	md, isMap := details.(map[string]any)
-	if !isMap {
-		return nil
-	}
-	raw, isSlice := md["hops"].([]any)
-	if !isSlice {
-		return nil
-	}
-	hops := make([]*pb.MTRHop, 0, len(raw))
-	for _, item := range raw {
-		hm, isHop := item.(map[string]any)
-		if !isHop {
-			continue
-		}
-		hops = append(hops, &pb.MTRHop{
-			Number:    int32(asFloat(hm["number"])),
-			Ip:        asString(hm["ip"]),
-			Hostname:  asString(hm["hostname"]),
-			RttNs:     int64(asFloat(hm["rtt"])),
-			LossRatio: asFloat(hm["lossRatio"]),
+func mtrHopsToProto(hops []model.MTRHop) []*pb.MTRHop {
+	out := make([]*pb.MTRHop, 0, len(hops))
+	for i := range hops {
+		out = append(out, &pb.MTRHop{
+			Number:    int32(hops[i].Number), //nolint:gosec // G115: a hop number is a TTL, at most 255
+			Ip:        hops[i].IP,
+			Hostname:  hops[i].Hostname,
+			RttNs:     hops[i].RTT.Nanoseconds(),
+			LossRatio: hops[i].LossRatio,
 		})
 	}
-	return hops
-}
-
-func asFloat(v any) float64 {
-	f, _ := v.(float64) // json.Unmarshal into any always yields float64 for JSON numbers
-	return f
-}
-
-func asString(v any) string {
-	s, _ := v.(string)
-	return s
+	return out
 }

@@ -32,7 +32,7 @@ func TestRenderHonoursACustomMetricPrefix(t *testing.T) {
 		{
 			name:   "two families in one comparison",
 			rule:   Rule{Kind: KindAgentMissing},
-			golden: `acme_net_controller_registered_agents < acme_net_controller_expected_agents`,
+			golden: `(acme_net_controller_expected_agents - (acme_net_controller_registered_agents - (acme_net_controller_external_agents or acme_net_controller_registered_agents * 0)) > 0) and (acme_net_controller_leader == 1)`,
 		},
 		{
 			name: "family inside a histogram_quantile",
@@ -173,12 +173,12 @@ func TestRenderGoldenExpressions(t *testing.T) {
 		{
 			name:   "agent-missing takes no params",
 			rule:   Rule{Kind: KindAgentMissing},
-			golden: `kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents`,
+			golden: `(kconmon_ng_controller_expected_agents - (kconmon_ng_controller_registered_agents - (kconmon_ng_controller_external_agents or kconmon_ng_controller_registered_agents * 0)) > 0) and (kconmon_ng_controller_leader == 1)`,
 		},
 		{
 			name:   "agent-missing tolerates an empty params map",
 			rule:   Rule{Kind: KindAgentMissing, Params: map[string]any{}},
-			golden: `kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents`,
+			golden: `(kconmon_ng_controller_expected_agents - (kconmon_ng_controller_registered_agents - (kconmon_ng_controller_external_agents or kconmon_ng_controller_registered_agents * 0)) > 0) and (kconmon_ng_controller_leader == 1)`,
 		},
 		{
 			name: "external-target-down all targets",

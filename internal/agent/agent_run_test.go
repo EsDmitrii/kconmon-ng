@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller"
+	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
@@ -47,12 +49,22 @@ func freePorts(t *testing.T, n int) []int {
 }
 
 // testRunConfig builds a config for a full Run() with every checker disabled
-// and fresh loopback ports, so tests opt in to exactly what they exercise.
+// and fresh ports, so tests opt in to exactly what they exercise. grpcPort is
+// the agent's UDP echo port, so it is reserved as UDP: a free TCP number says
+// nothing about a UDP socket another test package holds.
 func testRunConfig(t *testing.T, controllerAddr string) *config.Config {
 	t.Helper()
-	ports := freePorts(t, 3)
+	ports := freePorts(t, 2)
+	echoPort := freeUDPPort(t)
+	for echoPort == ports[0] || echoPort == ports[1] {
+		echoPort = freeUDPPort(t)
+	}
+	ports = append(ports, echoPort)
 	cfg := config.DefaultConfig()
 	cfg.ControllerAddress = controllerAddr
+	// Autodetect over the loopback controller is refused (peers cannot probe 127.0.0.1), and nothing
+	// dials the agent's own address in these tests, so a documentation address stands in.
+	cfg.Agent.AdvertiseAddress = "192.0.2.10"
 	cfg.HTTPPort = ports[0]
 	cfg.MetricsPort = ports[1]
 	cfg.GRPCPort = ports[2]
@@ -171,11 +183,11 @@ the whole duration of a controller outage.
 */
 func TestProbesContinueAcrossControllerDrop(t *testing.T) {
 	// The agent's own meta must pass the controller's validateAgentMeta.
-	// Its pod IP is IPv6 loopback so the IPv4-loopback peer is not filtered
-	// out as self by Scheduler.UpdatePeers. Node name and zone travel through
-	// the config now (M6-1); only the pod env is still read directly.
+	// Its advertised address (testRunConfig) is not loopback, so the
+	// IPv4-loopback peer is not filtered out as self by Scheduler.UpdatePeers.
+	// Node name and zone travel through the config now (M6-1); only the pod
+	// env is still read directly.
 	t.Setenv("KCONMON_NG_POD_NAME", "m2-agent-pod")
-	t.Setenv("KCONMON_NG_POD_IP", "::1")
 
 	var lc net.ListenConfig
 	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -227,11 +239,12 @@ func TestProbesContinueAcrossControllerDrop(t *testing.T) {
 	}
 }
 
-// freeUDPPort reserves a loopback UDP port and releases it for the caller to bind.
+// freeUDPPort reserves a UDP port on the wildcard address, the way ProbeServer binds, and releases
+// it for the caller to bind: a loopback-only reservation misses a socket held on another address.
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
 	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	conn, err := lc.ListenPacket(context.Background(), "udp", ":0")
 	if err != nil {
 		t.Fatalf("reserving a UDP port: %v", err)
 	}
@@ -249,7 +262,6 @@ probes fail, which they only do if the peer's port, not the agent's own, was dia
 */
 func TestProbesReachThePeerOnItsReportedUDPPort(t *testing.T) {
 	t.Setenv("KCONMON_NG_POD_NAME", "m2-agent-pod")
-	t.Setenv("KCONMON_NG_POD_IP", "::1")
 
 	peerPort := freeUDPPort(t)
 	peerEcho := NewProbeServer(peerPort)
@@ -304,6 +316,58 @@ func TestProbesReachThePeerOnItsReportedUDPPort(t *testing.T) {
 	waitFor(t, 10*time.Second, "probes failing once the peer's reported echo port is gone", func() bool {
 		return failed.Load() >= 3
 	})
+}
+
+/*
+Under a sparse plan the agent's peer list is a few agents, and its echo refuses the echo endpoint of
+every registered agent all the same: the controller sends the fleet's with each peer list. A stranger
+registered on 0 (older than 2.4.0) echoes on this agent's own port.
+*/
+func TestRunRefusesTheEchoOfAnAgentOutsideItsPlan(t *testing.T) {
+	t.Setenv("KCONMON_NG_POD_NAME", "fleet-agent-pod")
+
+	var lc net.ListenConfig
+	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for the controller: %v", err)
+	}
+	reg := controller.NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "peer", NodeName: "peer-node", PodIP: "10.0.0.2", UDPPort: 9191})
+	reg.Register(model.AgentInfo{ID: "stranger", NodeName: "stranger-node", PodIP: "10.0.0.3", UDPPort: 9192})
+	reg.Register(model.AgentInfo{ID: "old", NodeName: "old-node", PodIP: "10.0.0.4"})
+	srv := controller.NewGRPCServer(reg, metrics.NewPrometheusMetrics("test_fleet_echo", prometheus.NewRegistry()), false, nil, false)
+	srv.SetPeerPlan(meshplan.Plan{"fleet-agent-node-fleet-agent-pod": {"peer"}})
+	gs := grpc.NewServer()
+	srv.RegisterService(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	cfg := testRunConfig(t, lis.Addr().String())
+	cfg.Agent.NodeName = "fleet-agent-node"
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	startRun(t, a)
+
+	self := netip.MustParseAddr(cfg.Agent.AdvertiseAddress)
+	refused := func(src string) bool {
+		return !a.probeServer.answers(netip.MustParseAddrPort(src), self, cfg.GRPCPort)
+	}
+	waitFor(t, 10*time.Second, "the fleet's echo endpoints to reach the echo", func() bool {
+		return refused("10.0.0.3:9192")
+	})
+	if peers := a.scheduler.Peers(); len(peers) != 1 || peers[0].AgentID != "peer" {
+		t.Fatalf("peers = %+v, want the plan's one", peers)
+	}
+	for _, src := range []string{"10.0.0.2:9191", fmt.Sprintf("10.0.0.4:%d", cfg.GRPCPort)} {
+		if !refused(src) {
+			t.Errorf("the echo answered %s, a registered agent's echo", src)
+		}
+	}
+	if refused("10.0.0.3:45000") {
+		t.Error("the echo refused a probe from an agent's ordinary port")
+	}
 }
 
 // invalidArgumentRegistry rejects every registration the way the controller
@@ -448,5 +512,54 @@ func TestReregisterLogsConfigRejectionAsErrorAndKeepsRetrying(t *testing.T) {
 	}
 	if strings.Contains(out, "re-registration failed, retrying") {
 		t.Errorf("InvalidArgument rejection was logged with the generic retry WARN instead of a config-error message; logs:\n%s", out)
+	}
+}
+
+// rejectingReadvertiseRegistry keeps the peer watch open, so only a reload registers again.
+type rejectingReadvertiseRegistry struct {
+	rejectingReregisterRegistry
+}
+
+func (*rejectingReadvertiseRegistry) WatchPeers(_ *pb.WatchPeersRequest, stream grpc.ServerStreamingServer[pb.PeerUpdate]) error {
+	<-stream.Context().Done()
+	return nil
+}
+
+// Re-advertising capabilities after a reload is a re-registration: a payload rejection is logged as
+// the config error it is, and retried.
+func TestReadvertiseLogsConfigRejectionAsErrorAndKeepsRetrying(t *testing.T) {
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var lc net.ListenConfig
+	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for the fake controller: %v", err)
+	}
+	reg := &rejectingReadvertiseRegistry{}
+	gs := grpc.NewServer()
+	pb.RegisterAgentRegistryServer(gs, reg)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	cfg := testRunConfig(t, lis.Addr().String())
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	startRun(t, a)
+	waitFor(t, 10*time.Second, "the first registration", func() bool { return reg.registerCalls.Load() >= 1 })
+
+	next := cloneConfig(cfg)
+	next.Checkers.ICMP.Enabled = true
+	a.ApplyConfig(next)
+	waitFor(t, 20*time.Second, "a re-advertise retry after an InvalidArgument rejection", func() bool {
+		return reg.registerCalls.Load() >= 3
+	})
+
+	if out := logs.String(); !strings.Contains(out, `level=ERROR msg="controller rejected the re-registration payload`) {
+		t.Errorf("no ERROR log for the InvalidArgument rejection of a re-advertise; logs:\n%s", out)
 	}
 }

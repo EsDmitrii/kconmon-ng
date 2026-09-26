@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -597,5 +598,111 @@ func TestReconcilerResendsTheDesiredStatePeriodically(t *testing.T) {
 	// And it is the same desired state, re-asserted rather than recomputed into something else.
 	if len(h.ctrl.puts[1]) != len(h.ctrl.puts[0]) {
 		t.Errorf("resync PUT covered %d agents, want the same %d as the first", len(h.ctrl.puts[1]), len(h.ctrl.puts[0]))
+	}
+}
+
+// The controller refuses a PUT body over its limit whole, which would freeze every agent's
+// continuous checks. So the reconciler leaves out whole definitions until the desired state fits,
+// newest first: a definition added later never evicts one already running.
+func TestReconcilerDropsTheNewestDefinitionsThatDoNotFitTheBodyLimit(t *testing.T) {
+	h := newReconcileHarness(t)
+	agents := make([]controllerclient.Agent, 0, 400)
+	for i := range 400 {
+		agents = append(agents, agentAt(fmt.Sprintf("node-%03d", i), "zone-a"))
+	}
+	h.topo.snap = topologyOf(agents...)
+	// About 7.5 KB per spec, so each definition on all 400 agents is about 3 MB of the 8 MiB body.
+	params := json.RawMessage(`{"pad":"` + strings.Repeat("x", 7500) + `"}`)
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{"new", "old", "mid"} {
+		h.addContinuous(id, "tcp", "all")
+		def := h.st.definitions[id]
+		def.Params = params
+		def.CreatedAt = base.Add(map[string]time.Duration{"old": 0, "mid": time.Hour, "new": 2 * time.Hour}[id])
+		h.st.definitions[id] = def
+	}
+
+	h.recon.Tick(context.Background())
+
+	if len(h.ctrl.puts) != 1 {
+		t.Fatalf("PUTs = %d, want 1", len(h.ctrl.puts))
+	}
+	body, err := json.Marshal(map[string]any{"agents": h.ctrl.puts[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > controllerclient.MaxExternalChecksBodyBytes {
+		t.Errorf("PUT body = %d bytes, over the controller's %d", len(body), controllerclient.MaxExternalChecksBodyBytes)
+	}
+	for agent, specs := range h.ctrl.puts[0] {
+		got := make([]string, 0, len(specs))
+		for _, s := range specs {
+			got = append(got, s.DefinitionID)
+		}
+		if strings.Join(got, ",") != "mid,old" {
+			t.Fatalf("agent %s is assigned %v, want mid and old: the newest definition is the one left out", agent, got)
+		}
+	}
+	if got := testutil.ToFloat64(h.m.ExternalSpecsSkipped.WithLabelValues("over-budget")); got != 1 {
+		t.Errorf("ExternalSpecsSkipped{over-budget} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(h.m.ExternalSeriesProjected.WithLabelValues()); got != 800 {
+		t.Errorf("ExternalSeriesProjected = %v, want 800: the series actually pushed", got)
+	}
+}
+
+// A definition already warned about for one reason is left out for another one later: that is new
+// to the operator and gets its own line.
+func TestReconcilerWarnsAgainWhenADefinitionIsLeftOutForANewReason(t *testing.T) {
+	logs := captureReconcileLogs(t)
+	h := newReconcileHarness(t)
+	agents := make([]controllerclient.Agent, 0, 400)
+	for i := range 400 {
+		agents = append(agents, agentAt(fmt.Sprintf("node-%03d", i), "zone-a"))
+	}
+	h.topo.snap = topologyOf(agents...)
+	params := json.RawMessage(`{"pad":"` + strings.Repeat("x", 7500) + `"}`)
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for i, id := range []string{"old", "mid", "new"} {
+		h.addContinuous(id, "tcp", "all")
+		def := h.st.definitions[id]
+		def.Params = params
+		def.CreatedAt = base.Add(time.Duration(i) * time.Hour)
+		h.st.definitions[id] = def
+	}
+	def := h.st.definitions["new"]
+	def.CheckType = "mtr"
+	h.st.definitions["new"] = def
+
+	h.recon.Tick(context.Background())
+	if got := testutil.ToFloat64(h.m.ExternalSpecsSkipped.WithLabelValues("check-type")); got != 1 {
+		t.Fatalf("ExternalSpecsSkipped{check-type} = %v, want 1", got)
+	}
+
+	def.CheckType = "tcp"
+	h.st.definitions["new"] = def
+	h.recon.Tick(context.Background())
+	if got := testutil.ToFloat64(h.m.ExternalSpecsSkipped.WithLabelValues("over-budget")); got != 1 {
+		t.Fatalf("ExternalSpecsSkipped{over-budget} = %v, want 1", got)
+	}
+	if !strings.Contains(logs.String(), "request body limit") {
+		t.Errorf("no over-budget line for a definition first warned about as check-type; logs:\n%s", logs.String())
+	}
+}
+
+// A 413 is not a transient failure: the controller keeps the last assignment it accepted until the
+// desired state shrinks, so it gets its own result.
+func TestReconcilerCountsABodyTheControllerRefusesAsTooLarge(t *testing.T) {
+	h := newReconcileHarness(t)
+	h.addContinuous("def-1", "tcp", "all")
+	h.ctrl.err = fmt.Errorf("controller external-checks: %w: request body exceeds 8388608 bytes", controllerclient.ErrDesiredStateTooLarge)
+
+	h.recon.Tick(context.Background())
+
+	if got := h.reconcileCount("too-large"); got != 1 {
+		t.Errorf("ExternalReconciles{too-large} = %v, want 1", got)
+	}
+	if got := h.reconcileCount("error"); got != 0 {
+		t.Errorf("ExternalReconciles{error} = %v, want 0", got)
 	}
 }

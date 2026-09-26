@@ -79,7 +79,7 @@ func (f *fakeK8sEventStore) filter(t *testing.T) store.K8sEventFilter {
 }
 
 // The 503 must name BOTH knobs: the one that makes the endpoint exist
-// (database.mode) and the one that makes it non-empty (kubernetesContext),
+// (database.dsnFile) and the one that makes it non-empty (kubernetesContext),
 // or an operator with a database and no reader will fix the wrong thing.
 func TestK8sEventsWithoutStoreReturn503NamingBothKnobs(t *testing.T) {
 	s := newM5TestServer(t, "viewer", Deps{})
@@ -90,8 +90,11 @@ func TestK8sEventsWithoutStoreReturn503NamingBothKnobs(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 		t.Errorf("Content-Type = %q, want application/problem+json", ct)
 	}
-	for _, knob := range []string{"console.database.mode", "console.kubernetesContext.enabled"} {
-		if !strings.Contains(w.Body.String(), knob) {
+	for _, knob := range []string{
+		"database.dsnFile in the console config (Helm: database.existingSecret)",
+		"kubernetesContext.enabled (Helm: console.kubernetesContext.enabled)",
+	} {
+		if !strings.Contains(problemDetail(t, w.Body.Bytes()), knob) {
 			t.Errorf("503 detail = %s, want it to name %s", w.Body, knob)
 		}
 	}

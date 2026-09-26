@@ -106,8 +106,7 @@ func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 	const keys = 1000
 	for i := range keys {
 		key := fmt.Sprintf("sess:sweep-%d", i)
-		// Long enough for 1000 inserts under -race on a slow runner: a TTL shorter than one
-		// kvSweepInterval let the sweeper drain keys before the count below was read.
+		// Well past the time 1000 inserts take under -race, so none expires before the count below.
 		if err := kv.Set(context.Background(), key, []byte("x"), 500*time.Millisecond); err != nil {
 			t.Fatalf("Set %s: %v", key, err)
 		}
@@ -117,7 +116,7 @@ func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 		t.Fatalf("expected all %d keys present before expiry, got %d", keys, got)
 	}
 
-	// Advance real time past both the TTL and several sweeper ticks, without
+	// Advance real time past both the TTL and a sweeper tick, without
 	// ever calling Get (which would evict lazily and defeat the point of
 	// this test).
 	deadline := time.Now().Add(5 * time.Second)
@@ -268,4 +267,133 @@ func TestInProcessKVConcurrentSetGetDelete(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// SetNX is the session write lock's acquire: it must refuse a live key and take an expired one.
+func TestInProcessKVSetNXOnlyWhenAbsent(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ctx := context.Background()
+
+	if ok, err := kv.SetNX(ctx, "sesslock:a", []byte("one"), time.Minute); err != nil || !ok {
+		t.Fatalf("SetNX on an absent key = %v, %v; want true, nil", ok, err)
+	}
+	if ok, err := kv.SetNX(ctx, "sesslock:a", []byte("two"), time.Minute); err != nil || ok {
+		t.Fatalf("SetNX on a live key = %v, %v; want false, nil", ok, err)
+	}
+	if val, _, _ := kv.Get(ctx, "sesslock:a"); string(val) != "one" {
+		t.Errorf("a refused SetNX changed the value to %q", val)
+	}
+	if err := kv.Set(ctx, "sesslock:b", []byte("stale"), -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := kv.SetNX(ctx, "sesslock:b", []byte("fresh"), time.Minute); err != nil || !ok {
+		t.Fatalf("SetNX on an expired key = %v, %v; want true, nil", ok, err)
+	}
+	if val, _, _ := kv.Get(ctx, "sesslock:b"); string(val) != "fresh" {
+		t.Errorf("SetNX on an expired key left %q, want %q", val, "fresh")
+	}
+}
+
+// SetXX is how a session record is rewritten: a key deleted in the meantime (a logout) stays deleted.
+func TestInProcessKVSetXXOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ctx := context.Background()
+
+	if ok, err := kv.SetXX(ctx, "sess:a", []byte("x"), time.Minute); err != nil || ok {
+		t.Fatalf("SetXX on an absent key = %v, %v; want false, nil", ok, err)
+	}
+	if _, found, _ := kv.Get(ctx, "sess:a"); found {
+		t.Fatal("a refused SetXX created the key")
+	}
+	if err := kv.Set(ctx, "sess:a", []byte("old"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := kv.SetXX(ctx, "sess:a", []byte("new"), time.Minute); err != nil || !ok {
+		t.Fatalf("SetXX on a live key = %v, %v; want true, nil", ok, err)
+	}
+	if val, found, _ := kv.Get(ctx, "sess:a"); !found || string(val) != "new" {
+		t.Errorf("after SetXX: %q found=%v, want %q", val, found, "new")
+	}
+	if ok, _ := kv.SetXX(ctx, "sess:a", []byte("newer"), -time.Second); !ok {
+		t.Fatal("SetXX on a live key refused")
+	}
+	if _, found, _ := kv.Get(ctx, "sess:a"); found {
+		t.Error("SetXX kept the old expiry: an already-expired ttl left the key live")
+	}
+	if err := kv.Set(ctx, "sess:b", []byte("old"), -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := kv.SetXX(ctx, "sess:b", []byte("new"), time.Minute); ok {
+		t.Error("SetXX brought an expired key back")
+	}
+}
+
+// DeleteIfEqual is the session write lock's release: it removes the key only while it still holds the
+// caller's token, so a holder whose lease lapsed cannot drop the lock another caller took since.
+func TestInProcessKVDeleteIfEqualOnlyDeletesTheCallersValue(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ctx := context.Background()
+
+	if ok, err := kv.DeleteIfEqual(ctx, "sesslock:a", []byte("mine")); err != nil || ok {
+		t.Fatalf("DeleteIfEqual on an absent key = %v, %v; want false, nil", ok, err)
+	}
+	if ok, _ := kv.SetNX(ctx, "sesslock:a", []byte("theirs"), time.Minute); !ok {
+		t.Fatal("SetNX on an absent key refused")
+	}
+	if ok, err := kv.DeleteIfEqual(ctx, "sesslock:a", []byte("mine")); err != nil || ok {
+		t.Fatalf("DeleteIfEqual with another holder's token = %v, %v; want false, nil", ok, err)
+	}
+	if val, found, _ := kv.Get(ctx, "sesslock:a"); !found || string(val) != "theirs" {
+		t.Fatalf("a refused DeleteIfEqual changed the key: %q found=%v", val, found)
+	}
+	if ok, err := kv.DeleteIfEqual(ctx, "sesslock:a", []byte("theirs")); err != nil || !ok {
+		t.Fatalf("DeleteIfEqual with the holder's token = %v, %v; want true, nil", ok, err)
+	}
+	if _, found, _ := kv.Get(ctx, "sesslock:a"); found {
+		t.Error("DeleteIfEqual reported a delete but the key is still there")
+	}
+
+	if err := kv.Set(ctx, "sesslock:b", []byte("mine"), -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := kv.DeleteIfEqual(ctx, "sesslock:b", []byte("mine")); ok {
+		t.Error("DeleteIfEqual reported deleting a key that had already expired")
+	}
+}
+
+// Of many callers racing to release one lock with different tokens, only the holder's call deletes.
+func TestInProcessKVDeleteIfEqualConcurrentReleasesDeleteOnce(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ctx := context.Background()
+	if err := kv.Set(ctx, "sesslock:c", []byte("token-7"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var deleted []int
+	for i := range 16 {
+		wg.Go(func() {
+			ok, err := kv.DeleteIfEqual(ctx, "sesslock:c", fmt.Appendf(nil, "token-%d", i%8))
+			if err != nil {
+				t.Errorf("DeleteIfEqual: %v", err)
+			}
+			if ok {
+				mu.Lock()
+				deleted = append(deleted, i)
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if len(deleted) != 1 || deleted[0]%8 != 7 {
+		t.Fatalf("callers that deleted = %v, want exactly one holding token-7", deleted)
+	}
 }

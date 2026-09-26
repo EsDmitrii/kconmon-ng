@@ -16,8 +16,8 @@ metadata:
   labels:
     app: kconmon-e2e-external-agent
 data:
-  # Same shape as packaging/agent/config.yaml. The checkers mirror e2e/testdata/values.yaml (TCP
-  # only), so the external agent runs the same probes as the fleet it joins.
+  # Same shape as packaging/agent/config.yaml. TCP only: the leg asserts the TCP matrix, and the
+  # fleet's UDP and ICMP exist for the fault leg, which runs before this agent joins.
   config.yaml: |
     controllerAddress: "__CONTROLLER_ADDRESS__"
     httpPort: 8080

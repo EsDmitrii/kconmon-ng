@@ -2,12 +2,14 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
+	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -17,15 +19,25 @@ import (
 // the buffer only has to absorb a burst of PUTs while a stream drains.
 const externalSubscriberBuffer = 16
 
+// maxExternalChecksBodyBytes bounds the PUT body, which carries the whole desired state: at a few
+// hundred bytes per spec that is roughly 30,000 specs across the fleet. The console sheds definitions
+// to fit its mirror, controllerclient.MaxExternalChecksBodyBytes; the two must stay equal.
+const maxExternalChecksBodyBytes = 8 << 20
+
 // validExternalCheckTypes is the set of check types a CONTINUOUS external
 // check may use. udp and mtr are deliberately absent — see the
 // ExternalCheckSpec comment in api/proto/kconmon.proto.
 var validExternalCheckTypes = map[string]struct{}{
-	"tcp":  {},
-	"icmp": {},
-	"dns":  {},
-	"http": {},
+	string(model.CheckTCP):  {},
+	string(model.CheckICMP): {},
+	string(model.CheckDNS):  {},
+	string(model.CheckHTTP): {},
 }
+
+var (
+	errExternalCheckType   = errors.New("checkType must be one of tcp, icmp, dns, http")
+	errExternalCheckParams = errors.New("params is not valid JSON")
+)
 
 // ExternalCheckManager owns the continuous external-check assignment of every agent and fans
 // changes out to the agents' WatchExternalChecks streams; it is TaskManager's sibling and copies
@@ -35,16 +47,17 @@ type ExternalCheckManager struct {
 	// assignments holds only the SPECS per agent, never a timestamp: the timestamp is stamped per
 	// send.
 	assignments map[string][]*pb.ExternalCheckSpec
-	/* A SET of streams per agent id; see TaskManager.subscribers for why one-per-id was wrong. The
-	   short version: the id comes off the wire, so a second subscriber under an existing id took
-	   over that agent's assignment feed and, on disconnect, removed the id entirely — the real
-	   agent then never received another assignment while looking perfectly healthy. */
+	// resync names the agents whose last push could not be queued; the next apply pushes their
+	// desired state even when it matches the record, an empty one included.
+	resync map[string]struct{}
+	// A set of streams per agent id, for the reason TaskManager.subscribers gives.
 	subscribers map[string]map[chan *pb.ExternalCheckAssignment]struct{}
 }
 
 func NewExternalCheckManager() *ExternalCheckManager {
 	return &ExternalCheckManager{
 		assignments: make(map[string][]*pb.ExternalCheckSpec),
+		resync:      make(map[string]struct{}),
 		subscribers: make(map[string]map[chan *pb.ExternalCheckAssignment]struct{}),
 	}
 }
@@ -102,6 +115,13 @@ func (m *ExternalCheckManager) Assignment(agentID string) *pb.ExternalCheckAssig
 // Apply installs desired as the complete assignment state and pushes ONLY the agents whose
 // assignment actually changed.
 func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec) (changed int) {
+	return m.apply(desired, nil)
+}
+
+// apply is Apply with unknown: an agent named there is stored only when it already holds an
+// assignment, so an id the registry never knew is not recorded while a briefly evicted agent still
+// gets this PUT's specs.
+func (m *ExternalCheckManager) apply(desired map[string][]*pb.ExternalCheckSpec, unknown map[string]struct{}) (changed int) {
 	type push struct {
 		agentID string
 		specs   []*pb.ExternalCheckSpec
@@ -117,10 +137,14 @@ func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec)
 		if len(specs) == 0 {
 			continue // handled by the removal sweep below
 		}
-		if sameSpecs(m.assignments[agentID], specs) {
+		if _, ok := unknown[agentID]; ok && len(m.assignments[agentID]) == 0 {
+			continue
+		}
+		if _, again := m.resync[agentID]; !again && sameSpecs(m.assignments[agentID], specs) {
 			continue
 		}
 		m.assignments[agentID] = specs
+		delete(m.resync, agentID)
 		pushes = append(pushes, push{agentID: agentID, specs: specs, chans: subscriberChans(m.subscribers[agentID])})
 	}
 	for agentID := range m.assignments {
@@ -128,6 +152,12 @@ func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec)
 			continue
 		}
 		delete(m.assignments, agentID)
+		delete(m.resync, agentID)
+		pushes = append(pushes, push{agentID: agentID, chans: subscriberChans(m.subscribers[agentID])})
+	}
+	// What is left holds nothing now: a removal whose empty assignment never reached the agent.
+	for agentID := range m.resync {
+		delete(m.resync, agentID)
 		pushes = append(pushes, push{agentID: agentID, chans: subscriberChans(m.subscribers[agentID])})
 	}
 	m.mu.Unlock()
@@ -150,16 +180,12 @@ func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec)
 			}
 		}
 		if !queued {
-			/* FORGET what we recorded for this agent, or the drop is permanent.
-			   m.assignments was written before the push, so the console's periodic resync — which
-			   re-PUTs the identical desired state — matched sameSpecs and skipped the very agent
-			   that never received the message. The comment here used to name that resync as the
-			   recovery path; it was not one. Clearing the entry makes the next Apply see a
-			   difference and push again. */
+			// The record already says the agent has this state, so without the mark the console's
+			// identical re-PUT would match it and skip the agent.
 			m.mu.Lock()
-			delete(m.assignments, pushes[i].agentID)
+			m.resync[pushes[i].agentID] = struct{}{}
 			m.mu.Unlock()
-			slog.Warn("external-check assignment could not be queued; it will be re-pushed",
+			slog.Warn("external-check assignment could not be queued; the next PUT re-pushes it",
 				"agent", pushes[i].agentID)
 		}
 	}
@@ -183,6 +209,7 @@ for no gain.
 func (m *ExternalCheckManager) Reset() {
 	m.mu.Lock()
 	m.assignments = make(map[string][]*pb.ExternalCheckSpec)
+	m.resync = make(map[string]struct{})
 	m.mu.Unlock()
 }
 
@@ -259,14 +286,13 @@ type externalChecksResponse struct {
 }
 
 // ExternalChecksHandler serves PUT /api/v1/external-checks: it validates the
-// desired state, drops agent IDs the registry does not know, and hands the
-// result to the ExternalCheckManager for change detection and fan-out.
+// desired state, leaves agent IDs the registry does not know as they are, and
+// hands the result to the ExternalCheckManager for change detection and fan-out.
 type ExternalChecksHandler struct {
-	registry       *Registry
-	manager        *ExternalCheckManager
-	metrics        *metrics.PrometheusMetrics
-	leaderElection bool
-	isLeader       func() bool
+	registry *Registry
+	manager  *ExternalCheckManager
+	metrics  *metrics.PrometheusMetrics
+	gate     leaderGate
 }
 
 func NewExternalChecksHandler(
@@ -277,25 +303,22 @@ func NewExternalChecksHandler(
 	isLeader func() bool,
 ) *ExternalChecksHandler {
 	return &ExternalChecksHandler{
-		registry:       registry,
-		manager:        manager,
-		metrics:        m,
-		leaderElection: leaderElection,
-		isLeader:       isLeader,
+		registry: registry,
+		manager:  manager,
+		metrics:  m,
+		gate:     leaderGate{enabled: leaderElection, isLeader: isLeader},
 	}
 }
 
 func (h *ExternalChecksHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only the leader holds an authoritative view of registered agents and their streams; non-leaders
 	// cannot fan out.
-	if h.leaderElection && (h.isLeader == nil || !h.isLeader()) {
-		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+	if h.gate.refuse(w) {
 		return
 	}
 
 	var req externalChecksRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, maxExternalChecksBodyBytes, &req) {
 		return
 	}
 
@@ -307,15 +330,19 @@ func (h *ExternalChecksHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 
 	desired := make(map[string][]*pb.ExternalCheckSpec, len(req.Agents))
 	unknown := []string{}
+	unknownSet := map[string]struct{}{}
 
 	for agentID, specs := range req.Agents {
 		if _, ok := known[agentID]; !ok {
 			// The Console's topology view can legitimately lag the registry, so
 			// an unfamiliar agent ID is a warning and not a 400: rejecting the
 			// whole desired state would block every other agent's assignment.
-			slog.Warn("ignoring external checks for unknown agent", "agent", agentID, "specs", len(specs))
+			// An agent that already holds an assignment gets this PUT's specs, not a sweep and not its old
+			// list: one evicted between the Console's topology read and this PUT re-registers within
+			// seconds, and the Console re-PUTs an unchanged state only every 2 minutes.
+			slog.Warn("external checks for an agent the registry does not know", "agent", agentID, "specs", len(specs))
 			unknown = append(unknown, agentID)
-			continue
+			unknownSet[agentID] = struct{}{}
 		}
 
 		converted := make([]*pb.ExternalCheckSpec, 0, len(specs))
@@ -330,7 +357,7 @@ func (h *ExternalChecksHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		desired[agentID] = converted
 	}
 
-	changed := h.manager.Apply(desired)
+	changed := h.manager.apply(desired, unknownSet)
 	assigned := h.manager.AssignedCount()
 	h.metrics.ControllerExternalAssignments.WithLabelValues().Set(float64(assigned))
 
@@ -346,12 +373,12 @@ func (h *ExternalChecksHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 // here: everything else is the agent's own business.
 func (s *externalCheckSpecJSON) toProto() (*pb.ExternalCheckSpec, error) {
 	if _, ok := validExternalCheckTypes[s.CheckType]; !ok {
-		return nil, &externalValidationError{msg: "checkType must be one of tcp, icmp, dns, http"}
+		return nil, errExternalCheckType
 	}
 
 	params, err := canonicalJSON(s.Params)
 	if err != nil {
-		return nil, &externalValidationError{msg: "params is not valid JSON"}
+		return nil, errExternalCheckParams
 	}
 
 	return &pb.ExternalCheckSpec{
@@ -368,11 +395,6 @@ func (s *externalCheckSpecJSON) toProto() (*pb.ExternalCheckSpec, error) {
 		ParamsJson: params,
 	}, nil
 }
-
-// externalValidationError is a 400-worthy body problem.
-type externalValidationError struct{ msg string }
-
-func (e *externalValidationError) Error() string { return e.msg }
 
 // canonicalJSON re-encodes raw through Go's map encoder, which sorts object keys; without it, two
 // semantically identical params objects that differ only in key order would compare unequal and

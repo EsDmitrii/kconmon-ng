@@ -1,5 +1,5 @@
 -- name: GetUserByUsername :one
-SELECT id, username, password_hash, display_name, disabled, created_at, updated_at
+SELECT id, username, password_hash, display_name, disabled, created_at, updated_at, session_epoch
 FROM users
 WHERE username = $1;
 
@@ -13,10 +13,15 @@ WHERE id = $1;
 -- name: CreateUser :one
 INSERT INTO users (username, password_hash, display_name)
 VALUES ($1, $2, $3)
-RETURNING id, username, password_hash, display_name, disabled, created_at, updated_at;
+RETURNING id, username, password_hash, display_name, disabled, created_at, updated_at, session_epoch;
 
 -- name: UpdateUserPassword :execrows
 UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1;
+
+-- name: RehashUserPassword :execrows
+-- A login's hash upgrade: a password reset after the login read old_hash wins.
+UPDATE users SET password_hash = sqlc.arg(new_hash), updated_at = now()
+WHERE id = sqlc.arg(id) AND password_hash = sqlc.arg(old_hash);
 
 -- name: ListUsers :many
 -- password_hash is NEVER selected here: this result set is exposed to admin UI and API responses.
@@ -28,7 +33,12 @@ ORDER BY username;
 SELECT count(*) FROM users;
 
 -- name: SetUserDisabled :execrows
-UPDATE users SET disabled = $2, updated_at = now() WHERE id = $1;
+-- A disable bumps session_epoch, which ends every local session opened before it (authn.SessionStamp).
+UPDATE users
+SET disabled = sqlc.arg(disabled),
+    session_epoch = session_epoch + CASE WHEN sqlc.arg(disabled) THEN 1 ELSE 0 END,
+    updated_at = now()
+WHERE id = sqlc.arg(id);
 
 -- name: ListRoles :many
 SELECT name, permissions, created_at

@@ -466,7 +466,7 @@ func TestListPathSnapshotsPagesNewestFirst(t *testing.T) {
 
 	const total = 7
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		in := snapshotInput("node-a", "edge-gw", hopsAtDepth(i), base.Add(time.Duration(i)*time.Minute))
 		if _, _, err := db.UpsertPathSnapshot(ctx, in); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
@@ -610,7 +610,7 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 
 	// --- half one: the shipped call moves the index's scan counter ---------
 
-	before := idxScans(t, ctx, conn, "mtr_snapshots_pair_first_seen_idx")
+	before := idxScans(ctx, t, conn, "mtr_snapshots_pair_first_seen_idx")
 
 	page, err := db.ListPathSnapshots(ctx, store.SnapshotFilter{
 		SourceNode:  "node-7",
@@ -637,7 +637,7 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
-		after = idxScans(t, ctx, conn, "mtr_snapshots_pair_first_seen_idx")
+		after = idxScans(ctx, t, conn, "mtr_snapshots_pair_first_seen_idx")
 		if after > before {
 			break
 		}
@@ -734,7 +734,7 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 
 	// --- half one: the shipped call deletes what it should and moves the counter ---
 
-	before := idxScans(t, ctx, conn, "mtr_path_snapshots_last_seen_idx")
+	before := idxScans(ctx, t, conn, "mtr_path_snapshots_last_seen_idx")
 
 	// The oldest tenth of the seeded range.
 	cutoff := time.Now().Add(-time.Duration(snapshotIdxSeedRows-snapshotIdxSeedRows/10) * time.Second)
@@ -749,7 +749,7 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
-		after = idxScans(t, ctx, conn, "mtr_path_snapshots_last_seen_idx")
+		after = idxScans(ctx, t, conn, "mtr_path_snapshots_last_seen_idx")
 		if after > before {
 			break
 		}
@@ -887,7 +887,7 @@ func TestEnrichmentBatchIsNotMisZipped(t *testing.T) {
 	const n = 5
 	want := make(map[string]store.Enrichment, n)
 	rows := make([]store.Enrichment, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e := store.Enrichment{
 			IP:         "10.0.0." + strconv.Itoa(i+1),
 			RDNS:       "host-" + strconv.Itoa(i) + ".example.test",
@@ -1045,7 +1045,7 @@ func TestListPathSnapshotsKeepsEveryRouteAcrossARetrace(t *testing.T) {
 
 	/* The route the reader has NOT seen yet is traced again, which moves its last_seen to the top of
 	   the pair. Nothing about which page it belongs to may change. */
-	if _, _, err := db.UpsertPathSnapshot(ctx, store.PathSnapshotInput{
+	if _, _, err = db.UpsertPathSnapshot(ctx, store.PathSnapshotInput{
 		SourceNode: pairSource, Destination: pairDest,
 		Hops:   []store.PathHop{{Number: 1, IP: "10.0.0.3"}},
 		SeenAt: time.Now().UTC(),

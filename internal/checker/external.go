@@ -466,17 +466,9 @@ func defaultExternalPing(ctx context.Context, timeout time.Duration, ip string) 
 	return NewICMPChecker(timeout).Check(ctx, Target{PodIP: ip})
 }
 
-// defaultExternalLookup queries the APPROVED resolver address for query; the dialler ignores the
-// address the Go resolver computes and uses the authorised.
+// defaultExternalLookup queries the APPROVED resolver address for query.
 func defaultExternalLookup(ctx context.Context, serverAddr, query string) ([]netip.Addr, error) {
-	r := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, serverAddr)
-		},
-	}
-	addrs, err := r.LookupNetIP(ctx, "ip", query)
+	addrs, err := queryResolver(ctx, serverAddr, query)
 	if err != nil {
 		return nil, fmt.Errorf("dns lookup failed: %w", err)
 	}
@@ -494,7 +486,7 @@ func externalDenyReason(err error) model.ExternalDenyReason {
 		errors.Is(err, ErrNoDestination):
 		return model.ExternalDenyResolve
 	default:
-		// ErrDeniedIPv4, ErrDeniedIPv6, ErrDeniedZoneScoped.
+		// ErrDeniedIPv4/6, ErrNotAllowedIPv4/6, ErrDeniedZoneScoped.
 		return model.ExternalDenyCIDR
 	}
 }
@@ -524,7 +516,7 @@ func (c *ExternalChecker) recordDenial(spec *ExternalSpec, st *externalTargetSta
 		"target", spec.Name,
 		"definitionId", spec.DefinitionID,
 		"checkType", spec.Type,
-		"address", spec.Address,
+		"address", RedactURL(spec.Address), // an http address may carry basic-auth userinfo
 		"reason", reason,
 		"suppressed", suppressed,
 	)

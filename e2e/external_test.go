@@ -380,11 +380,14 @@ func TestExternalPrometheusScrape(t *testing.T) {
 	}
 }
 
-// matrixCell is one source→destination pair of GET /api/v1/matrix.
+// matrixCell is one source→destination pair of GET /api/v1/matrix; the two MTU fields come with
+// protocol=pmtu only.
 type matrixCell struct {
-	Source      string   `json:"source"`
-	Destination string   `json:"destination"`
-	FailRatio   *float64 `json:"failRatio"`
+	Source        string   `json:"source"`
+	Destination   string   `json:"destination"`
+	FailRatio     *float64 `json:"failRatio"`
+	MTUBytes      *int64   `json:"mtuBytes"`
+	ProbeMTUBytes *int64   `json:"probeMtuBytes"`
 }
 
 // TestExternalConsoleMatrix asserts the external host is a full participant of the mesh as the
@@ -419,8 +422,8 @@ func TestExternalConsoleMatrix(t *testing.T) {
 				return false
 			}
 			if status == http.StatusServiceUnavailable {
-				t.Fatalf("GET /api/v1/matrix answered 503: this console has no Prometheus; "+
-					"e2e/testdata/gateway-values.yaml must set console.prometheus.url: %s", data)
+				t.Fatalf("GET /api/v1/matrix answered 503: this console has no Prometheus; the gateway "+
+					"upgrade must pass e2e/testdata/prometheus-values.yaml: %s", data)
 			}
 			if status != http.StatusOK {
 				return false
@@ -477,7 +480,7 @@ func runKubectlKconmon(t *testing.T, bin string, args ...string) string {
 
 // tableRow finds the row of a tabwriter table whose column `col` (whitespace-split) equals want.
 func tableRow(table string, col int, want string) ([]string, bool) {
-	for _, line := range strings.Split(table, "\n") {
+	for line := range strings.SplitSeq(table, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) > col && fields[col] == want {
 			return fields, true

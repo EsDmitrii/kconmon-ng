@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"regexp"
 	"time"
 
@@ -106,7 +107,7 @@ func (c *HTTPChecker) Check(ctx context.Context, _ Target) model.CheckResult { /
 			if want := target.ExpectStatus; want != 0 {
 				if detail.StatusCode != want {
 					detail.StatusMismatch = true
-					statusErr = fmt.Sprintf("HTTP check %s: unexpected status %d, want %d", target.URL, detail.StatusCode, want)
+					statusErr = fmt.Sprintf("HTTP check %s: unexpected status %d, want %d", detail.URL, detail.StatusCode, want)
 				}
 			} else if detail.StatusCode >= http.StatusBadRequest {
 				/* StatusMismatch is set HERE too, and that is what makes the metric agree with the
@@ -118,7 +119,7 @@ func (c *HTTPChecker) Check(ctx context.Context, _ Target) model.CheckResult { /
 				   alone: the probe failed while kconmon_ng_http_results_total counted it a success.
 				   One flag, read by both. */
 				detail.StatusMismatch = true
-				statusErr = fmt.Sprintf("HTTP check %s: unexpected status %d", target.URL, detail.StatusCode)
+				statusErr = fmt.Sprintf("HTTP check %s: unexpected status %d", detail.URL, detail.StatusCode)
 			}
 		}
 		allDetails = append(allDetails, detail)
@@ -128,11 +129,11 @@ func (c *HTTPChecker) Check(ctx context.Context, _ Target) model.CheckResult { /
 		}
 		switch {
 		case detail.StatusCode == 0:
-			firstErr = fmt.Sprintf("HTTP check %s failed", target.URL)
+			firstErr = fmt.Sprintf("HTTP check %s failed", detail.URL)
 		case statusErr != "":
 			firstErr = statusErr
 		case detail.BodyMismatch:
-			firstErr = fmt.Sprintf("HTTP check %s: body pattern mismatch", target.URL)
+			firstErr = fmt.Sprintf("HTTP check %s: body pattern mismatch", detail.URL)
 		}
 	}
 
@@ -150,9 +151,19 @@ func (c *HTTPChecker) Check(ctx context.Context, _ Target) model.CheckResult { /
 	return result
 }
 
+// RedactURL is a target URL as a result, a metric label or a log may carry it: a userinfo password
+// is masked (url.URL.Redacted), a URL without one is unchanged. Only the request uses the raw URL.
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	return u.Redacted()
+}
+
 func (c *HTTPChecker) checkOne(ctx context.Context, target HTTPCheckTarget) model.HTTPDetails {
 	detail := model.HTTPDetails{
-		URL:    target.URL,
+		URL:    RedactURL(target.URL),
 		Method: target.Method,
 	}
 

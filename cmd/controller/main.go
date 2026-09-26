@@ -34,11 +34,13 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
+	ctrl := controller.New(cfg)
+	// Subscribed before the watch starts, so no reload lands between New and the subscription.
+	loader.OnChange(ctrl.ApplyConfig)
 	if err := loader.WatchForChanges(); err != nil {
 		slog.Warn("config hot-reload not available", "error", err)
 	}
 
-	ctrl := controller.New(cfg)
 	if err := ctrl.Run(ctx); err != nil {
 		slog.Error("controller exited with error", "error", err)
 		cancel()

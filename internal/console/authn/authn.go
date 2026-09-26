@@ -34,6 +34,10 @@ var (
 	// ErrDisabled means the credentials resolved to a real, otherwise-valid
 	// account that is administratively disabled.
 	ErrDisabled = errors.New("account disabled")
+	// ErrUnavailable means the store behind a presented credential (users, sessions, tokens) could
+	// not answer, so nothing is known about the credential either way; callers answer 503, not 401,
+	// so a database blip does not sign everyone out.
+	ErrUnavailable = errors.New("credential store unavailable")
 )
 
 // anonymousAuthenticator implements NewAnonymous: see its doc comment.

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -123,6 +124,31 @@ func TestTopologyValidation(t *testing.T) {
 			modify: func(c *Config) {
 				c.Topology.Mode = "sparse"
 				c.Topology.Sparse.ZoneChords = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "sparse zoneChords at the bound loads",
+			modify: func(c *Config) {
+				c.Topology.Mode = "sparse"
+				c.Topology.Sparse.ZoneChords = 64
+			},
+			wantErr: false,
+		},
+		{
+			// Every mesh plan sizes per-agent maps by it: 100000 cost 3.3 GB per Build at 1000 agents.
+			name: "sparse zoneChords above the bound is refused",
+			modify: func(c *Config) {
+				c.Topology.Mode = "sparse"
+				c.Topology.Sparse.ZoneChords = 65
+			},
+			wantErr: true,
+		},
+		{
+			name: "sparse zoneChords MaxInt is refused",
+			modify: func(c *Config) {
+				c.Topology.Mode = "sparse"
+				c.Topology.Sparse.ZoneChords = math.MaxInt
 			},
 			wantErr: true,
 		},

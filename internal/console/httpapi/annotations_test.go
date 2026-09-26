@@ -140,8 +140,8 @@ func TestAnnotationsWithoutStoreReturn503(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 			t.Errorf("%s %s Content-Type = %q, want application/problem+json", c.method, c.path, ct)
 		}
-		if !strings.Contains(w.Body.String(), "console.database.mode") {
-			t.Errorf("%s %s 503 detail = %s, want it to name console.database.mode", c.method, c.path, w.Body)
+		if !strings.Contains(w.Body.String(), "database.dsnFile") {
+			t.Errorf("%s %s 503 detail = %s, want it to name database.dsnFile", c.method, c.path, w.Body)
 		}
 	}
 }
@@ -440,5 +440,28 @@ func TestAnnotationsDeleteIsAuditedWithEmptyDetail(t *testing.T) {
 	}
 	if entries[0].Action != "DELETE /api/v1/annotations/{id}" {
 		t.Errorf("audit action = %q, want the route pattern", entries[0].Action)
+	}
+}
+
+// Annotation text comes from a textarea: line breaks and tabs are content, a NUL is still a 422.
+func TestAnnotationsCreateAcceptsMultiLineTextAndRefusesNUL(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		want int
+	}{
+		{"drained node-a\nfor the kernel upgrade", http.StatusCreated},
+		{"step 1\r\n\tstep 2", http.StatusCreated},
+		{"a\x00b", http.StatusUnprocessableEntity},
+	} {
+		text, err := json.Marshal(c.text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := newM5TestServer(t, "operator", Deps{Annotations: newFakeAnnotationStore()})
+		w := doRequest(t, s, http.MethodPost, "/api/v1/annotations",
+			strings.NewReader(`{"startAt":"2026-08-07T10:00:00Z","text":`+string(text)+`}`), mutateWithCSRF)
+		if w.Code != c.want {
+			t.Errorf("text %q: POST = %d, want %d: %s", c.text, w.Code, c.want, w.Body)
+		}
 	}
 }

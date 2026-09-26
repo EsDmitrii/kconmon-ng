@@ -223,3 +223,74 @@ func (u *mapUsers) GetUserByID(_ context.Context, id string) (store.User, error)
 	}
 	return store.User{}, store.ErrNotFound
 }
+
+// Disabling a user bumps their session epoch, so a session opened before the disable stays dead
+// after a re-enable; one opened after it works, and a pre-2.5.0 session without a stamp keeps its
+// documented behaviour.
+func TestLocalAuthenticatorRejectsASessionOpenedBeforeADisable(t *testing.T) {
+	hash, err := authn.HashPassword("a password 123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
+	ctx := context.Background()
+	before, err := sessions.Create(ctx, authn.Session{Username: "alice", PasswordStamp: authn.SessionStamp(hash, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := sessions.Create(ctx, authn.Session{Username: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Disabled once and enabled again.
+	users := &mapUsers{m: map[string]store.User{"alice": {ID: "u-1", Username: "alice", PasswordHash: hash, SessionEpoch: 1}}}
+	after, err := sessions.Create(ctx, authn.Session{Username: "alice", PasswordStamp: authn.SessionStamp(hash, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := authn.NewLocal(users, sessions, "kconmon_session")
+	req := func(id string) *http.Request {
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{Name: "kconmon_session", Value: id})
+		return r
+	}
+	if _, err := a.Authenticate(req(before)); !errors.Is(err, authn.ErrNoCredentials) {
+		t.Errorf("a session opened before the disable = %v, want ErrNoCredentials", err)
+	}
+	if _, err := a.Authenticate(req(after)); err != nil {
+		t.Errorf("a session opened after the re-enable: %v", err)
+	}
+	if _, err := a.Authenticate(req(legacy)); err != nil {
+		t.Errorf("a pre-2.5.0 session without a stamp must keep working: %v", err)
+	}
+	if authn.SessionStamp(hash, 0) != authn.PasswordStamp(hash) {
+		t.Error("with no disable yet the stamp must equal the password stamp, so sessions issued so far stay valid")
+	}
+}
+
+// A user store that cannot answer says nothing about the session: the caller must be able to tell
+// that apart from a stale cookie, or a database blip signs every user out.
+func TestLocalAuthenticateUserStoreErrorIsErrUnavailable(t *testing.T) {
+	t.Parallel()
+
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	sessions := authn.NewSessionStore(kv, time.Hour, 0)
+	boom := errors.New("dial tcp: connection refused")
+	a := authn.NewLocal(&fakeUserStore{err: boom}, sessions, localCookieName)
+	id, err := sessions.Create(context.Background(), authn.Session{Username: "alice"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = a.Authenticate(requestWithCookie(id))
+	if !errors.Is(err, authn.ErrUnavailable) {
+		t.Fatalf("got %v, want ErrUnavailable", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("got %v, want it to wrap %v", err, boom)
+	}
+	if errors.Is(err, authn.ErrNoCredentials) || errors.Is(err, authn.ErrInvalid) {
+		t.Errorf("got %v: a store outage must not read as missing or bad credentials", err)
+	}
+}

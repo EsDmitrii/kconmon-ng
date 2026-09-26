@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/webhooks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -136,6 +138,13 @@ func drainConsole(finishRuns, drainRealtime func()) {
 // runDrainBudget bounds how long shutdown waits for in-flight runs to reach their own FinishRun.
 const runDrainBudget = 10 * time.Second
 
+func newPromRegistry() *prometheus.Registry {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	return reg
+}
+
 func main() {
 	configPath := os.Getenv("KCONMON_NG_CONSOLE_CONFIG")
 	if configPath == "" {
@@ -161,7 +170,7 @@ func main() {
 			"role", cfg.Auth.Anonymous.Role)
 	}
 
-	promReg := prometheus.NewRegistry()
+	promReg := newPromRegistry()
 	m := metrics.New(cfg.MetricsPrefix, promReg)
 
 	uiHandler, err := ui.Handler()
@@ -213,7 +222,7 @@ func main() {
 	// degraded path.
 	var db *store.DB
 	if dsn == "" {
-		slog.Info("database not configured — event history, run history and the audit log are disabled; the M1/M2 surface is unaffected")
+		slog.Info("database not configured — event history, run history and the audit log are disabled; the live topology and the matrix are unaffected")
 	} else {
 		db, err = store.Open(bgCtx, dsn, cfg.Database.MaxConns, cfg.Database.ConnectTimeout, cfg.Database.MigrateOnStart)
 		if err != nil {
@@ -365,6 +374,9 @@ func main() {
 	var matrixPusher *push.MatrixPusher
 	if prom != nil {
 		matrixPusher = push.NewMatrixPusher(prom, hub, cfg.MetricsPrefix, pushInterval, m)
+		if ctrl != nil {
+			matrixPusher.SetTopology(ctrl)
+		}
 		nudgers = append(nudgers, matrixPusher)
 	}
 	var topologyPusher *push.TopologyPusher
@@ -414,7 +426,7 @@ func main() {
 		// The default. Nothing to log: an off feature is not news.
 	case db == nil:
 		slog.Warn("mtr.enrichment.enabled is set but no database is configured — hop enrichment is off " +
-			"(the TTL cache lives in PostgreSQL; set console.database.mode)")
+			"(the TTL cache lives in PostgreSQL; set database.dsn or database.dsnFile)")
 	default:
 		// enrichErr rather than err: assigning the function-scoped err this
 		// far down would make every earlier `x, err :=` a govet shadow report.
@@ -447,7 +459,7 @@ func main() {
 	case db == nil:
 		slog.Warn("webhooks.encryptionKey is set but no database is configured — webhook delivery is off " +
 			"(endpoints, their encrypted secrets and their delivery outcomes all live in PostgreSQL; " +
-			"set console.database.mode)")
+			"set database.dsn or database.dsnFile)")
 	default:
 		// dispatcherErr rather than err: assigning the function-scoped err
 		// this far down would make every earlier `x, err :=` a govet shadow
@@ -469,7 +481,7 @@ func main() {
 	case !cfg.Alerting.Enabled:
 	case db == nil:
 		slog.Warn("alerting.enabled is set but no database is configured — prometheus rule sync is off " +
-			"(alert rules live in PostgreSQL; set console.database.mode)")
+			"(alert rules live in PostgreSQL; set database.dsn or database.dsnFile)")
 	default:
 		dyn, dynErr := buildInClusterDynamic()
 		if dynErr != nil {
@@ -607,43 +619,36 @@ func main() {
 		spawn("webhook-dispatcher", dispatcher.Run)
 	}
 	if alertWatcher != nil {
-		// Spawned AHEAD of nothing in particular but stopped by the same bgCtx, which matters in one
-		// specific way.
 		spawn("alert-webhook-watcher", alertWatcher.Run)
 	}
 	if ruleReconciler != nil {
-		/* Every replica runs the LOOP, and each PASS serialises on promrules.LockKey — one of the three
-		   advisory keys this process takes (the scheduler's own, the external-check reconciler's, and
-		   this one). The comment used to say there was no lock here, which sent anyone debugging a
-		   missing sync to the wrong replica's logs: the others say "another console replica holds the
-		   alert rule lock, skipping this pass" and are behaving correctly. */
+		/* Every replica runs the loop and each pass serialises on promrules.LockKey, so only the lock
+		   holder's logs show a sync; the others log "another console replica holds the alert rule
+		   lock, skipping this pass" and are behaving correctly. */
 		spawn("prometheus-rule-sync", ruleReconciler.Run)
 	}
 
-	/* The stuck-run reaper, spawned on its OWN and not behind the scheduler's opt-in.
-	   It used to live inside the schedule pass, which is off by default — so on the shipped
-	   configuration nothing ever force-finished a run whose replica died mid-flight, while
-	   POST /api/v1/runs/{id}/cancel answered 204 saying the reaper would deal with it. Finishing an
-	   orphan is the runner keeping its own table honest, not a feature to enable. */
+	/* The stuck-run reaper runs whenever runs are stored, not behind the scheduler's opt-in: finishing
+	   a run whose replica died mid-flight is the runner keeping its own table honest, and
+	   POST /api/v1/runs/{id}/cancel relies on it. */
 	if runner != nil && db != nil {
 		spawn("stuck-run-reaper", func(ctx context.Context) { runner.ReapLoop(ctx, 0) })
 	}
 
-	/* Cancellation crosses replicas over the bus. A run belongs to the replica whose Start built its
-	   context, the Service load balances, and with the chart's default of two console replicas a
-	   POST /runs/{id}/cancel had even odds of landing on the replica that holds nothing — where it
-	   used to answer 204 and do nothing at all. */
+	/* Cancellation crosses replicas over the bus: a run belongs to the replica whose Start built its
+	   context, and the Service may route POST /runs/{id}/cancel to any replica. */
 	if runner != nil {
 		spawn("run-cancel-watch", func(ctx context.Context) { _ = runner.WatchCancellations(ctx) })
 	}
 
-	// The schedule loop is opt-in (console.scheduler.enabled, default false) and needs BOTH a
-	// database.
+	// The schedule loop is opt-in (console.scheduler.enabled, default false) and needs both a
+	// database and a controller.
 	switch {
 	case !cfg.Scheduler.Enabled:
 	case db == nil:
 		slog.Warn("scheduler.enabled is set but no database is configured — the schedule loop is off " +
-			"(check schedules and its cross-replica advisory lock both live in PostgreSQL)")
+			"(check schedules and its cross-replica advisory lock both live in PostgreSQL; " +
+			"set database.dsn or database.dsnFile)")
 	case runner == nil:
 		slog.Warn("scheduler.enabled is set but controller.url is empty — the schedule loop is off " +
 			"(a fired schedule is an ordinary diagnostics run, which needs a controller to dispatch to)")
@@ -652,10 +657,8 @@ func main() {
 			Lock: db, Store: db, Runner: runner, Topology: ctrl,
 			Metrics: m, Interval: cfg.Scheduler.TickInterval,
 		}).Run)
-		/* The continuous external-check reconciler rides the same SWITCH, but not the same LOCK: it
-		   used to be handed scheduler.LockKey, so two loops doing unrelated work on the same tick
-		   took turns on one advisory key and each ran at half its configured cadence. Its own key is
-		   checks.ReconcilerLockKey (the default when none is given). */
+		// The continuous external-check reconciler rides the same switch but takes its own advisory
+		// key (checks.ReconcilerLockKey), so the two loops do not take turns on one tick.
 		spawn("external-check-reconciler", checks.NewReconciler(checks.ReconcilerDeps{
 			Lock: db, Store: db, Topology: ctrl, Controller: ctrl,
 			Metrics: m, Interval: cfg.Scheduler.TickInterval,
@@ -683,7 +686,7 @@ func main() {
 			deps.Lock = db
 		}
 		if prom != nil {
-			deps.Intended = checks.NewPromIntendedPairs(prom)
+			deps.Intended = checks.NewPromIntendedPairs(prom, cfg.MetricsPrefix)
 		}
 		spawn("topology-sweeper", checks.NewSweeper(deps).Run)
 		slog.Info("topology sweeper enabled",
@@ -696,7 +699,7 @@ func main() {
 	case !cfg.KubernetesContext.Enabled:
 	case db == nil:
 		slog.Warn("kubernetesContext.enabled is set but no database is configured — kubernetes event " +
-			"capture is off (captured events live in PostgreSQL; set console.database.mode)")
+			"capture is off (captured events live in PostgreSQL; set database.dsn or database.dsnFile)")
 	default:
 		clientset, kubeErr := buildInClusterClientset()
 		if kubeErr != nil {
@@ -712,8 +715,8 @@ func main() {
 			topo = ctrl
 		} else {
 			slog.Warn("kubernetesContext.enabled is set but controller.url is empty — node events " +
-				"will be dropped (M6 Decision 3 fails closed: without a topology nothing vouches " +
-				"for a node); pod events are unaffected")
+				"will be dropped (without a topology nothing vouches for a node, so the filter fails closed); " +
+				"pod events are unaffected")
 		}
 		reader := kubectx.New(cfg.KubernetesContext, clientset, topo, db, m)
 		spawn("k8s-events-reader", reader.Run)
@@ -802,13 +805,9 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		os.Exit(1)
 	}
 	if count > 0 {
-		/* The table is populated: nothing is created and NOTHING IS REPAIRED. There used to be a
-		   reconcile here that re-created the bootstrap admin's binding whenever it was missing, and
-		   it could not tell a half-finished first boot from a deliberate revocation — so demoting
-		   the shared bootstrap account survived exactly until the next pod restart, and the re-grant
-		   went straight to the store, past the audit middleware. The half-finished case is now
-		   impossible instead: CreateBootstrapAdmin writes the user and the binding in one
-		   transaction. */
+		/* The table is populated: nothing is created and nothing is repaired. A missing bootstrap
+		   binding is a deliberate revocation, never a half-finished first boot, because
+		   CreateBootstrapAdmin writes the user and the binding in one transaction. */
 		slog.Debug("users table already populated — skipping local-mode admin bootstrap", //nolint:gosec // G706: bootstrapAdmin is an operator-configured username, structured slog field
 			"bootstrapAdmin", cfg.BootstrapAdmin)
 		return
@@ -951,6 +950,15 @@ func refreshCustomRoles(ctx context.Context, db *store.DB, policy *authz.Policy,
 	}
 }
 
+// redisUnreachable reports whether NewRedisBus failed before any server answered: a dial or name
+// lookup that failed, or a timeout. Anything else means a server answered and refused.
+func redisUnreachable(err error) bool {
+	if op, ok := errors.AsType[*net.OpError](err); ok && op.Op == "dial" {
+		return true
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // newBus selects the pub/sub backend the realtime pipeline runs on and returns a close func for it;
 // no DSN — or a server that cannot be dialled at startup — falls back to the in-process bus.
 func newBus(ctx context.Context, cfg *config.Config) (bus cache.Bus, closeBus func(), err error) {
@@ -968,8 +976,14 @@ func newBus(ctx context.Context, cfg *config.Config) (bus cache.Bus, closeBus fu
 	if err != nil {
 		// The DSN carries a password, so it is NEVER logged; the error from the client is classified
 		// by rueidis and carries the host only.
-		slog.Warn("redis unreachable at startup — falling back to the in-process bus; "+
-			"realtime fan-out is single-replica only until the console is restarted", "error", err)
+		const fallback = "falling back to the in-process bus; " +
+			"realtime fan-out is single-replica only until the console is restarted"
+		if redisUnreachable(err) {
+			slog.Warn("redis unreachable at startup — "+fallback, "error", err)
+		} else {
+			slog.Warn("redis refused the connection handshake at startup (credentials, ACL, TLS scheme or DSN): "+fallback,
+				"error", err)
+		}
 		return cache.NewInProcessBus(), func() {}, nil
 	}
 

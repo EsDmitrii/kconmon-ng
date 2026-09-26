@@ -26,6 +26,7 @@ type Metrics struct {
 	WSClients          *prometheus.GaugeVec
 	WSMessagesSent     *prometheus.CounterVec
 	WSDroppedClients   *prometheus.CounterVec
+	WSRefused          *prometheus.CounterVec
 	PushSnapshots      *prometheus.CounterVec
 
 	// WSTopics is the ephemeral run:{id} topic registry size; zero labels, like WSClients -- a run ID
@@ -101,6 +102,9 @@ type Metrics struct {
 	WebhookDeliveries *prometheus.CounterVec
 	// WebhookSuppressed counts alert edges a maintenance window held back, by event.
 	WebhookSuppressed *prometheus.CounterVec
+	// WebhookMaintenanceReadErrors counts the alert watcher's failed maintenance-window reads; the
+	// store's query counter cannot tell them apart from the HTTP API's list calls.
+	WebhookMaintenanceReadErrors *prometheus.CounterVec
 }
 
 // New registers and returns the Console metrics under <prefix>_console_*.
@@ -154,6 +158,10 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 			Name: ns + "_ws_dropped_clients_total",
 			Help: "WebSocket clients closed because their send buffer overflowed.",
 		}, []string{}),
+		WSRefused: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_ws_refused_total",
+			Help: "WebSocket connections refused by a websocket.* connection cap, by cap (total, address, subject).",
+		}, []string{"limit"}),
 		PushSnapshots: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_push_snapshots_total",
 			Help: "Server-side snapshot pushes, by topic and result (ok, error).",
@@ -252,11 +260,11 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 		}, []string{}),
 		ExternalReconciles: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_external_reconciles_total",
-			Help: "Continuous external-check reconcile ticks, by result (pushed, unchanged, not-leader, error).",
+			Help: "Continuous external-check reconcile ticks, by result (pushed, unchanged, not-leader, error, too-large).",
 		}, []string{"result"}),
 		ExternalSpecsSkipped: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_external_specs_skipped_total",
-			Help: "Continuous definitions left out of the desired assignment, by reason (check-type, destination-kind).",
+			Help: "Continuous definitions left out of the desired assignment, by reason (check-type, destination-kind, unrunnable, over-budget).",
 		}, []string{"reason"}),
 		MTRSnapshots: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_mtr_snapshots_total",
@@ -294,5 +302,11 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 				"alert.resolved). A held fired edge is delivered when its window closes on an alert " +
 				"that is still firing, and is not counted a second time then.",
 		}, []string{"event"}),
+		WebhookMaintenanceReadErrors: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_webhook_maintenance_read_errors_total",
+			Help: "Alert webhook watcher polls whose maintenance-window read failed. New alert edges " +
+				"are then delivered unsuppressed (fail-open); edges already held stay held until a " +
+				"read succeeds.",
+		}, []string{}),
 	}
 }

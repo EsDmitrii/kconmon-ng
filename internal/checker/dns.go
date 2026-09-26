@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
@@ -72,7 +73,11 @@ func (c *DNSChecker) Check(ctx context.Context, _ Target) model.CheckResult { //
 
 	for _, host := range c.hosts {
 		if len(c.resolvers) == 0 {
-			detail, err := c.lookupHost(ctx, host, "", net.DefaultResolver)
+			// The system path keeps /etc/hosts and the search list: it measures what the pod's own
+			// lookups go through.
+			detail, err := c.lookupHost(ctx, host, "system", func(ctx context.Context, name string) ([]netip.Addr, error) {
+				return net.DefaultResolver.LookupNetIP(ctx, "ip", name)
+			})
 			if err != nil && firstErr == "" {
 				firstErr = fmt.Sprintf("DNS resolve %s via system: %v", host, err)
 			}
@@ -81,21 +86,10 @@ func (c *DNSChecker) Check(ctx context.Context, _ Target) model.CheckResult { //
 		}
 
 		for _, resolverIP := range c.resolvers {
-			resolverAddr := resolverDialAddr(resolverIP)
-			resolver := &net.Resolver{
-				PreferGo: true,
-				/* The NETWORK Go asks for, not a hardcoded "udp".
-				   The resolver retries a truncated answer over TCP — that is what the TC bit is for —
-				   and this dialler sent the retry back over UDP, where it was truncated again. A host
-				   with more records than fit in 512 bytes (a large A set, a long CNAME chain) was
-				   therefore unresolvable through an explicit resolver, and reported as a DNS failure
-				   of the network rather than of this dialler. */
-				Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-					d := net.Dialer{Timeout: c.timeout}
-					return d.DialContext(ctx, network, resolverAddr)
-				},
-			}
-			detail, err := c.lookupHost(ctx, host, resolverIP, resolver)
+			server := resolverDialAddr(resolverIP)
+			detail, err := c.lookupHost(ctx, host, resolverIP, func(ctx context.Context, name string) ([]netip.Addr, error) {
+				return queryResolver(ctx, server, name)
+			})
 			if err != nil && firstErr == "" {
 				firstErr = fmt.Sprintf("DNS resolve %s via %s: %v", host, resolverIP, err)
 			}
@@ -117,27 +111,21 @@ func (c *DNSChecker) Check(ctx context.Context, _ Target) model.CheckResult { //
 	return result
 }
 
-func (c *DNSChecker) lookupHost(ctx context.Context, host, resolverLabel string, resolver *net.Resolver) (model.DNSDetails, error) {
-	if resolverLabel == "" {
-		resolverLabel = "system"
-	}
-
+func (c *DNSChecker) lookupHost(
+	ctx context.Context, host, resolverLabel string, lookup func(context.Context, string) ([]netip.Addr, error),
+) (model.DNSDetails, error) {
 	detail := model.DNSDetails{
 		Host:     host,
 		Resolver: resolverLabel,
 	}
 
-	/* checkers.dns.timeout bounds the LOOKUP, which it did not before. It was applied to exactly one
-	   thing — the UDP dial on the explicit-resolver path, which is connectionless and returns at once
-	   — so on the default path (resolvers: []) it was not applied at all: the real bound was
-	   /etc/resolv.conf, where kubelet's ndots:5 plus three search domains means four query names by
-	   two attempts by five seconds, about forty seconds, for a check an operator had configured to
-	   give up after one. */
+	// checkers.dns.timeout bounds the whole lookup; on the system path resolv.conf's ndots and search
+	// list would otherwise stretch one check to about forty seconds.
 	lctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
 	start := time.Now()
-	ips, err := resolver.LookupIPAddr(lctx, host)
+	ips, err := lookup(lctx, host)
 	detail.Duration = time.Since(start)
 
 	if err != nil {
@@ -146,7 +134,7 @@ func (c *DNSChecker) lookupHost(ctx context.Context, host, resolverLabel string,
 
 	resolved := make([]net.IP, 0, len(ips))
 	for _, ip := range ips {
-		resolved = append(resolved, ip.IP)
+		resolved = append(resolved, ip.Unmap().AsSlice())
 	}
 	detail.ResolvedIPs = resolved
 	return detail, nil
