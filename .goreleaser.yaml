@@ -122,27 +122,14 @@ dockers:
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.created={{.Date}}"
 
+# No :latest here: release.yaml's publish job points it at these :<version> manifests after e2e.
 docker_manifests:
   - name_template: "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}"
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-amd64"
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
 
-  - name_template: "ghcr.io/esdmitrii/kconmon-ng-agent:latest"
-    # A prerelease must not move :latest; same gate as the krew and console-image steps.
-    skip_push: auto
-    image_templates:
-      - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-amd64"
-      - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
-
   - name_template: "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}"
-    image_templates:
-      - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-amd64"
-      - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
-
-  - name_template: "ghcr.io/esdmitrii/kconmon-ng-controller:latest"
-    # A prerelease must not move :latest; same gate as the krew and console-image steps.
-    skip_push: auto
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-amd64"
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"

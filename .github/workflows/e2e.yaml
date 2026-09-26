@@ -1,16 +1,35 @@
 ---
 name: E2E
 
-# Reusable workflow: release.yaml calls it between the draft job (images built, release still a
-# draft) and the publish job, so nothing user-visible goes out before these tests pass on kind.
+# Reusable workflow: release.yaml calls it between the draft job and the publish job with the
+# linux/amd64 images the draft job pushed, pinned by digest, so :latest, the chart and the GitHub
+# release stay unpublished until those very images pass on kind. Without the image inputs (a manual
+# workflow_dispatch run) it builds the three images from the checked-out source instead.
 on:
   workflow_call:
+    inputs:
+      agent-image:
+        description: Digest-pinned linux/amd64 agent image to test instead of building one; all three or none.
+        type: string
+        required: false
+        default: ""
+      controller-image:
+        description: Digest-pinned linux/amd64 controller image, as agent-image.
+        type: string
+        required: false
+        default: ""
+      console-image:
+        description: Digest-pinned linux/amd64 console image, as agent-image.
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
 
-# Read-only: this job clones, builds a kind cluster and installs the released
-# chart. It never pushes anything and never reads GITHUB_TOKEN.
+# Read-only: this job clones, builds a kind cluster and installs the released chart. It never
+# pushes anything; GITHUB_TOKEN is read only to pull the image inputs from GHCR.
 permissions:
   contents: read
+  packages: read
 
 jobs:
   e2e:
@@ -33,10 +52,13 @@ jobs:
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
+      # No restored cache: this job is the release gate, and a Go cache entry is writable by any job
+      # that runs on main.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Write kind config
         run: |
@@ -53,23 +75,72 @@ jobs:
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: kconmon-ng-e2e
-          # PINNED alongside the node image, not left to the action's default.
-          # `kind load` reads the node's containerd config to patch it, and the images published with
-          # kind v0.32.0 write config version 4, which older CLIs refuse: "unknown containerd config
-          # version: 4 (supported versions: 2 and 3)". The action still defaults to v0.31.0, so the
-          # pair has to move together -- the node image alone is half an upgrade.
+          # The kind CLI must understand the node image's containerd config; move version and
+          # node_image together.
           version: v0.33.0
           node_image: kindest/node:v1.37.0
-          # , not : the action has no such input, and GitHub drops an unknown one
-          # silently -- so the three-node config below was never applied and every run got kind's
-          # default single-node cluster. A one-node fleet has no pairs to check, which is why the runs
-          # and schedule tests failed and the MTR one skipped itself.
+          # `config` (the action has no `config_file`; an unknown input is dropped silently).
           config: kind-config.yaml
 
+      - name: Choose the images
+        id: images
+        env:
+          AGENT_IMAGE: ${{ inputs.agent-image }}
+          CONTROLLER_IMAGE: ${{ inputs.controller-image }}
+          CONSOLE_IMAGE: ${{ inputs.console-image }}
+        run: |
+          given=0
+          for ref in "$AGENT_IMAGE" "$CONTROLLER_IMAGE" "$CONSOLE_IMAGE"; do
+            if [ -n "$ref" ]; then given=$((given + 1)); fi
+          done
+          case "$given" in
+            0) prebuilt=false ;;
+            3) prebuilt=true ;;
+            *) echo "::error::pass all three image inputs or none, got ${given}"; exit 1 ;;
+          esac
+          echo "prebuilt=${prebuilt}" >> "$GITHUB_OUTPUT"
+          echo "prebuilt=${prebuilt} agent='${AGENT_IMAGE}' controller='${CONTROLLER_IMAGE}' console='${CONSOLE_IMAGE}'"
+
+      - name: Log in to GHCR
+        if: steps.images.outputs.prebuilt == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Retagged to the names e2e/testdata/values.yaml installs, so the two paths differ only here. The
+      # labels tie each image to the tag and commit under test: a wrong or stale digest fails here.
+      - name: Pull the pushed images
+        if: steps.images.outputs.prebuilt == 'true'
+        env:
+          AGENT_IMAGE: ${{ inputs.agent-image }}
+          CONTROLLER_IMAGE: ${{ inputs.controller-image }}
+          CONSOLE_IMAGE: ${{ inputs.console-image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          format='{{.Os}}/{{.Architecture}}'
+          format+=' {{index .Config.Labels "org.opencontainers.image.version"}}'
+          format+=' {{index .Config.Labels "org.opencontainers.image.revision"}}'
+          pull() {
+            docker pull --platform linux/amd64 "$1"
+            got=$(docker image inspect "$1" --format "$format")
+            want="linux/amd64 ${VERSION} ${GITHUB_SHA}"
+            if [ "$got" != "$want" ]; then
+              echo "::error::$1 is '${got}', want '${want}'"; exit 1
+            fi
+            docker tag "$1" "$2"
+          }
+          pull "$AGENT_IMAGE" kconmon-ng-agent:test
+          pull "$CONTROLLER_IMAGE" kconmon-ng-controller:test
+          pull "$CONSOLE_IMAGE" kconmon-ng-console:test
+
       - name: Set up Docker Buildx
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Build agent image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -83,6 +154,7 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Build controller image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -97,6 +169,7 @@ jobs:
 
       # Dockerfile.console is a SEPARATE Dockerfile (not a `target:` of the root one, see Makefile's docker-build).
       - name: Build console image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -120,16 +193,7 @@ jobs:
       - name: Apply the PrometheusRule CRD and the foreign rule fixture
         run: |
           kubectl apply -f e2e/testdata/prometheusrule-crd.yaml
-          # kubectl wait and a jsonpath filter both error while a fresh CRD has no status.conditions yet.
-          for _ in $(seq 1 60); do
-            est=$(kubectl get crd prometheusrules.monitoring.coreos.com \
-              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null || true)
-            [ "$est" = "True" ] && break
-            sleep 1
-          done
-          kubectl wait --for condition=established \
-            crd/prometheusrules.monitoring.coreos.com \
-            --timeout=60s
+          e2e/kind-wait.sh crd prometheusrules.monitoring.coreos.com
           kubectl apply -f e2e/testdata/foreign-prometheusrule.yaml
           kubectl get prometheusrule -n default e2e-foreign-rules \
             -o jsonpath='{.metadata.labels}'
@@ -152,8 +216,7 @@ jobs:
             --from-literal=encryptionKey="$(openssl rand -base64 32)" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      # Same helm as helm-lint and publish pin: this job used the runner image's floating helm,
-      # the only unpinned CLI on the release-gating path.
+      # The helm every job pins (Test, Helm Lint, publish), never the runner image's own.
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -165,15 +228,6 @@ jobs:
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
             -f e2e/testdata/console-values.yaml \
-            --set controller.image.repository=kconmon-ng-controller \
-            --set controller.image.tag=test \
-            --set controller.image.pullPolicy=Never \
-            --set agent.image.repository=kconmon-ng-agent \
-            --set agent.image.tag=test \
-            --set agent.image.pullPolicy=Never \
-            --set console.image.repository=kconmon-ng-console \
-            --set console.image.tag=test \
-            --set console.image.pullPolicy=Never \
             --wait \
             --timeout 5m
 
@@ -184,7 +238,8 @@ jobs:
             --timeout=180s
 
       # The console's sync path fails identically ("this ServiceAccount may not write prometheusrules") whether the
-      # Role was never rendered.
+      # Role was never rendered, was rendered with the wrong name, or was bound to the wrong subject; this step
+      # names the cause before TestConsoleAlertRuleSyncAgainstRealCRD reports the symptom.
       - name: Verify the alerting RBAC rendered
         run: |
           kubectl get role kconmon-ng-console-alerting \
@@ -201,11 +256,13 @@ jobs:
             -o jsonpath='{.items[0].metadata.name}')
           kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 &
           PF_PID=$!
-          sleep 3
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8080/healthz
 
           curl -sf http://localhost:8080/healthz
           curl -sf http://localhost:8080/readyz
-          curl -sf http://localhost:8080/metrics | head -20
+          # Not piped: without pipefail a failed curl would hide behind head's exit status.
+          curl -sf http://localhost:8080/metrics -o "$RUNNER_TEMP/controller-metrics"
+          head -20 "$RUNNER_TEMP/controller-metrics"
           curl -sf http://localhost:8080/api/v1/topology
 
           kill $PF_PID || true
@@ -224,10 +281,12 @@ jobs:
           kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
           CONSOLE_PF_PID=$!
 
-          sleep 3
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8080/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
 
-          # Deterministic events for TestConsoleEvents / TestConsoleMetrics The controller's WatchEvents stream has NO
-          # replay.
+          # Deterministic events for TestConsoleEvents / TestConsoleMetrics: the controller's WatchEvents stream has
+          # NO replay, so each agent's one topology_changed event reaches only a console already subscribed. Wait
+          # until the console reports its ingester subscribed, then restart the agents so they register after it.
           echo "Waiting for console ingester to subscribe to controller events..."
           DEADLINE=$((SECONDS + 90))
           until curl -sf http://localhost:8081/api/v1/version \
@@ -247,7 +306,7 @@ jobs:
           kubectl rollout status daemonset/kconmon-ng-agent --timeout=90s
 
           # The agent port-forward is established HERE, strictly AFTER the rollout above, and that ordering is
-          # load-bearing.
+          # load-bearing: a forward opened earlier would point at a Pod the restart deletes.
           AGENT_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=agent \
             --field-selector=status.phase=Running \
@@ -255,10 +314,16 @@ jobs:
           echo "Forwarding agent metrics from pod/$AGENT_POD"
           kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
           AGENT_PF_PID=$!
-          sleep 3
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8082/healthz
 
-          # TestConsoleDegradedMode needs a SECOND rollout with the database disabled (see the two steps below).
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 25m -skip 'TestConsoleDegradedMode|TestFault'
+          # TestConsoleDegradedMode needs a SECOND rollout with the database disabled (see the two steps below), so
+          # it is excluded here, and TestFault, TestExternal, TestConsoleLocalUsers and TestNetworkPolicy run in
+          # their own legs. What is left has its env here, so any SKIP is a defect, like in the legs.
+          set -o pipefail
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 25m \
+            -skip 'TestConsoleDegradedMode|TestFault|TestExternal|TestConsoleLocalUsers|TestNetworkPolicy' \
+            | tee "$RUNNER_TEMP/e2e-main.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-main.log" "main suite"
 
           kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
         env:
@@ -273,6 +338,66 @@ jobs:
           # so it is unroutable regardless.
           KCONMON_DENIED_TARGET_ADDR: 203.0.113.10:80
 
+      # A plain Prometheus, not the operator (see e2e/testdata/prometheus.yaml's header). It comes
+      # in after the main run, which pins the console's no-Prometheus branches, and before the fault
+      # leg, which reads the black-holed pair from the console matrix. The gateway leg later adds the
+      # external agent to what it scrapes.
+      - name: Apply the Prometheus fixture
+        run: |
+          kubectl apply -f e2e/testdata/prometheus.yaml
+          kubectl wait --for=condition=ready pod \
+            -l app=kconmon-e2e-prometheus \
+            --timeout=120s
+
+      # Only the console's ConfigMap changes, so only the console rolls; the agents keep their
+      # counters and the fixture keeps scraping them.
+      - name: Point the console at the fixture Prometheus
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
+            -f e2e/testdata/prometheus-values.yaml \
+            --wait \
+            --timeout 5m
+          e2e/kind-wait.sh single-pod console
+
+      # The plugin is asserted through its table output, the way people read it.
+      - name: Build kubectl-kconmon
+        run: go build -o "$RUNNER_TEMP/kubectl-kconmon" ./cmd/kubectl-kconmon
+
+      # Fault injection mutates node iptables, so it runs on its own, after the functional suites and
+      # before the gateway overlay changes the release. Every rule is removed by the test's cleanup.
+      # Each leg below exists to run its tests, and every one of them skips itself on a missing env var,
+      # so e2e/leg-log-check.sh fails the leg on any SKIP or on a -run alternative that matched nothing,
+      # instead of passing it as a green no-op.
+      - name: Fault-injection E2E tests
+        run: |
+          set -o pipefail
+          AGENT_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=agent \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
+          AGENT_PF_PID=$!
+          CONSOLE_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=console \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8082/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
+          TESTS=TestFault
+          KCONMON_AGENT_POD="$AGENT_POD" go test -tags=e2e -v -count=1 ./e2e/... -run "$TESTS" -timeout 10m \
+            | tee "$RUNNER_TEMP/e2e-fault.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-fault.log" "fault-injection leg" "$TESTS"
+          kill "$AGENT_PF_PID" "$CONSOLE_PF_PID" || true
+        env:
+          KCONMON_AGENT_URL: http://localhost:8082
+          # The console TestFaultMTUBlackHole reads the pmtu matrix from, with the fixture Prometheus.
+          KCONMON_CONSOLE_URL: http://localhost:8081
+          # The plugin the step above built; kubectlKconmonBinary (e2e/external_test.go) reads it.
+          KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
+
       # ---- External-agent leg: gateway, one simulated bare-host agent, HTTP SD ----------------
       # The run above covers the in-cluster fleet. What follows upgrades the same release with the
       # controller's external gateway on (e2e/testdata/gateway-values.yaml), joins ONE simulated
@@ -281,52 +406,12 @@ jobs:
       # it, a Prometheus reading that endpoint scrapes it, the console matrix and the CLI show it.
       # The degraded-mode steps further down are untouched: they reinstall WITHOUT this overlay.
 
-      # The plugin is asserted through its table output, the way people read it.
-      - name: Build kubectl-kconmon
-        run: go build -o "$RUNNER_TEMP/kubectl-kconmon" ./cmd/kubectl-kconmon
-
-      # Fault injection mutates node iptables, so it runs on its own, after the functional suites and
-      # before the gateway overlay changes the release. Every rule is removed by the test's cleanup.
-      - name: Fault-injection E2E tests
-        run: |
-          AGENT_POD=$(kubectl get pods \
-            -l app.kubernetes.io/component=agent \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}')
-          kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
-          AGENT_PF_PID=$!
-          sleep 3
-          KCONMON_AGENT_POD="$AGENT_POD" go test -tags=e2e -v -count=1 ./e2e/... -run TestFault -timeout 10m
-          kill "$AGENT_PF_PID" || true
-        env:
-          KCONMON_AGENT_URL: http://localhost:8082
-          # The plugin the step above built; kubectlKconmonBinary (e2e/external_test.go) reads it.
-          KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
-
       # Vendored verbatim from prometheus-operator v0.89.0 and applied server-side; the fixture's
       # header says why. This is what makes the chart's ScrapeConfig admissible on kind.
       - name: Apply the ScrapeConfig CRD
         run: |
           kubectl apply --server-side -f e2e/testdata/scrapeconfig-crd.yaml
-          # kubectl wait and a jsonpath filter both error while a fresh CRD has no status.conditions yet.
-          for _ in $(seq 1 60); do
-            est=$(kubectl get crd scrapeconfigs.monitoring.coreos.com \
-              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null || true)
-            [ "$est" = "True" ] && break
-            sleep 1
-          done
-          kubectl wait --for condition=established \
-            crd/scrapeconfigs.monitoring.coreos.com \
-            --timeout=60s
-
-      # A plain Prometheus, not the operator (see e2e/testdata/prometheus.yaml's header). It reads
-      # the SD endpoint itself and is what the console queries for the matrix from here on.
-      - name: Apply the Prometheus fixture
-        run: |
-          kubectl apply -f e2e/testdata/prometheus.yaml
-          kubectl wait --for=condition=ready pod \
-            -l app=kconmon-e2e-prometheus \
-            --timeout=120s
+          e2e/kind-wait.sh crd scrapeconfigs.monitoring.coreos.com
 
       # Self-signed, made per run and discarded with the cluster, like the webhook key. The agent
       # dials the gateway by node IP, so every node's InternalIP is an IP SAN; the DNS SAN is the
@@ -363,34 +448,18 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       # Same release, same images, one more values file. helm takes the values wholesale (no
-      # --reuse-values), so the degraded reinstall below, which passes only the first two files,
-      # removes the gateway again by itself.
+      # --reuse-values), so every reinstall below that leaves gateway-values.yaml out removes the
+      # gateway again by itself.
       - name: Enable the external gateway and the ScrapeConfig
         run: |
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
             -f e2e/testdata/console-values.yaml \
+            -f e2e/testdata/prometheus-values.yaml \
             -f e2e/testdata/gateway-values.yaml \
-            --set controller.image.repository=kconmon-ng-controller \
-            --set controller.image.tag=test \
-            --set controller.image.pullPolicy=Never \
-            --set agent.image.repository=kconmon-ng-agent \
-            --set agent.image.tag=test \
-            --set agent.image.pullPolicy=Never \
-            --set console.image.repository=kconmon-ng-console \
-            --set console.image.tag=test \
-            --set console.image.pullPolicy=Never \
             --wait \
             --timeout 5m
-          # --wait returns while the OLD controller and console pods may still be Terminating (the
-          # trap the degraded-mode step documents), and items[0] below would pick them. One of each.
-          for component in controller console; do
-            for _ in $(seq 60); do
-              PODS=$(kubectl get pods -l app.kubernetes.io/component=$component --no-headers | wc -l)
-              [ "$PODS" -eq 1 ] && break
-              sleep 2
-            done
-          done
+          e2e/kind-wait.sh single-pod controller console
           kubectl get pods -o wide
           # The two objects the overlay adds, as the apiserver holds them: the gateway Service on the
           # pinned NodePort, and the ScrapeConfig the operator's real schema admitted.
@@ -449,9 +518,15 @@ jobs:
 
           kubectl port-forward service/kconmon-e2e-prometheus 9095:9090 &
           PROM_PF_PID=$!
-          sleep 3
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8080/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:9095/-/ready
 
-          go test -tags=e2e -v -count=1 ./e2e/... -run 'TestExternal' -timeout 15m
+          set -o pipefail
+          TESTS=TestExternal
+          go test -tags=e2e -v -count=1 ./e2e/... -run "$TESTS" -timeout 15m \
+            | tee "$RUNNER_TEMP/e2e-external.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-external.log" "external-agent leg" "$TESTS"
 
           kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$PROM_PF_PID" || true
         env:
@@ -466,8 +541,8 @@ jobs:
           KCONMON_EXTERNAL_JOB: kconmon-ng-agent-external
           KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
 
-      # The degraded reinstall drops the gateway overlay; an external agent left behind would sit
-      # redialing a closed port. Remove it so that step sees the fleet the main run had.
+      # The reinstalls below drop the gateway overlay; an external agent left behind would sit
+      # redialing a closed port. Remove it so they see the fleet the main run had.
       - name: Retire the external agent
         run: kubectl delete -f "$RUNNER_TEMP/external-agent-pod.yaml" --ignore-not-found --wait=true
 
@@ -476,15 +551,6 @@ jobs:
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
             -f e2e/testdata/console-values.yaml \
-            --set controller.image.repository=kconmon-ng-controller \
-            --set controller.image.tag=test \
-            --set controller.image.pullPolicy=Never \
-            --set agent.image.repository=kconmon-ng-agent \
-            --set agent.image.tag=test \
-            --set agent.image.pullPolicy=Never \
-            --set console.image.repository=kconmon-ng-console \
-            --set console.image.tag=test \
-            --set console.image.pullPolicy=Never \
             --set console.auth.mode=local \
             --set console.auth.local.bootstrapAdmin=admin \
             --set console.auth.local.secret.create=true \
@@ -496,68 +562,165 @@ jobs:
 
       - name: Run local-users E2E test
         run: |
-          for _ in $(seq 60); do
-            PODS=$(kubectl get pods -l app.kubernetes.io/component=console --no-headers | wc -l)
-            [ "$PODS" -eq 1 ] && break
-            sleep 2
-          done
+          e2e/kind-wait.sh single-pod console
           CONSOLE_POD=$(kubectl get pods -l app.kubernetes.io/component=console -o jsonpath='{.items[0].metadata.name}')
           kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
           CONSOLE_PF_PID=$!
-          sleep 3
-          go test -tags=e2e -v -count=1 ./e2e/... -run TestConsoleLocalUsers -timeout 3m
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
+          set -o pipefail
+          TESTS=TestConsoleLocalUsers
+          go test -tags=e2e -v -count=1 ./e2e/... -run "$TESTS" -timeout 3m \
+            | tee "$RUNNER_TEMP/e2e-local-users.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-local-users.log" "local-users leg" "$TESTS"
           kill "$CONSOLE_PF_PID" || true
         env:
           KCONMON_CONSOLE_URL: http://localhost:8081
           KCONMON_LOCAL_ADMIN_PASSWORD: e2e-admin-password-not-a-secret
 
       # The console skips the reconciler when there is no database -- alert rules live in PostgreSQL.
-      #
-      # Chart 2.x has no console.database.mode: the database is on exactly when a DSN Secret is named,
-      # so CLEARING database.existingSecret is what turns it off. The old --set named a key the chart
-      # does not read, helm accepted it, and the console kept its database -- every degraded-mode
-      # assertion then failed against a fully-functional console.
+      # The database is on exactly when a DSN Secret is named, so clearing database.existingSecret
+      # turns it off.
       - name: Reinstall console with database disabled
         run: |
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
             -f e2e/testdata/console-values.yaml \
-            --set controller.image.repository=kconmon-ng-controller \
-            --set controller.image.tag=test \
-            --set controller.image.pullPolicy=Never \
-            --set agent.image.repository=kconmon-ng-agent \
-            --set agent.image.tag=test \
-            --set agent.image.pullPolicy=Never \
-            --set console.image.repository=kconmon-ng-console \
-            --set console.image.tag=test \
-            --set console.image.pullPolicy=Never \
             --set database.existingSecret= \
             --wait \
             --timeout 5m
 
       - name: Run degraded-mode E2E tests
         run: |
-          # helm --wait returns when the NEW ReplicaSet is ready, but the OLD console pod can still
-          # be Terminating (grace period) and items[0] picks it by creation order -- the first
-          # v2.2.0 release run port-forwarded into the pre-rollout pod, which still had its
-          # database, and every degraded-mode 503 assertion saw a healthy 200. Wait until exactly
-          # one console pod exists, then there is nothing stale to pick.
-          for _ in $(seq 60); do
-            PODS=$(kubectl get pods -l app.kubernetes.io/component=console --no-headers | wc -l)
-            [ "$PODS" -eq 1 ] && break
-            sleep 2
-          done
-          kubectl get pods -l app.kubernetes.io/component=console
+          # The pod left over from before the reinstall still has its database; a 503 test against it
+          # would see a healthy 200.
+          e2e/kind-wait.sh single-pod console
           CONSOLE_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=console \
             -o jsonpath='{.items[0].metadata.name}')
           kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
           CONSOLE_PF_PID=$!
-          sleep 3
-          go test -tags=e2e -v -count=1 ./e2e/... -run TestConsoleDegradedMode -timeout 90s
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
+          set -o pipefail
+          TESTS=TestConsoleDegradedMode
+          go test -tags=e2e -v -count=1 ./e2e/... -run "$TESTS" -timeout 90s \
+            | tee "$RUNNER_TEMP/e2e-degraded.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-degraded.log" "degraded-mode leg" "$TESTS"
           kill "$CONSOLE_PF_PID" || true
         env:
           KCONMON_CONSOLE_URL: http://localhost:8081
+
+      # ---- NetworkPolicy leg ---------------------------------------------------------------------
+      # Every leg above runs with the chart default networkPolicy.enabled=false. This one turns the
+      # agent, controller and console policies on (e2e/testdata/networkpolicy-values.yaml) with the
+      # database and the fixture Prometheus back, and re-runs the tests whose flows the policies gate.
+      # kindnet enforces NetworkPolicy since kind v0.24, so a missing rule fails here.
+      - name: Reinstall with NetworkPolicies enforced
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
+            -f e2e/testdata/prometheus-values.yaml \
+            -f e2e/testdata/networkpolicy-values.yaml \
+            --wait \
+            --timeout 5m
+          kubectl get networkpolicy
+          # A policy only judges new connections, and the agents' streams to the controller predate
+          # it. Restart everything so each flow the tests use is opened under the policies.
+          kubectl rollout restart deployment/kconmon-ng-controller
+          kubectl rollout status deployment/kconmon-ng-controller --timeout=120s
+          kubectl rollout restart deployment/kconmon-ng-console daemonset/kconmon-ng-agent
+          kubectl rollout status deployment/kconmon-ng-console --timeout=120s
+          kubectl rollout status daemonset/kconmon-ng-agent --timeout=120s
+          e2e/kind-wait.sh single-pod console
+          kubectl get pods -o wide
+
+      # The leg's negative control for ingress, from the fixture Prometheus pod, which no chart policy
+      # selects. The controller and agent policies admit it on the metrics port only, so on the same
+      # pod IP with the same tool 9091 must connect and 8080 must not. Only the policy tells the two
+      # apart, so a CNI that stopped enforcing fails here instead of passing every test below.
+      # nc, not the image's busybox wget: that one segfaults on some responses.
+      - name: NetworkPolicies refuse the ports they do not name
+        run: |
+          set -o pipefail
+          probe() {
+            kubectl exec deploy/kconmon-e2e-prometheus -- nc -z -w 5 "$1" "$2"
+          }
+          for component in controller agent; do
+            ip=$(kubectl get pods -l "app.kubernetes.io/component=${component}" -o json \
+              | jq -er '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")]
+                  | .[0].status.podIP')
+            admitted=false
+            for _ in $(seq 10); do
+              if probe "$ip" 9091; then admitted=true; break; fi
+              sleep 3
+            done
+            if [ "$admitted" != true ]; then
+              echo "::error::the fixture Prometheus cannot reach the ${component} at ${ip}:9091," \
+                "which its policy admits"
+              exit 1
+            fi
+            if probe "$ip" 8080; then
+              echo "::error::the fixture Prometheus reached the ${component} at ${ip}:8080, which no ingress rule" \
+                "admits from it; NetworkPolicy is not enforced"
+              exit 1
+            fi
+            echo "ok: ${component} ${ip} admits the fixture on 9091 and refuses it on 8080"
+          done
+
+      # The chart's own test hook, as an operator or Flux's test.enable runs it. With the policies
+      # proven enforced above, the connection-test Pod has to start under its restricted
+      # securityContext and reach the controller through the one ingress rule that names it.
+      - name: The chart's helm test passes under the NetworkPolicies
+        run: helm test kconmon-ng --timeout 2m --logs
+
+      # Registration (TestTopology), console -> controller -> agent dispatch (TestConsoleRuns), ICMP
+      # between agents (TestConsoleMTRHistory), agent external egress (TestConsoleExternalCheck*),
+      # console -> apiserver (TestConsoleAlertRuleSyncAgainstRealCRD), agent-to-agent tcp/udp/icmp/pmtu,
+      # the fixture's scrape and console -> Prometheus (TestFault*). The external-check target is the
+      # fixture Prometheus: the controller's own port is closed to agents under its policy, by design.
+      # TestNetworkPolicy* is the egress negative control: an agent probe to the console's open port
+      # that the allowlist admits and no agent egress rule names must fail.
+      # The re-runs are named in full: leg-log-check.sh wants one passing test per -run alternative,
+      # so a prefix matching two tests would let either leave the leg. TestNetworkPolicy stays a prefix
+      # like in the main suite's -skip, so a new policy test lands here and nowhere else.
+      - name: Run NetworkPolicy E2E tests
+        run: |
+          CONTROLLER_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=controller \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 &
+          CONTROLLER_PF_PID=$!
+          CONSOLE_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=console \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+          AGENT_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=agent \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
+          AGENT_PF_PID=$!
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8080/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8081/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors -o /dev/null http://localhost:8082/healthz
+          set -o pipefail
+          TESTS='TestTopology|TestConsoleRuns|TestConsoleMTRHistory'
+          TESTS="$TESTS|TestConsoleExternalCheckAssignment|TestConsoleExternalCheckDenied"
+          TESTS="$TESTS|TestConsoleAlertRuleSyncAgainstRealCRD"
+          TESTS="$TESTS|TestFaultPairFailureTriggersMTRAndRecovers|TestFaultMTUBlackHole|TestNetworkPolicy"
+          KCONMON_AGENT_POD="$AGENT_POD" go test -tags=e2e -v -count=1 ./e2e/... -timeout 15m -run "$TESTS" \
+            | tee "$RUNNER_TEMP/e2e-networkpolicy.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/e2e-networkpolicy.log" "NetworkPolicy leg" "$TESTS"
+          kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
+        env:
+          KCONMON_CONTROLLER_URL: http://localhost:8080
+          KCONMON_CONSOLE_URL: http://localhost:8081
+          KCONMON_AGENT_URL: http://localhost:8082
+          KCONMON_EXTERNAL_TARGET_ADDR: kconmon-e2e-prometheus.default.svc.cluster.local:9090
+          KCONMON_DENIED_TARGET_ADDR: 203.0.113.10:80
+          KCONMON_NETWORKPOLICY_BLOCKED_ADDR: kconmon-ng-console.default.svc.cluster.local:8080
+          KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
 
       - name: Collect debug info on failure
         if: ${{ failure() }}
@@ -575,11 +738,16 @@ jobs:
           echo "=== External agent (gateway leg) ==="
           kubectl get pod kconmon-e2e-external-agent -o wide || true
           kubectl logs kconmon-e2e-external-agent --tail=50 || true
-          echo "=== Prometheus fixture logs (gateway leg) ==="
+          echo "=== Prometheus fixture logs (fault and gateway legs) ==="
           kubectl logs -l app=kconmon-e2e-prometheus --tail=50 || true
-          echo "=== PrometheusRule objects (M7) ==="
+          echo "=== PrometheusRule objects ==="
           kubectl get prometheusrules -o yaml || true
-          echo "=== Alerting RBAC (M7) ==="
+          echo "=== Alerting RBAC ==="
           kubectl get role,rolebinding -l app.kubernetes.io/component=console || true
+          echo "=== Node FORWARD chains (fault leg) ==="
+          for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- $node"
+            docker exec "$node" iptables -S FORWARD || true
+          done
           echo "=== Events ==="
           kubectl get events --sort-by='.lastTimestamp' | tail -30

@@ -14,7 +14,11 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "requirements-docs.txt"
+      - ".github/requirements-docs.lock"
       - ".github/workflows/docs.yaml"
+      # Pulled into the site by pymdownx.snippets (reference/release-notes.md, reference/helm-values.md).
+      - "RELEASE_NOTES.md"
+      - "charts/kconmon-ng/values.yaml"
   pull_request:
     branches: [main]
     # Keep identical to the push list above: a PR that can change the deployed
@@ -23,7 +27,11 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "requirements-docs.txt"
+      - ".github/requirements-docs.lock"
       - ".github/workflows/docs.yaml"
+      # Pulled into the site by pymdownx.snippets (reference/release-notes.md, reference/helm-values.md).
+      - "RELEASE_NOTES.md"
+      - "charts/kconmon-ng/values.yaml"
   workflow_dispatch:
 
 # Read-only by default; the deploy job below requests exactly the Pages scopes
@@ -50,10 +58,25 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: requirements-docs.txt
+          cache-dependency-path: .github/requirements-docs.lock
+
+      # requirements-docs.txt names the five tools; the lock pins them and everything they pull in,
+      # with hashes, so a dependency released minutes ago never reaches the deployed site. A pin
+      # edited without regenerating the lock (the command is in its header) fails here.
+      - name: The lock carries every pin in requirements-docs.txt
+        run: |
+          stale=0
+          while IFS= read -r pin; do
+            if ! grep -qxF -- "${pin} \\" .github/requirements-docs.lock; then
+              echo "::error::${pin} is not in .github/requirements-docs.lock;" \
+                "regenerate it with the command in its header"
+              stale=1
+            fi
+          done < <(grep -E '^[A-Za-z0-9]' requirements-docs.txt)
+          exit "$stale"
 
       - name: Install docs toolchain
-        run: pip install -r requirements-docs.txt
+        run: pip install --require-hashes -r .github/requirements-docs.lock
 
       # --strict turns MkDocs warnings (broken nav entries, bad snippet
       # paths, link validation) into failures; this is the whole PR gate.

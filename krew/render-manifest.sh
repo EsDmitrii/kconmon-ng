@@ -24,12 +24,19 @@ sum() {
   fi
 }
 
+# Assigned first, not inlined into sed: a failing $(sum ...) inside sed's arguments does not trip
+# set -e.
+linux_amd64=$(sum linux_amd64)
+linux_arm64=$(sum linux_arm64)
+darwin_amd64=$(sum darwin_amd64)
+darwin_arm64=$(sum darwin_arm64)
+
 sed \
   -e "s/{{VERSION}}/${VERSION}/g" \
-  -e "s/{{SHA256_LINUX_AMD64}}/$(sum linux_amd64)/g" \
-  -e "s/{{SHA256_LINUX_ARM64}}/$(sum linux_arm64)/g" \
-  -e "s/{{SHA256_DARWIN_AMD64}}/$(sum darwin_amd64)/g" \
-  -e "s/{{SHA256_DARWIN_ARM64}}/$(sum darwin_arm64)/g" \
+  -e "s/{{SHA256_LINUX_AMD64}}/${linux_amd64}/g" \
+  -e "s/{{SHA256_LINUX_ARM64}}/${linux_arm64}/g" \
+  -e "s/{{SHA256_DARWIN_AMD64}}/${darwin_amd64}/g" \
+  -e "s/{{SHA256_DARWIN_ARM64}}/${darwin_arm64}/g" \
   "$TMPL" > "$OUT"
 
 echo "rendered $OUT for v${VERSION}"
