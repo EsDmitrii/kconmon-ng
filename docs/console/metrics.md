@@ -6,8 +6,8 @@ Curated metric charts: the fleet's key series over time, compared with each othe
     This chapter documents the console's **Metrics** screen. The reference for the exported Prometheus metrics and the chart-shipped alert rules is [Metrics and alerting](../metrics.md).
 
 <figure markdown>
-![Metrics page, 1h range, during a staged break: the Compare bar with Probe failure rate by protocol as A, the another metric tab active and UDP packet loss (worst 5 pairs) as B; the overlay chart with B's dashed lines at 100% since about 09:37 after two shorter bursts before 08:56, and A's tcp, udp and icmp lines climbing together to about 62%, drawn on top of each other so only the purple udp line shows; below it the TCP RTT p95 and UDP packet loss worst-5 charts](../img/console-metrics-compare.png){ loading=lazy }
-<figcaption>A comparison engaged: probe failure rate by protocol as A, UDP packet loss on the worst five pairs as B on the same axes. B's dashed lines jump to 100% at the break and A climbs after them to about 62%. TCP, UDP and ICMP fail at the same rate here, so A's three lines coincide and read as one. The single-metric charts continue below.</figcaption>
+![Metrics page, 1h range, during a staged break: the Compare bar with Probe failure rate by protocol as A, the another metric tab active and UDP packet loss (worst 5 pairs) as B; the overlay chart with B's dashed lines at 100% in a short burst around 06:08 to 06:10 and again from about 06:17, A's udp line rising to about 17% during the first burst, then A's tcp, udp and icmp lines climbing together to about 60%, drawn on top of each other so only the orange udp line shows, and A's pmtu line near 0; below it the TCP RTT p95 and UDP packet loss worst-5 charts](../img/console-metrics-compare.png){ loading=lazy }
+<figcaption>A comparison engaged: probe failure rate by protocol as A, UDP packet loss on the worst five pairs as B on the same axes. B's dashed lines jump to 100% at each break and A climbs after them: to about 17% on UDP alone during the short UDP drop into zone b, then to about 60% once worker2 and worker5 are cut off. TCP, UDP and ICMP fail at the same rate there, so A's three lines coincide and read as one. The single-metric charts continue below.</figcaption>
 </figure>
 
 ## The five charts
@@ -20,7 +20,7 @@ Curated metric charts: the fleet's key series over time, compared with each othe
 
 Each is a fixed PromQL query over the exported `kconmon_ng_*` series; the exact expressions live in [`web/src/lib/curated-metrics.ts`](https://github.com/EsDmitrii/kconmon-ng/blob/main/web/src/lib/curated-metrics.ts), and any of them can be copied onto the [PromQL](promql.md) page and modified freely. An empty chart says so in words: "No series returned for this range — try a longer window above."
 
-A **Time range** switch (`15m` / `1h` / `6h` / `24h`) applies to every chart. Charts poll every 30 seconds through the console's guarded Prometheus proxy (`POST /api/v1/promql/query_range`), with the query step sized for roughly 240 points per series and never finer than 15 s. With the [Time Machine](time-machine.md) engaged, the window ends at the viewed instant and the range is measured back from there.
+A **Time range** switch (`15m` / `1h` / `6h` / `24h`) applies to every chart. Charts poll every 30 seconds through the console's guarded Prometheus proxy (`POST /api/v1/promql/query_range`), with the query step sized for roughly 240 points per series and never finer than 15 s. With the [Time Machine](time-machine.md) engaged, the window ends at the viewed instant and the range is measured back from there. Time-axis ticks print `HH:mm`, and `HH:mm:ss` for a tick between whole minutes, so a short window does not repeat one label along the axis.
 
 ## The synced cursor
 
@@ -32,24 +32,24 @@ The **Compare** panel overlays a reference leg on metric A's axes:
 
 - **Compare A with**: *another metric* (pick **Metric A** and **Compare with metric**) or *itself, earlier* (**Compare with earlier**: `1h` / `24h` / `7d`). Self-comparison draws "A · now (solid)" against "A · {shift} earlier (dashed)".
 - Units are never silently mixed. Comparing a ratio against a seconds axis, the page labels the mismatch and tells you to read the reference leg's shape, not its height.
-- A shift past Prometheus's retention answers plainly: "No data {shift} ago — Prometheus's retention does not reach that far back."
+- An earlier leg with no data answers plainly: "No data {shift} ago — either Prometheus's retention stops short of it, or nothing was being probed yet." The console cannot tell those two causes apart, so it names both.
 
 ## Annotations and maintenance windows
 
 Two bars ride under the charts, scoped to the plotted window. This is the concept's home page; the other surfaces that show them link back here.
 
 - **＋ annotate** drops a note at a moment or over a range ("Rolled the gateway"). Needs `annotations:write`. Annotations appear interleaved in [Events](events.md) with a **Note** badge, as timeline rows in [Incidents](incidents.md), and on the object pages' chart bars.
-- **＋ maintenance** declares a maintenance window: start, end, reason. Needs `maintenance:write`. A declared window mutes alert noise attribution and annotates every chart it covers; the full list, future windows included, is managed on [Alerting](alerting.md#maintenance-windows).
+- **＋ maintenance** declares a maintenance window: start, end, reason. Needs `maintenance:write`. A declared window mutes alert noise attribution and annotates every chart it covers. A window declared on this page is global, so while it is open it also holds back every console alert webhook, cluster-wide, and the form says so. The full list, future windows included, is managed on [Alerting](alerting.md#maintenance-windows), which also covers the webhook hold.
 
 Both are create-and-delete surfaces: an annotation or window can be removed (delete asks to confirm), but there is no edit; fix a wrong one by deleting and re-creating it. Both need the database.
 
 ## When the p95 charts go dark
 
-Under the cardinality valve (`agent.metrics.detail`, chart 2.3.0 and later), `counters-only` drops the four per-pair histograms at scrape time. On this page that darkens **TCP RTT p95** and **ICMP RTT p95**, while **UDP packet loss** (a gauge) and **Probe failure rate** (counters) keep drawing — and **DNS resolution p95** survives too, because the DNS family is recorded per host and resolver, not per pair. Under `zone-only` every series naming a destination node is gone; the DNS, HTTP and external families remain. Details on the modes: [Matrix](matrix.md#when-series-are-missing).
+Under the cardinality valve (`agent.metrics.detail`, chart 2.3.0 and later), `counters-only` drops the four per-pair histograms at scrape time. On this page that darkens **TCP RTT p95** and **ICMP RTT p95**, while **UDP packet loss** (a gauge) and **Probe failure rate** (counters) keep drawing, and **DNS resolution p95** survives too, because the DNS family is recorded per host and resolver, not per pair. Under `zone-only` every series naming a destination node is gone; the DNS, HTTP and external families remain. Details on the modes: [Matrix](matrix.md#when-series-are-missing).
 
 ## Deep links
 
-- *Compare in Explore* from [Incidents](incidents.md) opens this page; the A/B slots stay bound to curated metrics, so choose the window here. The page says so rather than dropping half the promise.
+- *Compare in Metrics* from [Incidents](incidents.md) opens this page; the A/B slots stay bound to curated metrics, so choose the window here. The page says so rather than dropping half the promise.
 - The command palette's *Add an annotation…* and *Declare a maintenance window…* actions land here.
 
 <!-- verified against: web/src/pages/explore.tsx (EXPLORE_POLL_MS=30s, TARGET_POINTS=240, MIN_STEP_SECONDS=15),

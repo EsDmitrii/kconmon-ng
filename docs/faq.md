@@ -18,20 +18,20 @@ and kubenurse:
 | Status | active | archived (June 2026) | active | active |
 | Language | Go | Node.js | Go | Go |
 | Architecture | agent DaemonSet + controller; peer list pushed over gRPC | agent DaemonSet + controller; peers fetched every 5s | one DaemonSet; every pod queries the Kubernetes API for peers | one DaemonSet |
-| Node-to-node probes | TCP, UDP and ICMP on every ordered pair, per protocol | TCP (HTTP GET), UDP | HTTP between pods; UDP optional, off by default | HTTP between neighbours |
+| Node-to-node probes | TCP, UDP and ICMP on every ordered pair, per protocol, plus a once-a-minute path MTU probe | TCP (HTTP GET), UDP | HTTP between pods; UDP optional, off by default | HTTP between neighbours |
 | Other checks | DNS, HTTP(S) URLs, external targets behind an agent-side CIDR allowlist | DNS | DNS; TCP/HTTP(S) to external targets | API server (direct and via DNS), ingress, service |
-| On probe failure | reactive MTR trace, per-hop path history | — | — | — |
-| Zone awareness | `source_zone`/`destination_zone` on every peer metric | zone labels on metrics | — | — |
+| On probe failure | reactive MTR trace, per-hop metrics | no | no | no |
+| Zone awareness | `source_zone`/`destination_zone` on every peer metric | zone labels on metrics | no | no |
 | Behaviour at scale | full N×N mesh by default; sparse mesh since v2.3.0 | full N×N mesh | full mesh | caps neighbour checks at 10 nodes by default |
-| UI | optional Console: matrix, topology, incidents, Time Machine, alert rule editor | — (sample Grafana dashboard) | built-in connectivity graph | — (Grafana dashboard provided) |
+| UI | optional Console: matrix, topology, incidents, Time Machine, alert rule editor | no (sample Grafana dashboard) | built-in connectivity graph | no (Grafana dashboard provided) |
 
-The table states what each project's README claims as of August 2026; a `—`
+The table states what each project's README claims as of August 2026; a *no*
 means the README does not claim the feature, not that a flag or fork cannot add
 it. Reach for **goldpinger** when an HTTP-level "can pods see each other" graph
 with a tiny footprint is enough, for **kubenurse** when the question is the path
 through ingress, service and API server rather than raw node-to-node transport,
-and for **kconmon-ng** when you need per-protocol pair evidence — the
-UDP-but-not-TCP class of failure — with the bad hop already traced.
+and for **kconmon-ng** when you need per-protocol pair evidence (the
+UDP-but-not-TCP class of failure) with the bad hop already traced.
 
 ### Do I need the Prometheus Operator?
 
@@ -84,24 +84,35 @@ the monitor itself.
 ### Does restarting kconmon-ng write false loss into its own metrics?
 
 No. An agent deregisters on shutdown, so its peers stop probing it instead
-of recording failures, and a departed peer's per-pair gauges are dropped
-rather than left as ghost readings.
+of recording failures. A departed peer's per-pair gauges are dropped at once
+rather than left as ghost readings, and its counters and histograms 10
+minutes later, so a peer that is back within those 10 minutes keeps its
+counters.
 
 ### How do I change checker settings without a rollout?
 
-The binaries watch their config file and hot-reload it, so an edited
-ConfigMap propagates with no restart. A `helm upgrade`, though, still rolls
-pods on a config change: each workload carries a checksum annotation over
-the config it consumes, so a values edit cannot leave old and new config
-running side by side. The rolls are scoped to what actually changed:
-shared `config.*` values are checksummed by the agent DaemonSet and the
-controller, while `console.*` values live in the console's own ConfigMap and
-Secrets and roll only the console. One caveat cuts the other way: the chart
-cannot checksum the *content* of a Secret it merely references
-(`existingSecret` names), so rotating a DSN in place rolls nothing and needs
-a `kubectl rollout restart` by hand. Either way the config is parsed
-strictly: unknown keys or invalid settings fail startup, and on hot-reload
-an invalid config is rejected while the previous one stays active.
+Edit the config file, or the ConfigMap in-cluster: both binaries watch it
+and apply checker settings live. On the agent that is `logLevel` and
+everything under `checkers.*` (intervals, timeouts, `enabled`, targets,
+the external allowlist); on the controller `logLevel`, `topology.*`,
+`controller.agentTtl` and the external allowlist it publishes. Ports,
+identity, TLS file paths, `metricsPrefix`, `logFormat`, the gateway, leader
+election and the event stream are read once at startup: a change to one of
+them logs a warning naming it and waits for a restart. The full split is in
+[What reloads and what does not](configuration.md#what-reloads-and-what-does-not).
+
+A `helm upgrade`, though, still rolls pods on a config change: each workload
+carries a checksum annotation over the config it consumes, so a values edit
+cannot leave old and new config running side by side. The rolls are scoped
+to what actually changed: shared `config.*` values are checksummed by the
+agent DaemonSet and the controller, while `console.*` values live in the
+console's own ConfigMap and Secrets and roll only the console. One caveat
+cuts the other way: the chart cannot checksum the *content* of a Secret it
+merely references (`existingSecret` names), so rotating a DSN in place rolls
+nothing and needs a `kubectl rollout restart` by hand. Either way the config
+is parsed strictly: unknown keys or invalid settings fail startup, and on
+hot-reload an invalid config is rejected while the previous one stays
+active.
 
 ### Can I run an agent on a host outside the cluster?
 
@@ -145,20 +156,22 @@ trigger is a concrete host that needs it.
 ### How many nodes can it handle?
 
 50–100 nodes is the production-proven envelope. The cost centre is not the
-probes, it is the metrics: each directed pair keeps roughly 75 active series
-and pairs grow as N×(N−1), which lands around 740k series at 100 nodes. The
+probes, it is the metrics: each directed pair keeps 78 active series with
+the default checkers and pairs grow as N×(N−1), which lands around 770k
+series at 100 nodes. The
 full arithmetic is in
 [Scaling and cardinality](metrics.md#scaling-and-cardinality). For larger
 fleets, `topology.mode: sparse` (since v2.3.0) trims the probed pairs to a
 ring over the node names plus cross-zone chords, so the series count grows
 roughly linearly with node count instead of quadratically.
 
-### My Prometheus is drowning — what are the levers?
+### My Prometheus is drowning: what are the levers?
 
 Three levers, and they work through two different mechanisms. The first two
 are scrape-time: `agent.metrics.detail: counters-only` drops the per-pair
-histograms (~75 → ~12 series per pair) while every pair alert keeps firing,
-and `zone-only` keeps only the Z² zone-pair plane. Both render as
+histograms (78 → 14 series per pair) while every pair alert keeps firing,
+and `zone-only` keeps only the zone plane: one set per agent and destination
+zone, which grows as N×Z instead of N². Both render as
 `metricRelabelings` on the agent ServiceMonitor, so they require
 `serviceMonitor.enabled` (the chart refuses the combination otherwise); on
 plain Prometheus, copy the equivalent `metric_relabel_configs` from
@@ -194,6 +207,12 @@ size it really carries with `config.checkers.pmtu.size`, or switch the rule off
 with `prometheusRule.pathMtuBlackHole.enabled: false`. See
 [When the black hole is by design](scenarios/mtu-black-hole.md#when-the-black-hole-is-by-design).
 
+On Cilium you do not need `checkers.pmtu.size`. Cilium keeps the pod's `eth0`
+at 1500 and sets the tunnel MTU on its routes, and the probe takes its size
+from the route to the peer, so it probes at 1450 with VXLAN without any
+configuration. It falls back to the interface MTU only when the route lookup
+fails, and says so once in the agent log.
+
 ### Why is everything in one zone / why does Topology say no zone?
 
 The controller reads zones from the node label named by
@@ -223,6 +242,14 @@ ingress. Set a real mode (`local`, `header` or
 [`oidc`](scenarios/oidc-setup.md)) before putting it behind one, and narrow
 `console.networkPolicy.ingressFrom` to whatever fronts the UI. That cannot
 lock you out, since `kubectl port-forward` does not traverse NetworkPolicy.
+Behind an ingress, also list the ingress controller's addresses (its pod
+CIDR at the widest) in `console.clientAddress.trustedProxyCIDRs`, whatever the
+mode, so rate limits and the audit log see real client addresses
+([Configuration](configuration.md#console)). That list never grants
+identity; in `header` mode `console.auth.header.trustedProxyCIDRs` names only
+the authenticating proxy. Since 2.5.0 the console's pages
+answer with `Content-Security-Policy: frame-ancestors 'none'` and
+`X-Frame-Options: DENY`, so no other site can embed the console in an iframe.
 
 ### Why does Prometheus scrape a separate port?
 
@@ -240,5 +267,5 @@ cluster's egress policy (`networkPolicy.externalEgress`). A console-declared
 target outside the allowlist is refused by every agent and counted in
 `kconmon_ng_external_denied_total`. The only Console feature that talks to
 anything outside the cluster on its own is optional MTR hop enrichment
-(rDNS/GeoIP), off by default — and webhooks you configure yourself, which
+(rDNS/GeoIP), off by default, and webhooks you configure yourself, which
 are HMAC-signed with per-endpoint secrets encrypted at rest.

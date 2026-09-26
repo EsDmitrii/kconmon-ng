@@ -12,10 +12,11 @@ recorded execution with a status and results.
 Two layers, configured in two places:
 
 - **Built-in checkers** live in the agents and are configured through Helm
-  (`config.checkers.*`): TCP, UDP, ICMP and DNS run out of the box on a 5s
-  interval against every peer; HTTP is opt-in because it needs URLs only you
-  know; MTR fires reactively on probe failure. They need no database and no
-  Console; this is the measurement core described in
+  (`config.checkers.*`): TCP, UDP and ICMP run out of the box on a 5s
+  interval against every peer, the path MTU probe once a minute, and DNS on
+  a 5s interval from every node; HTTP is opt-in because it needs URLs only
+  you know; MTR fires reactively when a TCP, UDP or ICMP probe fails. They
+  need no database and no Console; this is the measurement core described in
   [Architecture](architecture.md).
 - **Check definitions** are Console objects (stored in PostgreSQL, managed on
   the [Scheduled checks](../console/scheduled-checks.md) page or via
@@ -67,12 +68,12 @@ Runs come from three places:
   permalink to the result.
 - **From a schedule**, when the scheduler fires a due check definition.
 - **From the terminal**: `kubectl kconmon check node-1 node-2 --type udp`
-  drives the controller's [diagnostics endpoint](../api.md) directly — same
+  drives the controller's [diagnostics endpoint](../api.md) directly, same
   probes, no Console required.
 
 <figure markdown="span">
-  ![Permalink of a finished instant ICMP run: succeeded badge, Type ICMP, Plane pod, Pairs 110/110 ok, the first page of pair rows each succeeded with a microsecond duration, Page 1 of 11](../img/checks-runs-schedules-run-detail.png){ loading=lazy }
-  <figcaption>A finished on-demand run on its permalink: the terminal <em>succeeded</em> badge, the fan-out count (110/110 pairs ok) and the per-pair results this page's vocabulary describes, paged ten at a time.</figcaption>
+  ![Permalink of a finished instant ICMP run: succeeded badge, Type ICMP, Plane pod, Pairs 30/30 ok, the first page of pair rows each succeeded with a duration between 97µs and 0.9ms, Showing 10 of 30 pairs, Page 1 of 3](../img/checks-runs-schedules-run-detail.png){ loading=lazy }
+  <figcaption>A finished on-demand run on its permalink: the terminal <em>succeeded</em> badge, the fan-out count (30/30 pairs ok) and the per-pair results this page's vocabulary describes, paged ten at a time.</figcaption>
 </figure>
 
 Run history (`GET /api/v1/runs`) is what the Run checks page lists, and what

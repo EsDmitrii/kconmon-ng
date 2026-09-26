@@ -23,8 +23,7 @@ why `/metrics` got a listener of its own: a NetworkPolicy cannot say "this
 port, but only these paths", so admitting a scraper to the API port admitted
 the scraper's whole namespace to the fleet's control plane. Two listeners make
 "let Prometheus in" and "let this caller drive the fleet" two separate
-decisions. The one route added to the metrics listener since 2.4.0 follows
-the same logic: the external-agent target list is served there precisely
+decisions. The one API route on the metrics listener follows the same logic: the external-agent target list is served there precisely
 because that is the port the scrape rule opens, so discovery needs no second
 hole in the policy. It is read-only and discloses only what a scraper is
 about to scrape anyway.
@@ -33,17 +32,17 @@ about to scrape anyway.
 
 | Endpoint          | Method | Description                                           |
 | ----------------- | ------ | ----------------------------------------------------- |
-| `/healthz`        | GET    | Liveness probe — always `200 ok`                      |
-| `/readyz`         | GET    | Readiness probe — `503` until peer watch is confirmed |
+| `/healthz`        | GET    | Liveness probe; always `200 ok`                       |
+| `/readyz`         | GET    | Readiness probe; `503` until peer watch is confirmed  |
 | `/metrics`        | GET    | Prometheus metrics (also on `metricsPort`)            |
-| `/api/v1/version` | GET    | `{"version":"…","commit":"…"}` — no capability field  |
+| `/api/v1/version` | GET    | `{"version":"…","commit":"…"}`; no capability field   |
 
 ## Controller
 
 | Endpoint           | Method | Description                                                              |
 | ------------------ | ------ | ------------------------------------------------------------------------ |
-| `/healthz`         | GET    | Liveness probe — always `200 ok`                                         |
-| `/readyz`          | GET    | Readiness probe — `503` until gRPC server is bound                       |
+| `/healthz`         | GET    | Liveness probe; always `200 ok`                                          |
+| `/readyz`          | GET    | Readiness probe; `503` until gRPC server is bound                        |
 | `/metrics`         | GET    | Prometheus metrics (also on `metricsPort`)                               |
 | `/api/v1/topology`    | GET  | JSON snapshot of all registered agents and cluster nodes with zone info (leader only) |
 | `/api/v1/version`     | GET  | Build info plus capability flags; see below                              |
@@ -91,7 +90,7 @@ report a topology with no agents.
       "nodeName": "node-1",
       "podIP": "10.0.0.1",
       "zone": "us-east-1a",
-      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:dns", "plane:mtr"],
+      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:pmtu", "plane:dns", "plane:mtr"],
       "httpPort": 8080,
       "udpPort": 9090,
       "metricsPort": 9091
@@ -102,7 +101,7 @@ report a topology with no agents.
       "podIP": "203.0.113.10",
       "zone": "external",
       "labels": { "kconmon-ng.io/external": "true" },
-      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:dns", "plane:mtr"],
+      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:pmtu", "plane:dns", "plane:mtr"],
       "httpPort": 18080,
       "udpPort": 19090,
       "metricsPort": 19091
@@ -127,7 +126,7 @@ node's address.
 While a sparse topology plan is in force (`topology.mode: sparse`, fleet at or
 above `topology.sparse.autoThreshold`), the snapshot also carries `probePlan`:
 source node name → the sorted node names it is planned to probe. The field is
-**absent** on a full-mesh fleet — absence means "every pair is intended", which
+**absent** on a full-mesh fleet: absence means "every pair is intended", which
 keeps pre-sparse payloads unchanged. A node mapped to an empty list is planned
 to probe nobody (the plan's fail-closed state until its agent re-registers).
 
@@ -147,8 +146,9 @@ agents, but the value is always "the address peers probe"). `capabilities`
 lists what each agent build advertised at registration; a pre-v1.6.0 agent
 sends none. Since 2.4.0 the list also carries `plane:<protocol>` entries
 naming the probe planes the agent runs (one per enabled checker, `plane:mtr`
-always): an agent with no `plane:` entry at all is older than 2.4.0 and must
-be read as running every plane, never as running none. The Console applies
+always; `plane:pmtu` since 2.5.0): an agent with no `plane:` entry at all is
+older than 2.4.0 and must be read as running every plane, never as running
+none. The Console applies
 exactly that fail-open rule.
 
 ### `GET /api/v1/prometheus/sd`
@@ -214,8 +214,12 @@ outlive an eviction. The rules:
 ### `POST /api/v1/diagnostics`
 
 Runs a single on-demand check from a source node's agent to a destination node
-and returns the resulting `CheckResult` verbatim. This is the endpoint the
-`kubectl-kconmon` plugin drives. Only the controller **leader** serves it (a
+and returns the resulting `CheckResult` verbatim. An agent that reported no
+payload gets a `CheckResult` built from the task instead: `type`, `source`,
+`destination`, `success`, `error` and a timestamp (the agent's, or the
+controller's clock when the agent sent none), so the body is never empty and
+the terminal `CheckObserved` or `MTRCompleted` event is published either way.
+This is the endpoint the `kubectl-kconmon` plugin drives. Only the controller **leader** serves it (a
 non-leader replica returns `503`), because only the leader holds the
 authoritative agent registry and their task streams.
 
@@ -225,9 +229,9 @@ Request body:
 | -------------------- | ------ | -------- | ----------- |
 | `source`             | string | yes      | Node name whose agent runs the probe |
 | `destination`        | string | *        | Node name to probe (`destinationKind=node`), or the target's NAME for an external one |
-| `type`               | string | yes      | One of `tcp`, `udp`, `icmp`, `dns`, `http`, `mtr` |
-| `plane`              | string | no       | Traffic plane; defaults to `pod` |
-| `destinationKind`    | string | no       | `node` (default) or `external` — added in v1.6.0 |
+| `type`               | string | yes      | One of `tcp`, `udp`, `icmp`, `pmtu`, `dns`, `http`, `mtr` |
+| `plane`              | string | no       | Traffic plane; only `pod`, the default, is accepted |
+| `destinationKind`    | string | no       | `node` (default) or `external` |
 | `destinationAddress` | string | *        | Required for `destinationKind=external`; the address to probe |
 
 An optional `?timeout=<seconds>` query parameter caps the dispatch wait. It
@@ -241,7 +245,7 @@ delivered here and nowhere else. A client must therefore be prepared to wait
 the full negotiated timeout for the first response byte, and must not impose a
 shorter whole-request timeout of its own.
 
-**External destinations (v1.6.0).** With `destinationKind=external` the
+**External destinations.** With `destinationKind=external` the
 destination is not resolved against the agent registry: `destinationAddress`
 carries the address and `destination`, when present, only names it. The name,
 never the address, is what published events and metrics report as the
@@ -261,17 +265,57 @@ Two gates apply and both are the agent's, not the controller's:
   the split exists because the socket carries the same bytes the REST routes
   do and must ask the same permission.
 
+Only `tcp`, `icmp` and `mtr` reach an external destination, as the agent
+already enforced. `pmtu` probes another agent's UDP echo listener, so
+`type=pmtu` with `destinationKind=external` is a `400`, and so are `udp`,
+`dns` and `http`, which the agent would refuse.
+The body starts `external destinations support tcp, icmp and mtr checks
+only; ` and gives the reason: for `udp`, `udp counts replies from the kconmon
+probe server, which only another agent runs, so destinationKind must be
+node`; for `dns` and `http`, `<type> is not a one-off external check; use
+destinationKind node, or a continuous external check for an external
+resolver or URL`.
+
+A `plane` other than `pod` or empty is a `400` too, `plane must be "pod":
+agents probe the pod network only`. `kubectl kconmon check --plane` keeps the flag for scripts, accepts only
+`pod` and exits 1 on anything else without contacting the controller.
+
+Every check also needs a source agent that runs that probe type. An agent
+that lists its planes without `plane:<type>` gets a `501` instead of a task
+it would refuse, for peer and external destinations alike: `agent on node
+<source> does not run <type> probes (checkers.<type>.enabled=false)`. For
+`pmtu` the reason reads `older than 2.5.0 or checkers.pmtu.enabled=false`;
+`http` is off in the default chart, so an `http` check on a default install
+gets this `501`. An agent that lists no planes at all is dispatched as
+before. The `501` is counted as `result="unsupported"`, a Console run or a
+scheduled check of that type ends as an error rather than a failed probe,
+and `kubectl kconmon check` exits 1 on it with `controller returned HTTP 501:
+...` instead of printing FAIL and exiting 2.
+
 Status codes:
 
 | Code  | Meaning                                                                       |
 | ----- | ----------------------------------------------------------------------------- |
 | `200` | Check dispatched and completed; body is the `CheckResult` JSON                |
-| `400` | Malformed JSON, missing `source`/`destination`/`type`, or an invalid `type`   |
+| `400` | Malformed JSON, missing `source`/`destination`/`type`, an invalid `type`, a `type` other than `tcp`, `icmp` or `mtr` with `destinationKind=external`, or a `plane` other than `pod` |
+| `413` | The body is over 64 KiB (`request body exceeds 65536 bytes`) |
 | `404` | No agent registered on the source/destination node, or no active task stream  |
-| `501` | `destinationKind=external` and the source agent does not advertise `external-checks` |
+| `501` | The source agent does not run probes of this `type` (it lists its planes without `plane:<type>`), or `destinationKind=external` and it does not advertise `external-checks` |
 | `502` | The dispatch failed for a reason other than timeout or a missing task stream  |
-| `503` | This replica is not the leader                                                |
+| `503` | This replica is not the leader, or it lost leadership while the check was in flight (`leadership lost`); retry as for `not the leader` |
 | `504` | The check did not complete before the timeout                                 |
+
+A caller whose own connection to the controller closes before the answer (a
+cancelled Console run, an HTTP client that gives up) gets no response, and
+the attempt is counted as `result="cancelled"` in
+`kconmon_ng_controller_diagnostics_total` rather than as an error. Ctrl-C in
+`kubectl kconmon` is not one of them: the CLI reaches the controller through
+a Kubernetes port-forward, which keeps the pod-side connection open after the
+CLI exits, so the controller never sees it go and counts the check by its
+outcome, usually `result="ok"`. A check that ran but whose answer could not be written is
+counted as `result="undelivered"`, logged at ERROR, and followed by a
+`DiagnosticProgress` event with `state: undelivered` after its
+`CheckObserved` or `MTRCompleted`.
 
 A `200` only means the check *ran*; inspect `success` to see whether it
 passed. Durations are serialized as integer nanoseconds (Go `time.Duration`).
@@ -343,21 +387,29 @@ agents (`ExternalCheckAssignment` is a complete replacement too):
 }
 ```
 
-`checkType` must be one of `tcp`, `icmp`, `dns`, `http`. `udp` and `mtr` are
-refused with `400`. UDP's probe is a peer-to-peer protocol against another
-agent's probe server, which no external host runs, and a continuous MTR
+`checkType` must be one of `tcp`, `icmp`, `dns`, `http`. `udp`, `pmtu` and
+`mtr` are refused with `400`. The UDP and path MTU probes speak a peer-to-peer
+protocol against another agent's probe server, which no external host runs,
+and a continuous MTR
 against an internet destination is a traffic and cardinality decision
 (`mtr_hop_rtt_seconds` is labelled by `hop_ip`, unbounded for internet paths).
 One-shot MTR to a target still works through diagnostics above. `port: 0`
 means the check type's own default.
 
 Status codes: `503` when not the leader; `400` for invalid JSON, an invalid
-`checkType`, or unparseable `params`; a bad spec fails the **whole**
+`checkType`, or unparseable `params`; `413` for a body over 8 MiB (about
+30,000 specs); a bad spec fails the **whole**
 body, which is why the Console's reconciler filters ineligible definitions
-before calling. Agent IDs the registry does not know are *not* an error:
-the Console's topology view can legitimately lag the registry, so they are
-skipped with a warning and reported back instead of blocking every other
-agent's assignment. The `200` response says what happened:
+before calling. It also leaves out whole definitions, newest first, when the
+body would pass 8 MiB
+(`kconmon_ng_console_external_specs_skipped_total{reason="over-budget"}`). Agent IDs the registry does not know are *not* an error:
+the Console's topology view can legitimately lag the registry. An unknown
+agent that already holds an assignment gets this PUT's specs, so an agent
+evicted for a moment keeps probing on the current list; one named with an
+empty list is cleared, like one the PUT leaves out. An ID that holds nothing
+is not recorded. Unknown IDs are logged with a warning and reported back
+instead of blocking every other agent's assignment. The `200` response says what
+happened:
 
 ```json
 { "agents": 3, "changed": 1, "unknown": ["node-9-kconmon-ng-agent-zzzzz"] }
@@ -365,7 +417,7 @@ agent's assignment. The `200` response says what happened:
 
 `agents` is how many agents ended up with a non-empty assignment, `changed`
 how many were actually pushed (0 on a retried identical PUT), `unknown` the
-IDs that were dropped.
+IDs the registry did not know, whether or not their specs were stored.
 
 ## Console run planning (`POST /api/v1/runs`)
 
@@ -380,10 +432,12 @@ controller's dispatch limits shape them.
 duration (`duration / 500`, floored at 5s). That base cadence is not a field
 an operator can set, so a check type too slow to keep it is re-planned, never
 refused: the effective interval is the base cadence stretched to one round's
-floor. Only `mtr` stretches: a traceroute walks up to 30 hops in sequence and
-is budgeted at 90s per pair, while every other type answers in milliseconds
-and its per-pair timeout only bounds a probe that has already failed. One
-round's floor also counts the fan-out: 90 mtr pairs are 12 batches of 90s, so
+floor. Only `mtr` and `pmtu` stretch, and both are planned around their
+per-pair timeout: a traceroute walks up to 30 hops in sequence (90s floor),
+and a `pmtu` probe of a black-holed pair waits out a datagram timeout per lost
+datagram, up to about 10s (15s floor). Every other type is planned as if it
+answered in milliseconds, its per-pair timeout only bounding a probe that has
+already failed. One round's floor also counts the fan-out: 90 mtr pairs are 12 batches of 90s, so
 a large run can stretch past its own duration and settle at a single full
 pass. Rounds repeat until the duration elapses, back to back but no more often
 than the base cadence; a round slower than the remaining time is not cut

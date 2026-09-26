@@ -1,10 +1,10 @@
 # Events
 
-The controller's event feed, newest first: restarts, readiness flaps, check observations, reactive traceroutes, in the order the controller saw them. When you need the raw record of what happened around 14:32, this is it.
+The controller's event feed, newest first: restarts, readiness flaps, check observations, on-demand traceroutes, in the order the controller saw them. When you need the raw record of what happened around 14:32, this is it.
 
 <figure markdown>
-![Live event feed during a staged break: severity and type filters, Pause, the Live badge, the scope search, Showing 260 of 260 events · capped at 2000, and rows mixing Info (tcp diagnostic dispatched) and Warn (tcp diagnostic timeout, among them edge-host-01 → kconmon-stand-worker6)](../img/console-events-live.png){ loading=lazy }
-<figcaption>The live feed mid-break: a severity badge on every row (Info and Warn here), the filter toolbar, and "Showing 260 of 260 events · capped at 2000". The Warn rows are TCP diagnostic probes timing out on pairs that touch the broken nodes.</figcaption>
+![Live event feed during a staged break: severity and type filters, Pause, the Live badge, the scope search, Showing 303 of 303 events · capped at 2000, and rows from 06:21:30 to 06:21:31 mixing Error (mtr kc-accept-worker→kc-accept-worker5 failed with 0 hops), Info (tcp check succeeded, tcp diagnostic dispatched, mtr triggered) and Warn (tcp diagnostic timeout, among them kc-accept-worker2→kc-accept-worker)](../img/console-events-live.png){ loading=lazy }
+<figcaption>The live feed mid-break: a severity badge on every row (Error, Info and Warn here), the filter toolbar, and "Showing 303 of 303 events · capped at 2000". The Warn rows are TCP diagnostic probes timing out on pairs that touch the cut-off nodes worker2 and worker5, and the Error rows are MTR traces toward worker5 that got no hop back.</figcaption>
 </figure>
 
 ## How the feed is fed
@@ -19,26 +19,26 @@ With the [Time Machine](time-machine.md) engaged the live tail is off: the feed 
 
 Columns: **Time**, **Severity**, **Summary**, **Scope**. There is no Type column, because the summary opens with the type's own words. Severities are **Info**, **Warn**, **Error**; an unknown wire value still renders raw, since the feed never hides an event it cannot classify.
 
-Operator [annotations](metrics.md#annotations-and-maintenance-windows) are interleaved at their own timestamp with a **Note** badge (ranged ones read *Annotation (span)*). They are not events and the event filters do not touch them.
+Operator [annotations](metrics.md#annotations-and-maintenance-windows) are interleaved at their own timestamp with a **Note** badge (ranged ones read *Annotation (span)*). They are not events and the event filters do not touch them. The severity and Note badges keep their words at every width, phones included.
 
 The **Type** filter offers, besides *All types*:
 
 - **Topology changed**: a node or agent joined, left, or changed readiness.
 - **Check observed**: a scheduled or continuous check produced a result worth reporting.
-- **MTR triggered**: a probe failure fired a reactive traceroute (see [Routes · MTR](routes-mtr.md#reactive-vs-manual-traces)).
-- **MTR completed**: that trace finished and its path was recorded.
+- **MTR triggered**: an on-demand traceroute was dispatched, from a run or from `kubectl kconmon mtr` (see [Routes · MTR](routes-mtr.md#reactive-vs-manual-traces)). Reactive traces do not appear here.
+- **MTR completed**: that trace finished, with its hops.
 - **Diagnostic progress**: a run started from [Run checks](run-checks.md) reported progress.
 
 Filtering: **Severity** and **Type** selects (both default *All*), and **Scope contains**, a case-insensitive substring match on the event's scope. Pair input is normalised, so `node-a->node-b`, `node-a => node-b` and `node-a > node-b` all match the same pair. **Clear filters** resets all three.
 
-**Pause** buffers arrivals ("Paused · 3 buffered") while the badge keeps saying whether the socket is alive; **Resume** drains the buffer into the feed. The counter line reads "Showing {shown} of {held} events · capped at 2000".
+**Pause** buffers arrivals, and the button becomes **Resume** with the count ("Resume (3 buffered)"), which drains the buffer into the feed. While paused, the badge reads "Paused · socket live" or "Paused · socket down", so you know whether the feed you are about to resume is still there. The counter line reads "Showing {shown} of {held} events · capped at 2000". The feed fills the window below the toolbar at every width, so on a phone the page scrolls once rather than a list inside a page.
 
 <figure markdown>
-![The feed paused: a Resume (136 buffered) button, the badge reading Paused · socket live, a Paused · 136 buffered chip beside Load older, and the rows frozen at 09:43:54](../img/console-events-paused.png){ loading=lazy }
-<figcaption>Paused with a live socket: the badge keeps saying the socket is alive, the chip counts what arrived while paused (136 events), and <em>Resume</em> drains them into the feed.</figcaption>
+![The feed paused: a Resume (258 buffered) button, the badge reading Paused · socket live, Showing 308 of 308 events · capped at 2000 on the Load older line, and the rows frozen at 06:21:31](../img/console-events-paused.png){ loading=lazy }
+<figcaption>Paused with a live socket: the badge keeps saying the socket is alive, and <em>Resume (258 buffered)</em> counts what arrived while paused and drains it into the feed.</figcaption>
 </figure>
 
-**Load older** pages history back through `GET /api/v1/events`. When the 2 000-event ring is already full it refuses instead of spending a round trip on rows it would have to drop: "The buffer is full at {cap} events. Older ones cannot be added without dropping newer ones; narrow the filters or reload to start a fresh buffer."
+**Load older** pages history back through `GET /api/v1/events`. A page that fails shows the server's reason and leaves **Load older** enabled, so the next press retries the same page. That includes the first page: when it fails, such as with the 503 of a console without event history, the notice carries **Retry** too. When the 2 000-event ring is already full it refuses instead of spending a round trip on rows it would have to drop: "The buffer is full at {cap} events. Older ones cannot be added without dropping newer ones; narrow the filters or reload to start a fresh buffer."
 
 ## When the feed degrades
 
@@ -50,13 +50,13 @@ Three distinct cards, three distinct fixes:
 2. Whether the controller actually restarted after you flipped it. Before chart 2.0.3 a values change updated the ConfigMap under a running controller that reads it once at startup, so the stream stayed configured-but-never-started and nothing anywhere logged an error; 2.0.3 added a `checksum/config` annotation so a values change rolls the pods. On an older chart, `kubectl rollout restart` the controller yourself.
 3. Replica topology: the stream is served by the controller **leader** only, and with several console replicas each connects independently, so one replica can be fed while another is not.
 
-**"The live topic was rejected."** The WebSocket subscription itself was refused: topics are authorization-gated server-side, and a session whose role lacks the matching read permission cannot subscribe (`events:read` alone does not grant the topology or matrix topics either). This is a permissions conversation, not a networking one.
+**"The live topic was rejected."** The WebSocket subscription itself was refused: topics are authorization-gated server-side, and a session whose role lacks the matching read permission cannot subscribe (`events:read` alone does not grant the topology or matrix topics either, and a run's `run:{id}` topic needs `runs:read`, like `GET /api/v1/runs/{id}`). The built-in roles hold all of them. This is a permissions conversation, not a networking one.
 
-**"Event history is unavailable."** The history half failed or there is no database; the live half keeps working off the socket regardless.
+**"Event history is unavailable."** The history half failed, or the console could not read its own configuration (`GET /api/v1/config`), so it cannot tell whether event history exists; the card then says "Could not read the console configuration, so event history was not requested: {error}". Either way the live half keeps working off the socket. A console with no database shows no such card: it offers no *Load older*, and the feed holds only what arrived live.
 
 ## Getting here
 
-*open Live* on the [Overview](overview.md) lands here, and event rows appear as timeline entries in [Incidents](incidents.md) whenever their scope matches.
+*open Events* on the [Overview](overview.md) lands here, and event rows appear as timeline entries in [Incidents](incidents.md) whenever their scope matches.
 
 <!-- verified against: web/src/pages/live.tsx, web/src/lib/i18n/dict/live.ts (loadOlder.atCap, missed.title.*,
      noRealtime.*, topicError.*, history.*, counts), web/src/lib/ws.ts (per-topic seq, epoch guard, RECONNECT_MIN/MAX

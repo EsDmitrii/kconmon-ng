@@ -24,7 +24,7 @@ throwaway single-Pod PostgreSQL and a generated webhook-key Secret, installs
 kconmon-ng (Console included, anonymous auth with the admin role) into
 `default`, runs smoke tests, imports the Grafana dashboards and prints access
 URLs. The script wants `minikube`, `docker`, `helm`, `kubectl`, `openssl`,
-`python3` and `curl` on the PATH, and refuses to start without them.
+`python3`, `curl` and `lsof` on the PATH, and refuses to start without them.
 `make local-up` runs the same script, and `./hack/local-test.sh down` deletes
 the whole cluster afterwards.
 
@@ -36,10 +36,13 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 
 ## Break one pair
 
-We will blackhole **only UDP** from node `m02` to node `m03`. Every other
-protocol and every other pair stays untouched, which is the realistic shape
-of a production failure: one direction dead on one protocol while the HTTP
-health checks stay green.
+We will blackhole **only UDP** from node `m02` to node `m03`. TCP, ICMP and
+every other pair stay untouched, which is the realistic shape of a production
+failure: one direction dead on one protocol while the HTTP health checks stay
+green. The path MTU probe (since 2.5.0) sends its datagrams to the same UDP
+echo port, so with nothing crossing it has no MTU verdict to give, and this
+pair's PMTU cell reads no data once its last verdict leaves the 5-minute
+window.
 
 Agents probe each other pod-IP to pod-IP, and each protocol has its own
 rendezvous port: **UDP probes target the agent's gRPC/probe port 9090**
@@ -86,12 +89,12 @@ scale on the stand the screenshots were taken on, with UDP dropped on its way
 into the three zone-b nodes, `worker3`, `worker4` and `worker5`:
 
 <figure markdown="span">
-  ![Matrix on UDP, Live, eleven rows in total, ten kconmon-stand nodes plus edge-host-01: the worker3, worker4 and worker5 columns red for every source, 30 cells, each printing a fail ratio of 19 to 22%, every other cell green](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
-  <figcaption>The Matrix mid-break with UDP dropped on its way into zone-b: UDP selected, the worker3, worker4 and worker5 columns red for all ten sources, the external agent <code>edge-host-01</code> among them, while the zone-b rows stay green toward every node outside zone-b. The Live badge confirms the event stream is up.</figcaption>
+  ![Matrix on UDP, Live, six kc-accept nodes: the worker3 and worker4 columns red for every other source, 10 cells, each printing a fail ratio of 31.6% to 35.8% and a 0.5 ms p95, every other cell green at 0.0%](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
+  <figcaption>The Matrix mid-break with UDP dropped on its way into zone b, whose two nodes are worker3 and worker4: UDP selected, both columns red for all five other sources, while the two rows stay green toward every node outside zone b. The Live badge confirms the event stream is up.</figcaption>
 </figure>
 
 Now flip the protocol selector to TCP or ICMP: the same cell is green. That
-switch is the point of the exercise — the Console has isolated a single
+switch is the point of the exercise: the Console has isolated a single
 protocol on a single ordered pair, which no "can A reach B" check would ever
 tell you.
 
@@ -109,8 +112,8 @@ That is why `worker3 → worker6` fails on TCP and in both directions, which
 the UDP drop into zone-b above would never produce:
 
 <figure markdown="span">
-  ![Pair page for kconmon-stand-worker3 → kconmon-stand-worker6 on its Overview tab: both directions at 100.0% in red in the header, the RTT p95 by protocol chart over the last hour, no open incident, and the Recent changes rail listing tcp diagnostic timeout, dispatched and tcp check failed events](../img/console-pair-page-overview.png){ loading=lazy }
-  <figcaption>The pair page for worker3 → worker6 on the kind stand during the zone-c blackhole, not the zone-b UDP drop: per-direction verdicts in the header (TCP, both failing at 100.0%), the RTT p95 by protocol chart for the last hour, and the Recent changes rail listing the pair's diagnostic timeouts and failed checks as they happen.</figcaption>
+  ![Pair page for kc-accept-worker3 → kc-accept-worker5 on its Overview tab: both directions at 100.0% in red in the header, the RTT p95 by protocol chart over the last hour, the Path MTU card with no reading, no open incident, and the Recent changes rail listing tcp diagnostic timeout and dispatched events](../img/console-pair-page-overview.png){ loading=lazy }
+  <figcaption>The pair page for worker3 → worker5 on the kind stand with worker5, zone c's only node, and worker2 cut off on TCP, UDP and ICMP, not the zone b UDP drop: per-direction verdicts in the header (TCP, both failing at 100.0%), the RTT p95 by protocol chart for the last hour, and the Recent changes rail listing the pair's diagnostic timeouts as they happen.</figcaption>
 </figure>
 
 Prefer proof in PromQL over pictures? The
@@ -119,8 +122,10 @@ same minute series by series.
 
 ## Clean up
 
-Remove the rule; the next successful probe overwrites the loss gauge, so the
-cell is green again within one probe interval plus one scrape:
+Remove the rule. The next successful probe overwrites the loss gauge within
+one probe interval plus one scrape, but the cell is coloured by the worse of
+loss and failure ratio, and the failure ratio is a 5-minute window: the cell
+drains through amber and is green again about five minutes after the revert.
 
 ```bash
 minikube -p kconmon-test ssh -n kconmon-test-m03 -- \

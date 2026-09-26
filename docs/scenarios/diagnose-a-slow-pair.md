@@ -26,8 +26,8 @@ are looking for structure, not a single number:
 - **A block** aligned with zones → a zone boundary; confirm on the zone view.
 
 <figure markdown>
-  ![Matrix on UDP with the worker3, worker4 and worker5 columns red and their rows green except toward each other; a tooltip on kconmon-stand-worker6 → kconmon-stand-worker3 reads Failure ratio 20.3%, RTT p95 0.9ms, Packet loss 100.0%, while the mirror cell worker3 → worker6 is green at 0.0%](../img/diagnose-a-slow-pair-matrix-cell.png){ loading=lazy }
-  <figcaption>Matrix, protocol UDP: worker6 → worker3 failing with 100% packet loss in its tooltip while the mirror cell, worker3 → worker6, stays green at 0.0%. Across the grid the pattern repeats: the worker3, worker4 and worker5 columns red, the same three rows green toward every node but each other. A directional problem into three nodes.</figcaption>
+  ![Matrix on UDP with the worker3 and worker4 columns red for every other source and their rows green toward the nodes outside zone b; a tooltip on kc-accept-worker5 → kc-accept-worker3 reads Failure ratio 36.8%, RTT p95 0.5ms, Packet loss 100.0%, while the mirror cell worker3 → worker5 is green at 0.0%](../img/diagnose-a-slow-pair-matrix-cell.png){ loading=lazy }
+  <figcaption>Matrix, protocol UDP: worker5 → worker3 failing with 100% packet loss in its tooltip while the mirror cell, worker3 → worker5, stays green at 0.0%. Across the grid the pattern repeats: the worker3 and worker4 columns red, the same two rows green toward every node outside zone b. A directional problem into two nodes.</figcaption>
 </figure>
 
 Click the suspect cell to open the [pair page](../console/pair-and-node-pages.md):
@@ -41,8 +41,8 @@ The pair page below comes from a larger break on the same stand, with zone-c
 above shows the same cell green.
 
 <figure markdown>
-  ![Pair page for kconmon-stand-worker3 → kconmon-stand-worker6 on its Overview tab: both directions at 100.0% in the header, the RTT p95 by protocol chart with a TCP spike to nearly 80 ms after 09:35, no open incident, and the Recent changes rail with tcp diagnostic timeout and tcp check failed events](../img/console-pair-page-overview.png){ loading=lazy }
-  <figcaption>The pair page for worker3 → worker6 during the zone-c blackhole, not the UDP break above: per-direction verdicts in the header, the RTT p95 by protocol chart over the last hour, and the Recent changes rail with the diagnostic timeouts and failed checks around the break.</figcaption>
+  ![Pair page for kc-accept-worker3 → kc-accept-worker5 on its Overview tab: both directions at 100.0% in the header, the RTT p95 by protocol chart whose lines stop at about 06:21, no open incident, and the Recent changes rail with tcp diagnostic timeout and dispatched events](../img/console-pair-page-overview.png){ loading=lazy }
+  <figcaption>The pair page for worker3 → worker5 while worker5, zone c's only node, is cut off on every protocol, not the UDP break above: per-direction verdicts in the header, the RTT p95 by protocol chart over the last hour, and the Recent changes rail with the diagnostic timeouts around the break.</figcaption>
 </figure>
 
 ## Confirm with Metrics
@@ -96,19 +96,27 @@ kubectl kconmon mtr node-a node-b
 ```
 
 `kubectl-kconmon` installs from the [krew](https://krew.sigs.k8s.io/) index
-(`kubectl krew install kconmon`) and needs nothing exposed: it reaches the
-controller's HTTP API through a client-go port-forward using your kubeconfig.
-It drives the same leader-only diagnostics endpoint the Console uses, so a
-non-leader replica answers `503` and the plugin needs a running kconmon-ng in
-the cluster.
+(`kubectl krew install kconmon`) and needs nothing exposed: it finds the
+running controller pods by their labels (`app.kubernetes.io/name=kconmon-ng`,
+`app.kubernetes.io/component=controller`; every namespace unless `-n` is
+given), starts with the Lease holder, and port-forwards to that pod's http
+port with your kubeconfig. It drives the same leader-only diagnostics
+endpoint the Console uses and needs a running kconmon-ng in the cluster.
+Leases are listed only in the namespaces where controller pods run, so
+`leases` list RBAC in the release namespace is enough. When the pod it
+picked answers `503 not the leader` or `leadership lost` (no Lease it could
+read, or a leader that just changed), it moves on to the next running
+controller pod, one extra port-forward each; if that pod
+cannot be reached either, the error names both (`controller returned HTTP
+503: not the leader; the next controller pod could not be reached: ...`).
 
-Open [Routes (MTR)](../console/routes-mtr.md) and pick the destination. Path
+Open [Routes · MTR](../console/routes-mtr.md) and pick the destination. Path
 history is deduplicated by content, so what you see is the list of *path
 changes*, with a diff view between any two traces.
 
 <figure markdown>
-  ![Routes · MTR Explorer: destinations on the left with edge-host-01 expanded, and the path history for kconmon-stand-worker3 → edge-host-01 with one recorded route of 2 hops and 2 traces](../img/console-routes-mtr-explorer.png){ loading=lazy }
-  <figcaption>Routes (MTR) Explorer for worker3 → edge-host-01: one recorded route, 2 hops, 2 traces, with a tick box beside it. Once a second route is recorded, ticking both and comparing them is where the investigation goes next.</figcaption>
+  ![Routes · MTR Explorer: destinations on the left with kc-accept-worker3 expanded, and the path history for kc-accept-worker4 → kc-accept-worker3 with one recorded route of 2 hops and 2 traces](../img/console-routes-mtr-explorer.png){ loading=lazy }
+  <figcaption>Routes · MTR Explorer for worker4 → worker3: one recorded route, 2 hops, 2 traces, with a tick box beside it. Once a second route is recorded, ticking both and comparing them is where the investigation goes next.</figcaption>
 </figure>
 
 Read the hop table for where RTT jumps or per-hop loss starts: everything

@@ -95,8 +95,8 @@ here they are before anything breaks:
   nothing else: the chart stopped installing PostgreSQL in 2.0.0, so any
   reachable server does, from RDS to a StatefulSet to a CloudNativePG cluster
   you run yourself. This stand uses a single Postgres Deployment in the same
-  namespace. Without a database the Console still serves topology, matrix and
-  Explore, but incidents, saved alert rules and the audit log all answer `503`,
+  namespace. Without a database the Console still serves Topology, Matrix and
+  Metrics, but incidents, saved alert rules and the audit log all answer `503`,
   and the alerting reconciler is skipped rather than running against nothing.
 - **`console.alerting.enabled=true` needs the `PrometheusRule` CRD.** The stand
   installs the CRD without the Operator. The chart also renders a namespaced
@@ -135,7 +135,7 @@ uses `local`, `header` or `oidc`.
 | edge-host-01                | external | 192.168.97.11 (host network on worker10) |
 
 Agents probe each other **pod-IP to pod-IP**. Mind the ports when writing
-firewall rules: **UDP probes target the agent's gRPC/probe port 9090**, while
+firewall rules: **UDP and path MTU probes target the agent's gRPC/probe port 9090**, while
 **TCP probes dial the agent's HTTP port 8080**, and Prometheus scrapes 9091.
 Blocking the wrong port silently matches zero packets; check the iptables `-v`
 counters.
@@ -168,14 +168,16 @@ alert was `ExternalChecksFailing`, for a target the stand keeps unreachable on
 purpose. The overview dashboard is all green:
 
 <figure markdown>
-  ![Bundled Grafana overview dashboard for 10:55 to 11:10 UTC on a healthy kind stand: Agents registered 11, Agents reporting probes 11, Agents missing 0, Controller leader LEADER OK, Monitored pairs 110, Pairs with failures 0; the worst-pair bars for TCP, UDP, ICMP, DNS and UDP packet loss at 0.00%; the fleet and worst-pair failure ratio charts flat at 0 on a 0 to 100% axis; and the top 10 worst pairs table with 0 failed probes, every ratio at 0.00% and p95 UDP RTTs around 1 ms](../img/install-15-min-grafana-overview.png){ loading=lazy }
-  <figcaption>The baseline on the kind stand, 10:55 to 11:10 UTC: 11 agents registered and all 11 reporting, none missing, leader OK, 110 monitored pairs and none with failures. Every failure-ratio bar and chart sits at 0, and the top-10 worst pairs table has nothing worse than 0.00% to rank.</figcaption>
+  ![Bundled Grafana Overview dashboard on a healthy stand, 13:44 to 13:59 UTC: key indicators on top in two rows, 6 agents registered, 6 reporting, 0 missing, LEADER OK, 30 monitored pairs, 0 pairs with failures, 0 black-hole pairs and 0 reduced-path pairs over 15 minutes; below them the worst-pair failure ratio bars for TCP, UDP, ICMP, DNS and UDP packet loss at 0.00% and the pairs-by-MTR-traces bars all at 0](../img/install-15-min-grafana-overview.png){ loading=lazy }
+  <figcaption>The baseline on the kind stand, 13:44 to 13:59 UTC: 6 agents registered and all 6 reporting, none missing, leader OK, 30 monitored pairs and none with failures, no black-hole or reduced-path pair. Every worst-pair bar sits at 0.00% and no pair has triggered an MTR trace.</figcaption>
 </figure>
 
 ## Break: blackhole UDP between two nodes
 
 We drop **only UDP** from `worker2` to `worker6` (pod to pod, port 9090),
-leaving every other protocol and every other pair untouched. That is what a
+leaving TCP, ICMP and every other pair untouched. The path MTU probe uses the
+same echo port, so that pair's PMTU cell goes empty (no verdict) within five
+minutes rather than red. That is what a
 firewall typo, a conntrack table filling up, or an overlay offload bug actually
 looks like in production: one protocol, one direction, one pair, and every
 health check in the cluster still green.
@@ -272,8 +274,8 @@ isolation, not just a red square. The frame below is a UDP-only blackhole at a l
 stand, dropping UDP into `worker3`, `worker4` and `worker5`:
 
 <figure markdown>
-  ![Matrix on UDP, Live, eleven rows in total, ten kconmon-stand nodes plus edge-host-01: the worker3, worker4 and worker5 columns red for every source, 30 cells, every other cell green](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
-  <figcaption>Matrix, protocol UDP, with UDP dropped on its way into zone-b on the kind stand: the three zone-b columns red for every source (30 directed cells), the zone-b rows green toward every node outside zone-b, the Live badge confirming the event stream.</figcaption>
+  ![Matrix on UDP, Live, six kc-accept nodes: the worker3 and worker4 columns red for every other source, 10 cells at 31.6% to 35.8% fail, every other cell green at 0.0%](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
+  <figcaption>Matrix, protocol UDP, with UDP dropped on its way into zone b on the kind stand, the two nodes worker3 and worker4: both columns red for every other source (10 directed cells, worker3 → worker4 and worker4 → worker3 among them), the two rows green toward every node outside zone b, the Live badge confirming the event stream.</figcaption>
 </figure>
 
 Clicking the cell opens the **pair page**: both directed legs as badges in the
@@ -304,8 +306,8 @@ Slow down for two details here:
   could read as "nothing happened in the cluster".
 
 <figure markdown>
-  ![Incidents page on the kind stand, scoped to the pair kconmon-stand-worker3 → kconmon-stand-worker6 over 1h: the action row, a 331-entry Timeline led by an audit row and tcp diagnostic events, and the Signals panel with the fail ratio going from 0.0% to 100.0% and a packet-loss chart with two short 100% bursts before 09:00 and 100% again from about 09:38](../img/console-incidents-timeline.png){ loading=lazy }
-  <figcaption>The same page from an earlier, larger break on the stand, with zone-c blackholed and scoped to worker3 → worker6 over the last hour: the Signals panel reports the fail ratio rising from 0.0% to 100.0%, its packet-loss chart shows two short 100% bursts before 09:00 and holds 100% from about 09:38, and the 331-entry timeline opens on the pair's diagnostic timeouts.</figcaption>
+  ![Incidents page on the kind stand, scoped to the pair kc-accept-worker3 → kc-accept-worker5 over 1h: the action row, a 338-entry Timeline led by tcp diagnostic events and audit rows, and the Signals panel with the fail ratio going from 0.0% to 100.0% and a packet-loss chart at 0% until about 06:17 and 100% after](../img/console-incidents-timeline.png){ loading=lazy }
+  <figcaption>The same page from a different break on the stand, with the worker2 and worker5 agents cut off on every protocol, scoped to worker3 → worker5 over the last hour: the Signals panel reports the fail ratio rising from 0.0% to 100.0%, its packet-loss chart holds 100% from about 06:17, and the 338-entry timeline opens on the pair's diagnostic timeouts.</figcaption>
 </figure>
 
 In this demo the honest answer is that nothing in the timeline caused it:
@@ -337,8 +339,8 @@ by the server that will evaluate it. While the blackhole is in place the
 preview matches the pair; after you revert it matches nothing.
 
 <figure markdown>
-  ![The lower half of the New rule form on the kind stand: Source node kconmon-stand-worker2, Destination node kconmon-stand-worker6, Severity warning, For blank with 5m as its placeholder and the hint that blank fires as soon as it holds, Add label, Add annotation, Enabled ticked, and the Preview panel showing kconmon_ng_udp_packet_loss_ratio for that pair times 100 greater than 50, Matches 1 series right now; Create rule and Cancel below, and the Alert rules list with StandExternalAgentSilent and StandPairUdpLoss under the form](../img/breaking-cni-rule-preview.png){ loading=lazy }
-  <figcaption>The lower half of the rule builder: severity warning, <code>for</code> left blank at its 5m placeholder, labels, annotations, Enabled, and the Preview panel rendering the pair-loss expression for worker2 → worker6. It matches 1 series right now, which is the pair; once the break is reverted the same preview matches 0, reported as an answer rather than a failure.</figcaption>
+  ![The lower half of the New rule form on the kind stand: Source node kc-accept-worker3, Destination node kc-accept-worker5, Severity warning, For blank with 5m as its placeholder and the hint that blank fires as soon as it holds, Add label, Add annotation, Enabled ticked, and the Preview panel showing kconmon_ng_udp_packet_loss_ratio for that pair times 100 greater than 50, Matches 1 series right now; Create rule and Cancel below, and the Alert rules list with acc-agent-missing and acc-pair-udp-loss, both synced and enabled, under the form](../img/breaking-cni-rule-preview.png){ loading=lazy }
+  <figcaption>The lower half of the rule builder: severity warning, <code>for</code> left blank at its 5m placeholder, labels, annotations, Enabled, and the Preview panel rendering the pair-loss expression for worker3 → worker5 while worker5's agent is cut off. It matches 1 series right now, which is the pair; once the break is reverted the same preview matches 0, reported as an answer rather than a failure.</figcaption>
 </figure>
 
 Save. The Console renders every enabled rule into **one** `PrometheusRule`
@@ -349,9 +351,10 @@ kubectl -n kconmon-ng get prometheusrule kconmon-ng-console-rules -o yaml
 ```
 
 The rule row shows `synced` with a timestamp. Prometheus picks the object up on
-its next config reload, and `/alerts` in the Console (and the Overview page's
-firing-alerts card) show it `firing` once the `for` window elapses. Pending
-alerts are deliberately not shown: inside `for`, nothing has fired.
+its next config reload, and the Overview page's firing-alerts card shows it
+once the `for` window elapses. The card leaves pending alerts out on purpose:
+inside `for`, nothing has fired. `GET /api/v1/alerts` answers both states, so
+a script polling it sees the rule as `pending` first, then `firing`.
 
 If the row shows `error` instead, the message's first word is the cause class:
 `crd-missing` (no Prometheus Operator), `forbidden` (the `Role` did not apply),

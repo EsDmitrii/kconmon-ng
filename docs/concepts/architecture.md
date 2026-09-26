@@ -9,7 +9,7 @@ straight from each agent's `/metrics` into your Prometheus.
 ```mermaid
 flowchart TB
     subgraph nodes["Every node (DaemonSet)"]
-        A1["Agent<br/>TCP · UDP · ICMP · DNS · HTTP checkers<br/>MTR on failure<br/>/metrics :8080 and :9091"]
+        A1["Agent<br/>TCP · UDP · ICMP · path MTU · DNS · HTTP checkers<br/>MTR on failure<br/>/metrics :8080 and :9091"]
         A2["Agent"]
         A3["Agent"]
     end
@@ -28,10 +28,11 @@ flowchart TB
 ```
 
 **The agent** is a DaemonSet: one pod per node, running the enabled checkers
-(TCP, UDP, ICMP, DNS, HTTP, external) against every peer and firing a reactive
-MTR trace when a TCP, UDP or ICMP probe fails. It exports everything as
-Prometheus metrics and needs no Kubernetes API access at all; it never links
-client-go.
+(TCP, UDP, ICMP, path MTU, DNS, HTTP, external) against every peer and firing
+a reactive MTR trace when a TCP, UDP or ICMP probe fails; a path MTU failure
+fires none, since a traceroute cannot see a size problem. It exports
+everything as Prometheus metrics and needs no Kubernetes API access at all;
+it never links client-go.
 
 **The controller** is a Deployment: it keeps the agent registry (heartbeats,
 TTL eviction), watches nodes to resolve each agent's zone label, serves the
@@ -46,10 +47,10 @@ history, incidents, auth and managed alert rules. See
 
 ## How a probe becomes a metric
 
-1. A checker fires on its interval (5s for TCP/UDP/ICMP/DNS by default)
-   against every peer on the current list.
+1. A checker fires on its interval (5s for TCP/UDP/ICMP/DNS by default, 60s
+   for path MTU) against every peer on the current list.
 2. The result lands in the agent's local Prometheus registry: latency
-   histograms, loss/jitter gauges, result counters — labelled with
+   histograms, loss/jitter gauges, result counters, labelled with
    `source_node`, `destination_node`, `source_zone`, `destination_zone`.
 3. Prometheus scrapes each agent (and the controller). The chart offers a
    `ServiceMonitor`, or you write [one scrape
@@ -63,12 +64,16 @@ Four design decisions matter at 3am, each on its own line:
 - A failed TCP/UDP/ICMP probe triggers MTR for that pair under a per-pair
   cooldown (60s by default), so a broken link cannot flood the cluster with
   traces.
-- When a peer leaves the topology, its per-pair gauges are dropped instead of
-  lingering as ghost readings for a node that no longer exists.
+- When a peer leaves the topology, its per-pair gauges are dropped at once
+  instead of lingering as ghost readings for a node that no longer exists,
+  and its counters and histograms 10 minutes later.
 - An agent deregisters on shutdown, so a rolling restart of kconmon-ng does
   not write false loss into its own metrics.
-- Config hot-reloads on change and is parsed with unknown keys rejected. A
-  typo fails fast instead of being silently ignored.
+- Config is parsed with unknown keys rejected, so a typo fails fast instead
+  of being silently ignored, and it reloads on change: checker settings,
+  `logLevel`, the topology and the agent TTL apply live, while ports,
+  identity and the gateway wait for a restart and say so in the log
+  ([what reloads](../configuration.md#what-reloads-and-what-does-not)).
 
 ## Peer discovery over gRPC
 
@@ -100,12 +105,16 @@ defined in `api/proto/kconmon.proto`:
   (`agent_registered`, `zone_updated`, `agent_deregistered`,
   `agent_evicted`); a live console refreshes Matrix and Topology on it
   instead of polling.
-- **CheckObserved**: the outcome of a completed on-demand diagnostic check,
-  not the continuous background probes.
-- **MTRTriggered** and **MTRCompleted**: a reactive traceroute fired and
-  finished, feeding [Routes (MTR)](../console/routes-mtr.md).
-- **DiagnosticProgress**: progress of a run started from
-  [Run checks](../console/run-checks.md).
+- **CheckObserved**: the outcome of a completed on-demand diagnostic check
+  of any type but `mtr` (`pmtu` included), not the continuous background
+  probes.
+- **MTRTriggered** and **MTRCompleted**: an on-demand traceroute (a console
+  run or `kubectl kconmon mtr`) was dispatched and finished. A reactive
+  trace is not an event: it shows in the agent's MTR metrics.
+- **DiagnosticProgress**: the progress of an on-demand check, such as a run
+  started from [Run checks](../console/run-checks.md): `dispatched`, then
+  `timeout` or `error` when it fails, and `undelivered` after a
+  CheckObserved or MTRCompleted whose HTTP answer could not be written.
 
 The [Events page](../console/events.md) is the live feed of all five; with a
 database, the ingested history is what the
@@ -120,26 +129,35 @@ database, the ingested history is what the
   than one replica.
 - **Failover is sized to beat the agent TTL.** The lease runs at a 15s
   duration with a 10s renew deadline and 2s retries, so a takeover completes
-  well inside one 30s agent TTL. The new leader does start with an empty
-  registry: a standby holds no agents by design, and the topology API
+  well inside one 30s agent TTL. A leader that shuts down cleanly (a
+  rolling restart) waits up to 3s to hand the lease back, so the standby
+  takes over within about one 2s retry instead of waiting out the lease. The
+  new leader does start with an empty registry: a standby holds no agents
+  by design, and the topology API
   answers `503 not the leader` rather than reporting a fleet of zero. The gap
   closes itself fast: heartbeats are not leader-gated, so an agent's next 5s
   heartbeat gets `NotFound` from the new leader and triggers immediate
   re-registration. Topology is repopulated within a few heartbeat intervals
-  of the takeover.
+  of the takeover. An agent whose redial lands on the standby gets `not the
+  leader`, redials through the Service and retries about every second
+  instead of backing off. For 30s after re-registering it only adds peers
+  from the new leader's lists, which at first name only the agents already
+  back, so pairs towards agents that have not re-registered yet keep being
+  probed; after that the newest list applies as it is.
 - **Agents survive the controller being away.** Registration retries in the
   background while the agent's health endpoints are already up, and during a
   controller restart, upgrade or outage the probes keep running against the
-  last known peer list — an incident at the coordinator does not blind the
+  last known peer list: an incident at the coordinator does not blind the
   fleet at exactly the wrong moment. The peer list resumes updating on
   re-registration.
 - **The monitor watches itself.** Two bundled alert rules,
   `KconmonAgentsMissing` and `KconmonControllerDown`, page you when agents or
   the controller leader go missing, so a kconmon-ng that goes quiet does not
   read as a healthy network. Both need leader election on, and for a concrete
-  reason: `expected_agents` is derived from the node informer, which only the
-  leader runs, and the leader gauge the second rule reads exists only when
-  someone can be leader. `controller.leaderElection: false` disables both
+  reason: `expected_agents` is derived from the node informer, which the
+  controller starts only with leader election on (then on every replica, so
+  the first rule reads the leader's copy), and the leader gauge the second
+  rule reads exists only when someone can be leader. `controller.leaderElection: false` disables both
   along with zone enrichment.
 - **Console**: stateless; run `console.replicas: 2` once
   `redis.existingSecret` points at a shared bus (sessions, rate limits and

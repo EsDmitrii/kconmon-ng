@@ -3,7 +3,7 @@
 One keystroke to anywhere: two keypresses and a word beat any amount of clicking, and mid-incident it is the fastest route into "run a check" or "start an investigation".
 
 <figure markdown>
-![The command palette open over a blurred Overview with the Time Machine engaged at 9/15/2026 09:11:00, filtered by an: the Navigation group (Incidents, Metrics, Run checks, Alerting, Settings) and the Actions group with Add an annotation… and Create an alert rule… dimmed and tagged Live only, Start an investigation… available](../img/console-command-palette-actions.png){ loading=lazy }
+![The command palette open over a blurred Overview with the Time Machine engaged at 9/26/2026 06:00:00, filtered by an: the Navigation group (Incidents, Metrics, Run checks, Alerting, Settings) and the Actions group with Add an annotation… and Create an alert rule… dimmed and tagged Live only, Start an investigation… available](../img/console-command-palette-actions.png){ loading=lazy }
 <figcaption>The palette over a page rewound with the Time Machine, filtered by <em>an</em>: matches from Navigation and Actions in one list, the write actions dimmed and tagged <strong>Live only</strong>, and <em>Start an investigation…</em> left available.</figcaption>
 </figure>
 
@@ -22,12 +22,12 @@ Inside: type to search; ++up++ / ++down++ move, ++enter++ runs, ++esc++ closes.
 | Command | Lands on | Needs |
 | --- | --- | --- |
 | Run a diagnostic check… | [Run checks](run-checks.md) | `runs:create` |
-| Start an investigation… | [Incidents](incidents.md) | — |
+| Start an investigation… | [Incidents](incidents.md) | none |
 | Create an alert rule… | [Alerting](alerting.md) | `alerts:manage` |
 | Declare a maintenance window… | [Metrics](metrics.md#annotations-and-maintenance-windows) | `maintenance:write` |
 | Add an annotation… | [Metrics](metrics.md#annotations-and-maintenance-windows) | `annotations:write` |
 
-Missing permission and wrong time behave differently, on purpose. An entry whose permission you lack is not listed at all. With the [Time Machine](time-machine.md) engaged, write actions stay visible but disabled, tagged **Live only** — you can see what exists, you just cannot fire it into the past.
+Missing permission and wrong time behave differently, on purpose. An entry whose permission you lack is not listed at all. With the [Time Machine](time-machine.md) engaged, write actions stay visible but disabled, tagged **Live only**: you can see what exists, you just cannot fire it into the past.
 
 **View** holds *Toggle Time Machine — pick a time…* (only while Live, and only on pages that have the picker), *Return to Live* (only while engaged), and *Switch to light/dark theme*. The theme entry's label names the theme it switches **to**, and it is not the only switch: a standing toggle sits at the top of the sidebar, next to the product name.
 
