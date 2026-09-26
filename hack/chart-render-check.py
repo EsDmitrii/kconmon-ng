@@ -335,7 +335,8 @@ SECRET_NUMBERS = [(123456, "123456"), (1000000, "1000000"), (1234567, "1234567")
 
 def secret_numbers():
     bad = []
-    for account, want in SECRET_NUMBERS:
+    # Messages name the case, never the rendered Secret value.
+    for case, (account, want) in enumerate(SECRET_NUMBERS, 1):
         values = json.loads(json.dumps(GEOIP))
         values["console"]["mtr"]["enrichment"]["geoip"]["secret"]["accountId"] = account
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
@@ -345,12 +346,13 @@ def secret_numbers():
         finally:
             os.unlink(f.name)
         if res.returncode != 0:
-            bad.append(f"geoip accountId {account!r} from a values file did not render: {res.stderr.strip()}")
+            bad.append(f"geoip accountId case {case} from a values file did not render (exit {res.returncode})")
             continue
         got = [d["stringData"].get("console-maxmind-account-id") for d in yaml.safe_load_all(res.stdout)
                if d and d["kind"] == "Secret" and "console-maxmind-account-id" in d.get("stringData", {})]
         if got != [want]:
-            bad.append(f"geoip accountId {account!r} from a values file: Secret carries {got!r}, want [{want!r}]")
+            bad.append(f"geoip accountId case {case} from a values file: the Secret does not carry the expected "
+                       f"digit string ({len(got)} value(s) rendered)")
     return bad
 
 
