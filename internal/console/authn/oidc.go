@@ -591,9 +591,13 @@ func randomURLSafeString(n int) (string, error) {
 }
 
 // IsSafeReturnTo reports whether returnTo is safe to redirect the browser to after login: a
-// same-origin relative path.
+// same-origin relative path. "//host" and "/\\host" are protocol-relative to a browser, so the
+// second character is checked explicitly.
 func IsSafeReturnTo(returnTo string) bool {
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+	if returnTo == "" || returnTo[0] != '/' {
+		return false
+	}
+	if len(returnTo) > 1 && (returnTo[1] == '/' || returnTo[1] == '\\') {
 		return false
 	}
 	if strings.ContainsAny(returnTo, "\\") {
@@ -604,6 +608,14 @@ func IsSafeReturnTo(returnTo string) bool {
 		return false
 	}
 	return u.Scheme == "" && u.Host == ""
+}
+
+// SafeReturnTo returns returnTo when IsSafeReturnTo accepts it, and fallback otherwise.
+func SafeReturnTo(returnTo, fallback string) string {
+	if IsSafeReturnTo(returnTo) {
+		return returnTo
+	}
+	return fallback
 }
 
 // claimString returns claims[key] as a string, or "" when the key is absent
