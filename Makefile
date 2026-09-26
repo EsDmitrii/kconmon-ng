@@ -10,7 +10,8 @@ LDFLAGS := -s -w \
 
 BIN_DIR := bin
 
-.PHONY: all build build-agent build-controller build-console test test-race test-cover lint print-golangci-lint-version fmt proto sqlc openapi clean help \
+.PHONY: all build build-agent build-controller build-console test test-race test-cover test-fuzz lint print-golangci-lint-version fmt proto sqlc openapi clean help \
+	dashboards-check helm-deps schema-lint helm-lint helm-template helm-package docker-build \
 	local-up local-down local-status local-smoke local-urls docs-serve docs-build
 
 all: lint test build
@@ -40,14 +41,17 @@ test-cover:
 	go test ./... -v -race -coverprofile=coverage.txt -covermode=atomic
 	go tool cover -html=coverage.txt -o coverage.html
 
+# go test fuzzes one target per run, so each gets its own line.
+FUZZTIME ?= 30s
+
 test-fuzz:
-	go test ./internal/checker/ -fuzz=. -fuzztime=30s
+	go test ./internal/checker/ -run '^$$' -fuzz='^FuzzParseUDPPacket$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/checker/ -run '^$$' -fuzz='^FuzzAllowlist$$' -fuzztime=$(FUZZTIME)
 
 ## Lint
 
 # Read from ci.yaml (golangci-lint-action `version:`) so local lint == CI lint and the
-# two cannot drift; a system-wide golangci-lint of a different version has already
-# hidden CI-only findings once.
+# two cannot drift.
 GOLANGCI_LINT_VERSION ?= $(shell sed -n '/golangci-lint-action@/,/version:/s/^ *version: *//p' .github/workflows/ci.yaml)
 
 lint:
@@ -83,11 +87,11 @@ openapi:
 
 ## Helm
 
-# The chart has no dependencies today; the target stays so helm-lint keeps working if one is added.
 # The chart needs its own copy of dashboards/ to package them; this keeps the two honest.
 dashboards-check:
 	@diff -r dashboards charts/kconmon-ng/dashboards && echo "dashboards in sync"
 
+# The chart has no dependencies today; the target stays so helm-lint keeps working if one is added.
 helm-deps:
 	helm dependency build charts/kconmon-ng
 
@@ -108,7 +112,10 @@ helm-template: helm-deps
 	@for f in charts/kconmon-ng/ci/*.yaml; do \
 		echo "--- template $$f"; \
 		helm template kconmon-ng charts/kconmon-ng -f "$$f" >/dev/null || exit 1; \
+		helm template kconmon-ng charts/kconmon-ng -f "$$f" --api-versions cilium.io/v2/CiliumNetworkPolicy >/dev/null || exit 1; \
 	done
+	@python3 hack/networkpolicy-check.py charts/kconmon-ng
+	@python3 hack/chart-render-check.py charts/kconmon-ng
 
 helm-package: helm-deps
 	helm package charts/kconmon-ng -d dist/
@@ -116,7 +123,8 @@ helm-package: helm-deps
 ## Docs
 
 # Build outside the repo: a bare `mkdocs build` drops site/ into the repo root, and gitignored or not,
-# generated HTML next to the source is noise. Toolchain: pip install -r requirements-docs.txt.
+# generated HTML next to the source is noise. Toolchain, as CI installs it:
+# pip install --require-hashes -r .github/requirements-docs.lock
 DOCS_SITE_DIR ?= /tmp/$(PROJECT_NAME)-site
 
 docs-serve:
@@ -171,7 +179,7 @@ help:
 	@echo "  helm-lint        - Lint Helm chart"
 	@echo "  helm-template    - Render Helm templates"
 	@echo "  helm-package     - Package Helm chart"
-	@echo "  docs-serve       - Preview the docs site with live reload (needs requirements-docs.txt)"
+	@echo "  docs-serve       - Preview the docs site with live reload (needs the docs toolchain, see docs-build)"
 	@echo "  docs-build       - Strict docs build into $(DOCS_SITE_DIR), the same gate CI runs on PRs"
 	@echo "  docker-build     - Build Docker images"
 	@echo "  clean            - Remove build artifacts"

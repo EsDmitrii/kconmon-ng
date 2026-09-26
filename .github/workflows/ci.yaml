@@ -17,15 +17,70 @@ on:
       # on a green CI, and a filtered-out PR produces no checks at all).
       - ".github/workflows/**"
       - "web/**"
+      # The tracked placeholder index.html the Frontend job guards; no other filter matches it.
+      - "internal/console/ui/dist/**"
       # The OpenAPI spec is an input to both gates that police it: the Go
       # router-walking test and the Frontend job's regenerate-and-diff step. A
       # spec-only PR that ran no checks would defeat both.
       - "docs/console-api.yaml"
       # All four Dockerfiles, so base-image bumps are always built.
       - "Dockerfile*"
+      - ".dockerignore"
       - ".goreleaser.yaml"
       # The pmtu-netns job's scenarios live in a shell script the "**.go" filter does not see.
       - "hack/pmtu-netns/**"
+      # Inputs of the Helm Lint job's gates: promtool rule tests, the hack/*.py checks, the
+      # dashboards the chart copy is diffed against, and the e2e values values-keys-lint reads.
+      - "hack/rules-test/**"
+      - "hack/*.py"
+      # internal/config strict-loads the chart rendered with it, as `make local-up` installs it.
+      - "hack/values-local.yaml"
+      - "dashboards/**"
+      - "e2e/**"
+      # Codegen inputs: buf regenerates from the .proto files, and the migrations are embedded
+      # into the console and applied by the integration suite.
+      - "**.proto"
+      - "buf.yaml"
+      - "buf.gen.yaml"
+      - "sqlc.yaml"
+      - "**.sql"
+      # The Build job's sqlc gate runs `make sqlc`, whose sqlc version the Makefile pins.
+      - "Makefile"
+      # internal/config/packaging_test.go strict-loads the deb/rpm agent conffile as shipped.
+      - "packaging/**"
+  # Pushes to main run it too: releases are cut from main, and a commit pushed there directly
+  # would otherwise meet these jobs for the first time inside the tag's release run. Same paths
+  # as pull_request above; keep the two lists in sync.
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - ".golangci.yml"
+      - "charts/**"
+      - "krew/**"
+      - ".github/workflows/**"
+      - "web/**"
+      - "internal/console/ui/dist/**"
+      - "docs/console-api.yaml"
+      - "Dockerfile*"
+      - ".dockerignore"
+      - ".goreleaser.yaml"
+      - "hack/pmtu-netns/**"
+      - "hack/rules-test/**"
+      - "hack/*.py"
+      - "hack/values-local.yaml"
+      - "dashboards/**"
+      - "e2e/**"
+      - "**.proto"
+      - "buf.yaml"
+      - "buf.gen.yaml"
+      - "sqlc.yaml"
+      - "**.sql"
+      - "Makefile"
+      - "packaging/**"
+  workflow_dispatch:
 
 # No job here needs a writable token: nothing pushes an image (docker/build-push-action runs with push: false).
 permissions:
@@ -66,6 +121,15 @@ jobs:
             grep -q "kconmon_9.9.9_${os}_${arch}.tar.gz" "$tmp/kconmon.yaml" \
               || { echo "::error::missing platform $a"; exit 1; }
           done
+          sums=$(grep -Ec '^\s*sha256:\s*"[0-9a-f]{64}"\s*$' "$tmp/kconmon.yaml" || true)
+          if [ "$sums" -ne 4 ]; then
+            echo "::error::want four 64-hex sha256 entries in the krew manifest, got ${sums}"; exit 1
+          fi
+          # krew-index rejects an empty sha256, so a missing archive has to fail the render.
+          rm "$tmp/kconmon_9.9.9_darwin_arm64.tar.gz"
+          if ./krew/render-manifest.sh 9.9.9 "$tmp" "$tmp/missing.yaml"; then
+            echo "::error::render-manifest.sh succeeded with the darwin_arm64 archive missing"; exit 1
+          fi
           echo "krew manifest OK"
 
   govulncheck:
@@ -101,6 +165,8 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      # Build tags live in .golangci.yml, so e2e and integration files are linted with the rest; a
+      # compile error in a suite that otherwise runs only inside a release fails the PR.
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
@@ -121,6 +187,13 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
+
+      # internal/config strict-decodes the chart as helm renders it: the helm every other job pins,
+      # never the runner image's own.
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.txt -covermode=atomic -count=1 ./...
@@ -177,16 +250,13 @@ jobs:
         env:
           KCONMON_TEST_DATABASE_DSN: postgres://kconmon:kconmon@127.0.0.1:5432/kconmon_test?sslmode=disable
           REDIS_TEST_ADDR: 127.0.0.1:6379
-        # The suites skip themselves when their env var is unset, so a green run
-        # can mean "ran nothing"; the grep turns that silent skip into a failure.
+        # The suites skip themselves when their env var is unset, so a green run can mean "ran
+        # nothing"; the guard fails the job on any SKIP, whichever variable a suite waits for.
         run: |
           set -euo pipefail
           go test -race -count=1 -tags=integration -v ./internal/console/... \
-            | tee /tmp/integration-tests.log
-          if grep -E 'SKIP.*(KCONMON_TEST_DATABASE_DSN|REDIS_TEST_ADDR) not set' /tmp/integration-tests.log; then
-            echo "::error::integration tests were skipped; the service env did not reach the tests"
-            exit 1
-          fi
+            | tee "$RUNNER_TEMP/integration-tests.log"
+          e2e/leg-log-check.sh "$RUNNER_TEMP/integration-tests.log" "integration suite"
 
   pmtu-netns:
     name: PMTU in network namespaces
@@ -202,8 +272,8 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      # The runner VM has root through sudo, iproute2 and iptables; the script builds its own
-      # namespaces and removes them on exit.
+      # The runner VM has root through sudo, iproute2, iptables and ip6tables (the IPv6 scenarios
+      # drop packet-too-big with it); the script builds its own namespaces and removes them on exit.
       - name: Probe verdicts against a real kernel
         run: sudo -E env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" hack/pmtu-netns/run.sh
 
@@ -223,11 +293,14 @@ jobs:
 
       # Pinned to the version the repo is generated with, so a plugin or codegen change is a deliberate
       # bump and never a surprise in this diff; buf.gen.yaml pins the two remote plugins the same way.
+      # The sha256 is the release's own sha256.txt entry; a version bump updates both.
       - name: Install buf
         run: |
           base=https://github.com/bufbuild/buf/releases/download
-          curl -fsSL "$base/v1.71.0/buf-Linux-x86_64.tar.gz" \
-            | tar xz --strip-components=2 -C /usr/local/bin buf/bin/buf
+          curl -fsSL -o "$RUNNER_TEMP/buf.tar.gz" "$base/v1.71.0/buf-Linux-x86_64.tar.gz"
+          echo "1b941e33c62614944c35396bf0e7a197ec6e94e09ac1ce719667dd1bbb372ff5  $RUNNER_TEMP/buf.tar.gz" \
+            | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/buf.tar.gz" --strip-components=2 -C /usr/local/bin buf/bin/buf
           buf --version
 
       # The generated Go is committed (api/proto/*.pb.go) so `go build` needs no protoc, which also means
@@ -236,6 +309,14 @@ jobs:
         run: |
           buf generate api/proto
           git diff --exit-code api/proto
+
+      # Same contract for sqlc: the store code is committed, so a queries/*.sql edit that skipped
+      # `make sqlc` compiles and ships the old SQL. The header line naming the sqlc version is
+      # ignored: it moves with every sqlc bump and says nothing about the SQL.
+      - name: Generated sqlc code is current
+        run: |
+          make sqlc
+          git diff --exit-code -I '^//   sqlc v' internal/console/store/gen
 
       - name: Build agent
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/agent
@@ -256,6 +337,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # `go build` from a clean checkout embeds the tracked index.html. A committed Vite build names
+      # hashed /assets/ chunks that the dist .gitignore keeps out of git, so that console 404s on
+      # them; only the placeholder may be tracked. Checked at HEAD, before the Build step rewrites it.
+      - name: The tracked dist/index.html is the placeholder
+        run: |
+          index=internal/console/ui/dist/index.html
+          git cat-file -e "HEAD:${index}" \
+            || { echo "::error::${index} is not tracked; go:embed needs the placeholder"; exit 1; }
+          if git grep -n '/assets/' HEAD -- "$index"; then
+            echo "::error::${index} is a committed Vite build; restore the placeholder, not the build output"
+            exit 1
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -289,6 +383,17 @@ jobs:
         # (the "Build" npm script's `npm run typecheck &&` prefix would repeat it).
         run: npx vite build
 
+      # The heavy vendor chunks load with the lazy pages that need them (web/src/routes.tsx); a
+      # static import from the entry would put them in index.html as a modulepreload.
+      - name: Heavy chunks stay out of the entry page
+        run: |
+          # grep exits 2 on a missing file and `if` reads that as "no match", so a moved outDir would pass.
+          test -s internal/console/ui/dist/index.html \
+            || { echo "::error::internal/console/ui/dist/index.html is missing; vite built somewhere else"; exit 1; }
+          if grep -E 'echarts|codemirror|xyflow' internal/console/ui/dist/index.html; then
+            echo "::error::index.html preloads a heavy vendor chunk; the Overview would download it"; exit 1
+          fi
+
   console-image:
     name: Console image
     runs-on: ubuntu-latest
@@ -298,17 +403,70 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
+      # Both platforms, like the release, and without QEMU like the release's draft job: a RUN that
+      # needs emulation fails here rather than on the tag.
       - name: Build console image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: Dockerfile.console
+          platforms: linux/amd64,linux/arm64
           push: false
           load: false
           tags: kconmon-ng-console:ci
           build-args: |
             VERSION=ci
             COMMIT=${{ github.sha }}
+
+  # The release builds the agent and controller images from the thin Dockerfiles through goreleaser,
+  # and the e2e dispatch and hack/local-test.sh build them from the root Dockerfile. Both run here, so
+  # a broken Dockerfile or .goreleaser.yaml fails the PR instead of the tag's draft job, which has
+  # already pushed and signed the console image by then.
+  images:
+    name: Agent and controller images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      # Every binary, archive, deb/rpm and the four thin-Dockerfile images, as the release builds them.
+      # Publishing, signing and SBOMs stay release-only. The thin Dockerfiles have no RUN, so the
+      # arm64 images need no QEMU.
+      - name: GoReleaser snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.18.2
+          args: release --snapshot --clean --skip=publish,sign,sbom
+
+      - name: Build the root Dockerfile (agent)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: agent
+          push: false
+          load: false
+          tags: kconmon-ng-agent:ci
+
+      - name: Build the root Dockerfile (controller)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: controller
+          push: false
+          load: false
+          tags: kconmon-ng-controller:ci
 
   helm-lint:
     name: Helm Lint
@@ -325,21 +483,20 @@ jobs:
       - name: values.schema.json has no duplicate keys
         run: python3 hack/schema-lint.py charts/kconmon-ng/values.schema.json
 
-      # A --set path the chart stopped reading is accepted by helm and changes nothing; see the
-      # script's header for the run it silently hollowed out.
+      # A --set path the chart stopped reading is accepted by helm and changes nothing.
       - name: Every value CI sets is a value the chart defines
         run: python3 hack/values-keys-lint.py
 
-      # Rules must EVALUATE, not merely render: v2.3.0 shipped zone alerts whose expressions
-      # only failed inside the query engine ("vector cannot contain metrics with the same
-      # labelset"), on both production clusters at once. promtool test rules runs them against
-      # synthetic series for every metric family and also proves each alert fires on staged
-      # bad data — see hack/rules-test/.
+      # Rules must evaluate, not merely render: promtool test rules runs every rule against synthetic
+      # series and proves each alert fires on staged bad data (hack/rules-test/).
+      # The sha256 is the release's own sha256sums.txt entry; a version bump updates both.
       - name: Install promtool
         run: |
           base=https://github.com/prometheus/prometheus/releases/download
-          curl -fsSL "$base/v3.14.0/prometheus-3.14.0.linux-amd64.tar.gz" \
-            | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'
+          curl -fsSL -o "$RUNNER_TEMP/prometheus.tar.gz" "$base/v3.14.0/prometheus-3.14.0.linux-amd64.tar.gz"
+          echo "f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d  $RUNNER_TEMP/prometheus.tar.gz" \
+            | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/prometheus.tar.gz" --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'
           promtool --version
       - name: Alert rules evaluate and fire (promtool test rules)
         run: ./hack/rules-test/render-and-test.sh
@@ -359,16 +516,8 @@ jobs:
             helm lint charts/kconmon-ng -f "$f"
           done
 
-      # RENDERING is the gate, not linting. `helm lint` reports a template `fail` at INFO level and
-      # exits 0, so a shipped ci profile that cannot render at all passed this job — and one did:
-      # console-auth-header-values.yaml stopped rendering when the console.replicas invariant landed,
-      # and nothing said so. The loop above also had no `set -e`, so a lint that DID fail was ignored
-      # from the second profile onward.
-      # A DUPLICATE KEY renders fine in Helm and hard-fails yaml.v3 — kustomize, Flux's
-      # kustomize-controller, an Argo CD kustomize source. The chart shipped `protocol: TCP` twice in
-      # the agent and controller Services and every one of those pipelines broke on the DEFAULT
-      # render, with helm lint and helm template both green. Strict parsing is the only thing that
-      # sees it.
+      # Helm renders a duplicate mapping key; yaml.v3 (kustomize, Flux, Argo CD) refuses it, so the
+      # render is parsed strictly.
       - name: Rendered manifests parse under strict YAML
         run: |
           set -e
@@ -407,13 +556,8 @@ jobs:
               print(f"ok: {prof or 'defaults'}")
           PY
 
-      # A config change must RESTART the pods that read it. The agent and the controller read the
-      # shared ConfigMap once at startup, and a mounted ConfigMap changes under a running process
-      # without telling it: `controller.events.enabled: true` was applied to a live release and the
-      # controller went on advertising no capabilities, so the Console's realtime ingester retried
-      # forever against a stream that was configured but never started -- silently, because nothing
-      # was broken except the generation of one file. The checksum annotation is what turns a values
-      # change into a rollout, and it must also NOT move when the config did not.
+      # The agent and the controller read the ConfigMap once at startup, so checksum/config must move
+      # with the config and only with it.
       - name: A config change rolls the pods that read it
         run: |
           set -e
@@ -440,6 +584,66 @@ jobs:
               sys.exit("::error::checksum/config moved for a change the ConfigMap does not carry; "
                        "that is a needless restart")
           print("ok: the checksum follows the config and nothing else")
+          PY
+
+      # The console reads its DSN and keys at boot, so checksum/secret must roll it when one changes.
+      # The local-auth bootstrap password only seeds an empty users table: a restart for it does
+      # nothing, and an unsalted hash of a human-chosen password in a pod annotation can be guessed.
+      - name: checksum/secret follows the console's secrets, not the bootstrap password
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re, subprocess, sys
+
+          BASE = ["--set", "console.enabled=true", "--set", "console.auth.mode=local",
+                  "--set", "console.auth.local.bootstrapAdmin=admin",
+                  "--set", "console.auth.local.secret.create=true",
+                  "--set", "database.secret.create=true"]
+
+          def render(password, dsn):
+              return subprocess.run(["helm", "template", "charts/kconmon-ng", *BASE,
+                                     "--set", f"console.auth.local.secret.password={password}",
+                                     "--set", f"database.secret.dsn={dsn}"],
+                                    capture_output=True, text=True, check=True).stdout
+
+          def checksum(out):
+              found = re.findall(r'checksum/secret:\s*"?([0-9a-f]{64})"?', out)
+              if len(found) != 1:
+                  sys.exit(f"::error::expected one checksum/secret on the console, found {len(found)}")
+              return found[0]
+
+          base = render("hunter2", "postgres://a")
+          if "hunter2" not in base:
+              sys.exit("::error::the bootstrap password Secret is no longer rendered")
+          if checksum(render("hunter3", "postgres://a")) != checksum(base):
+              sys.exit("::error::checksum/secret moved with the bootstrap password; it only seeds an empty "
+                       "users table, so the restart does nothing and the annotation leaks its hash")
+          if checksum(render("hunter2", "postgres://b")) == checksum(base):
+              sys.exit("::error::checksum/secret ignored a DSN change; the console would keep the old database")
+          print("ok: checksum/secret follows the secrets the console reads, not the bootstrap password")
+          PY
+
+      # Without GOMEMLIMIT the GC lets the heap reach twice the live size, and a few concurrent
+      # argon2 logins are enough to put that past the container limit.
+      - name: The console's GOMEMLIMIT is its memory limit
+        run: |
+          set -e
+          python3 - <<'PY'
+          import subprocess, sys, yaml
+
+          out = subprocess.run(["helm", "template", "charts/kconmon-ng", "--set", "console.enabled=true"],
+                               capture_output=True, text=True, check=True).stdout
+          deploy = next(d for d in yaml.safe_load_all(out)
+                        if d and d.get("kind") == "Deployment"
+                        and d["metadata"]["labels"].get("app.kubernetes.io/component") == "console")
+          console = next(c for c in deploy["spec"]["template"]["spec"]["containers"] if c["name"] == "console")
+          env = {e["name"]: e for e in console.get("env") or []}
+          ref = ((env.get("GOMEMLIMIT") or {}).get("valueFrom") or {}).get("resourceFieldRef") or {}
+          if ref.get("resource") != "limits.memory" or ref.get("containerName") != "console" \
+                  or ref.get("divisor", "1") != "1":
+              sys.exit("::error::the console's GOMEMLIMIT is not its own memory limit in bytes: "
+                       f"{env.get('GOMEMLIMIT')}")
+          print("ok: GOMEMLIMIT follows the console container's memory limit")
           PY
 
       # Every line asserted here is load-bearing under agent.hostNetwork: a bare Service name does not
@@ -524,6 +728,7 @@ jobs:
           check 'ABSENT' --set config.checkers.pmtu=null
           echo "ok: pmtu keys render only when tuned"
 
+      # helm lint reports a template `fail` at INFO and exits 0, so rendering every profile is the gate.
       - name: Template chart with every ci profile
         run: |
           set -e
@@ -531,4 +736,12 @@ jobs:
           for f in charts/kconmon-ng/ci/*.yaml; do
             echo "--- Templating with $f"
             helm template kconmon-ng charts/kconmon-ng -f "$f" >/dev/null
+            helm template kconmon-ng charts/kconmon-ng -f "$f" \
+              --api-versions cilium.io/v2/CiliumNetworkPolicy >/dev/null
           done
+
+      - name: NetworkPolicies admit every legitimate flow and keep the controller closed
+        run: python3 hack/networkpolicy-check.py charts/kconmon-ng
+
+      - name: Values the binaries refuse fail at install, and console config reaches config.yaml
+        run: python3 hack/chart-render-check.py charts/kconmon-ng

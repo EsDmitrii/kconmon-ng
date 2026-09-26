@@ -26,9 +26,10 @@
   "postUpdateOptions": ["gomodTidy"],
 
   "lockFileMaintenance": {
+    "description": "Not automerged: Renovate does not apply minimumReleaseAge to lock file maintenance, so the regenerated web/package-lock.json can pick a transitive version published minutes earlier.",
     "enabled": true,
     "schedule": ["before 6am on the first day of the month"],
-    "automerge": true
+    "automerge": false
   },
 
   "ignorePaths": [
@@ -42,13 +43,20 @@
     "enabled": true
   },
 
+  "kubernetes": {
+    "managerFilePatterns": ["/^e2e/testdata/.+\\.ya?ml$/"]
+  },
+
+  "pip-compile": {
+    "managerFilePatterns": ["/^\\.github/requirements-docs\\.lock$/"]
+  },
+
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
     "enabled": true,
     "schedule": ["at any time"],
     "minimumReleaseAge": null,
-    "labels": ["dependencies", "security"],
-    "automerge": true
+    "labels": ["dependencies", "security"]
   },
 
   "customManagers": [
@@ -62,7 +70,7 @@
     },
     {
       "customType": "regex",
-      "description": "syft is installed by anchore/sbom-action/download-syft from a `syft-version:` input, which the github-actions manager does not extract; it sat ten minors behind before this manager existed.",
+      "description": "syft is installed by anchore/sbom-action/download-syft from a `syft-version:` input, which the github-actions manager does not extract.",
       "managerFilePatterns": ["/^\\.github/workflows/release\\.yaml$/"],
       "matchStrings": ["syft-version: (?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
       "depNameTemplate": "anchore/syft",
@@ -76,6 +84,32 @@
       "depNameTemplate": "oras-project/oras",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "promtool for the Helm Lint rules gate is downloaded from the Prometheus release URL in ci.yaml. The version appears twice in that URL; the match covers both, and Renovate replaces every occurrence inside it. The sha256 line below it is updated by hand.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yaml$/"],
+      "matchStrings": ["\\$base/v(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)/prometheus-[0-9]+\\.[0-9]+\\.[0-9]+\\.linux-amd64\\.tar\\.gz"],
+      "depNameTemplate": "prometheus/prometheus",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "buf for the generated-protobuf gate is downloaded from its release URL in ci.yaml. The sha256 line below it is updated by hand.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yaml$/"],
+      "matchStrings": ["\\$base/v(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)/buf-Linux-x86_64\\.tar\\.gz"],
+      "depNameTemplate": "bufbuild/buf",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "sqlc is run by `go run ...@$(SQLC_VERSION)` from the Makefile, which no built-in manager reads.",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": ["SQLC_VERSION \\?= (?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "depNameTemplate": "github.com/sqlc-dev/sqlc",
+      "datasourceTemplate": "go"
     }
   ],
 
@@ -85,12 +119,13 @@
       "matchDatasources": ["docker"],
       "matchPackageNames": [
         "ghcr.io/esdmitrii/**",
-        "ghcr.io/EsDmitrii/**"
+        "ghcr.io/EsDmitrii/**",
+        "kconmon-ng-*"
       ],
       "enabled": false
     },
     {
-      "description": "Majors always wait for a human, and they wait ON THE DASHBOARD, not as open PRs. The very first Renovate run surfaced 14 of them at once (web/ npm had never been covered by anything: typescript v7, vite v8, vitest v4, jsdom v30, node v24, helm v4, valkey v9, ...). Tick the box on the dependency dashboard issue to release one into a real PR.",
+      "description": "Majors always wait for a human, on the dependency dashboard rather than as open PRs. Tick the box on the dashboard issue to release one into a real PR.",
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "dependencyDashboardApproval": true,
@@ -119,14 +154,14 @@
       "automerge": false
     },
     {
-      "description": "Frontend (web/). Was covered by nobody before Renovate.",
+      "description": "Frontend (web/).",
       "matchManagers": ["npm"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "groupName": "frontend deps",
       "automerge": true
     },
     {
-      "description": "The build toolchain moves as one PR because vite and @vitejs/plugin-react are mutually pinned: @vitejs/plugin-react@6 declares peer `vite: ^8.0.0` while @4 refuses vite 8, so a standalone bump of either cannot resolve a lockfile. Observed for real on the first run: PRs #29 and #36 both landed with package.json changed and NO package-lock.json, and both went red (Console image, and Frontend on #29). @tailwindcss/vite@4 already accepts vite ^8 and vitest 4 is independently fine, but they belong in the same reviewable unit.",
+      "description": "The build toolchain moves as one PR because vite and @vitejs/plugin-react are mutually pinned: @vitejs/plugin-react@6 declares peer `vite: ^8.0.0` while @4 refuses vite 8, so a standalone bump of either cannot resolve a lockfile. @tailwindcss/vite@4 already accepts vite ^8 and vitest 4 is independently fine, but they belong in the same reviewable unit.",
       "matchManagers": ["npm"],
       "matchPackageNames": [
         "vite",
@@ -144,11 +179,25 @@
       "automerge": true
     },
     {
-      "description": "Base images in the four Dockerfiles plus the bundled valkey image in the chart values.",
-      "matchManagers": ["dockerfile", "helm-values", "helmv3"],
+      "description": "Base images of the four Dockerfiles. The Console image and Agent and controller images jobs build all four on every PR, so a green CI built the bump.",
+      "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "groupName": "container images",
       "automerge": true
+    },
+    {
+      "description": "Images the chart values name, today the GeoIP sidecar (ghcr.io/maxmind/geoipupdate). CI only renders them and no job pulls or runs one, e2e included, so a green CI never executed the bump.",
+      "matchManagers": ["helm-values", "helmv3"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": false
+    },
+    {
+      "description": "The golang base image follows go.mod's toolchain: a Go minor in the Dockerfiles joins the go.mod minor in the 'go toolchain' PR and waits for a human with it.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["golang"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "go toolchain",
+      "automerge": false
     },
     {
       "matchManagers": ["pre-commit"],
@@ -157,7 +206,7 @@
       "automerge": true
     },
     {
-      "description": "Tool versions pinned in a `with: version:` block: golangci-lint inside golangci-lint-action, the helm CLI inside azure/setup-helm. The github-actions manager already extracts these itself as depType uses-with (verified by a local extract dry-run), so no custom regex manager is needed and adding one would produce a second PR for the same line. A golangci-lint minor ships new linters and therefore new lint failures, and a helm minor changes chart rendering, so only patch automerges.",
+      "description": "Tool versions pinned in a `with: version:` block: golangci-lint inside golangci-lint-action, the helm CLI inside azure/setup-helm. The github-actions manager already extracts these itself as depType uses-with, so no custom regex manager is needed and adding one would produce a second PR for the same line. A golangci-lint minor ships new linters and therefore new lint failures, and a helm minor changes chart rendering, so only patch automerges.",
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
       "matchUpdateTypes": ["patch"],
@@ -165,7 +214,7 @@
       "automerge": true
     },
     {
-      "description": "The groupName here is load-bearing: without it these deps keep the `github-actions` group from the rule above while carrying automerge:false, and a group is merged as a whole — one non-automergeable member parks every Action bump behind a human. Seen for real on the first run: golangci/golangci-lint and helm landed inside the github-actions group PR.",
+      "description": "The groupName here is load-bearing: without it these deps keep the `github-actions` group from the rule above while carrying automerge:false, and a group is merged as a whole — one non-automergeable member parks every Action bump behind a human.",
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
       "matchUpdateTypes": ["minor"],
@@ -177,6 +226,56 @@
       "description": "Release-only tooling: the release job is the only thing that runs it and PR CI never does, so nothing here automerges.",
       "matchDepNames": ["anchore/syft", "oras-project/oras"],
       "groupName": "release tooling",
+      "automerge": false
+    },
+    {
+      "description": "Actions only release.yaml or e2e.yaml run, and the tools they pin in `with:` (cosign-release, the goreleaser version, the kind CLI and node image, extracted as uses-with). CI calls neither workflow; goreleaser also runs in CI's images job, but as a snapshot with publish, sign and sbom skipped, so the release path still first runs on a tag. They join the release tooling group so the github-actions group stays automergeable.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": [
+        "docker/login-action",
+        "goreleaser/goreleaser-action",
+        "goreleaser/goreleaser",
+        "sigstore/cosign-installer",
+        "sigstore/cosign",
+        "anchore/sbom-action",
+        "oras-project/setup-oras",
+        "rajatjindal/krew-release-bot",
+        "helm/kind-action",
+        "kubernetes-sigs/kind",
+        "kindest/node"
+      ],
+      "groupName": "release tooling",
+      "automerge": false
+    },
+    {
+      "description": "requirements-docs.txt is the source of .github/requirements-docs.lock, and the pip-compile manager bumps it and regenerates the lock in one PR. pip_requirements would open a second PR for the same pins without the lock.",
+      "matchManagers": ["pip_requirements"],
+      "matchFileNames": ["requirements-docs.txt"],
+      "enabled": false
+    },
+    {
+      "description": "The Pages actions run only on a push to main: docs.yaml keeps the upload step and the deploy job off pull requests, so a green PR never executed the bump and its first run would be the production deploy.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/upload-pages-artifact", "actions/deploy-pages"],
+      "groupName": "docs deploy tooling",
+      "automerge": false
+    },
+    {
+      "description": "Images of the e2e fixtures in e2e/testdata. Only the release's e2e job runs them, so a green PR never did.",
+      "matchManagers": ["kubernetes"],
+      "groupName": "release tooling",
+      "automerge": false
+    },
+    {
+      "description": "promtool in the rules gate and the e2e fixture Prometheus are one Prometheus release and move together. The promtool sha256 in ci.yaml needs the new release's sha256sums.txt entry by hand, so the PR stays red until someone adds it.",
+      "matchDepNames": ["prometheus/prometheus", "prom/prometheus"],
+      "groupName": "prometheus",
+      "automerge": false
+    },
+    {
+      "description": "buf and sqlc generate committed code, and CI fails on any diff from it. A bump needs `make proto` or `make sqlc` rerun, and buf's sha256 in ci.yaml updated by hand.",
+      "matchDepNames": ["bufbuild/buf", "github.com/sqlc-dev/sqlc"],
+      "groupName": "codegen tooling",
       "automerge": false
     },
     {

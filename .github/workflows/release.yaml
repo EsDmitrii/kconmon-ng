@@ -23,18 +23,28 @@ jobs:
       contents: write  # goreleaser creates the draft release and uploads assets
       packages: write  # image pushes to GHCR
       id-token: write  # cosign keyless signing (OIDC)
+    # Digest-pinned refs of the :<version> images this job pushed: e2e tests the amd64 ones, and
+    # publish points :latest at the indexes once e2e has passed.
+    outputs:
+      agent: ${{ steps.digests.outputs.agent }}
+      controller: ${{ steps.digests.outputs.controller }}
+      console: ${{ steps.digests.outputs.console }}
+      agent_amd64: ${{ steps.digests.outputs.agent_amd64 }}
+      controller_amd64: ${{ steps.digests.outputs.controller_amd64 }}
+      console_amd64: ${{ steps.digests.outputs.console_amd64 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
+      # No restored cache: goreleaser builds and cosign signs the release binaries here, and a Go
+      # cache entry is writable by any job that runs on main.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+          cache: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -49,12 +59,11 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pinned: v3 changed blob signing to bundle output; an unpinned runner drift is what
-          # broke the first v2.2.0 run. Bump deliberately, together with the signs: config.
+          # Pinned: blob-signing output changes between majors; bump together with .goreleaser.yaml signs:.
           cosign-release: v3.1.3
 
       # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
-      # Pinned like cosign above: an unpinned tool on the release path is how v2.2.0 died.
+      # Pinned like cosign.
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -70,9 +79,8 @@ jobs:
       # still a no-op, not after the console image has already been published.
       - name: Extract current release notes
         run: |
-          # RELEASE_NOTES.md keeps the full history, and the GitHub Release body must carry the
-          # section for THIS TAG -- not merely the topmost one. Taking the top silently published
-          # the previous version's notes whenever a section was forgotten.
+          # RELEASE_NOTES.md keeps the full history; the Release body is this tag's section, never
+          # the topmost one.
           version="${GITHUB_REF_NAME#v}"
           awk -v want="## kconmon-ng v${version}" '
             $0 == want {found = 1; print; next}
@@ -84,10 +92,8 @@ jobs:
             exit 1
           fi
 
-      # Same early-fail contract as the notes check: `helm package --version/--app-version` silently
-      # overrides whatever Chart.yaml says, so a forgotten bump ships the wrong per-version
-      # artifacthub.io/changes changelog under the right version number (a stale appVersion already
-      # slipped into a v2.2.0 attempt).
+      # Same early-fail contract as the notes check: `helm package --version/--app-version` override
+      # Chart.yaml, so a forgotten bump would ship the wrong artifacthub.io/changes.
       - name: Chart version matches the tag
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -102,6 +108,8 @@ jobs:
 
       # The console image cannot go through goreleaser dockers (those need a prebuilt binary + thin Dockerfile;
       # Dockerfile.console has a Node build stage and needs full source context).
+      # This job has no QEMU: every RUN in Dockerfile.console runs on the build host, and CI's console
+      # image job builds both platforms the same way.
       - name: Build and push console image
         id: console-image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -110,11 +118,8 @@ jobs:
           file: Dockerfile.console
           platforms: linux/amd64,linux/arm64
           push: true
-          # :latest only for stable versions -- the same prerelease gate as the krew step and the
-          # goreleaser :latest manifests (skip_push: auto). Empty lines in the list are dropped.
-          tags: |
-            ghcr.io/esdmitrii/kconmon-ng-console:${{ steps.ver.outputs.version }}
-            ${{ !contains(github.ref_name, '-') && 'ghcr.io/esdmitrii/kconmon-ng-console:latest' || '' }}
+          # :<version> only; the publish job moves :latest after e2e.
+          tags: ghcr.io/esdmitrii/kconmon-ng-console:${{ steps.ver.outputs.version }}
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
             COMMIT=${{ github.sha }}
@@ -133,14 +138,39 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          # Exact, not ~>v2: a goreleaser minor changed blob-signing output once already (v2.2.0).
+          # Exact, not ~>v2: a minor once changed blob-signing output.
           version: v2.18.2
           args: release --clean --release-notes /tmp/current-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Read back once, right after the pushes: e2e pulls and publish tags exactly these digests, so
+      # a later push to :<version> cannot change what was tested.
+      - name: Resolve the pushed image digests
+        id: digests
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          CONSOLE_DIGEST: ${{ steps.console-image.outputs.digest }}
+        run: |
+          for c in agent controller console; do
+            repo="ghcr.io/esdmitrii/kconmon-ng-${c}"
+            manifest=$(docker buildx imagetools inspect "${repo}:${VERSION}" --format '{{json .Manifest}}')
+            index=$(jq -er '.digest' <<<"$manifest")
+            amd64=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")]
+              | if length == 1 then .[0].digest else error("want exactly one linux/amd64 manifest") end' <<<"$manifest")
+            if [ "$c" = console ] && [ "$index" != "$CONSOLE_DIGEST" ]; then
+              echo "::error::${repo}:${VERSION} is ${index}, not the ${CONSOLE_DIGEST} this job pushed and signed"
+              exit 1
+            fi
+            echo "${repo}:${VERSION} is ${index}, linux/amd64 ${amd64}"
+            {
+              echo "${c}=${repo}@${index}"
+              echo "${c}_amd64=${repo}@${amd64}"
+            } >> "$GITHUB_OUTPUT"
+          done
+
       # Stays in this job because render-manifest.sh reads the archives from dist/; the upload only
-      # attaches an asset to the DRAFT release, so nothing becomes public before the e2e gate.
+      # attaches an asset to the DRAFT release, which stays unpublished until the e2e gate passes.
       - name: Render and upload krew manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -149,31 +179,47 @@ jobs:
           ./krew/render-manifest.sh "$VERSION" dist kconmon.yaml
           gh release upload "$GITHUB_REF_NAME" kconmon.yaml --clobber
 
-  # The release gate: the freshly built images and the chart must pass e2e on a kind cluster
-  # before the draft release is published and the chart/krew artifacts go out.
+  # The release gate: e2e runs on kind against the linux/amd64 images the draft job pushed, by
+  # digest, and must pass before :latest moves, the chart goes out and the draft release is
+  # published. :<version> is pushed and signed before this gate, since e2e pulls it; a failed
+  # run leaves it with no :latest, chart or published release pointing at it.
   e2e:
     name: E2E
     needs: draft
     permissions:
       contents: read
+      packages: read  # pulls the draft's images from GHCR
     uses: ./.github/workflows/e2e.yaml
+    with:
+      agent-image: ${{ needs.draft.outputs.agent_amd64 }}
+      controller-image: ${{ needs.draft.outputs.controller_amd64 }}
+      console-image: ${{ needs.draft.outputs.console_amd64 }}
 
   publish:
     name: Publish release
-    needs: e2e
+    needs: [draft, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # gh release edit/download
       packages: write  # helm chart + Artifact Hub metadata pushes
       id-token: write  # cosign keyless signing (OIDC)
+    # One publish at a time, so two stable tags in flight cannot both find themselves newest while
+    # the other is still a draft. GitHub keeps one pending run per group: a third tag queued behind
+    # a pending one cancels it, and that tag's publish job needs a re-run.
+    concurrency:
+      group: release-publish-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      latest: ${{ steps.newest.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pinned: v3 changed blob signing to bundle output; an unpinned runner drift is what
-          # broke the first v2.2.0 run. Bump deliberately, together with the signs: config.
+          # Pinned like the draft job's.
           cosign-release: v3.1.3
 
       - name: Set up Helm
@@ -195,9 +241,7 @@ jobs:
           echo "$PUSH_OUT"
           echo "digest=$(echo "$PUSH_OUT" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
 
-      # Cosign reads ~/.docker/config.json, not helm's own registry config: the draft/publish job
-      # split left this job with helm+oras logins only, and the chart-signature push arrived at
-      # GHCR anonymous — the first fully-green pipeline died exactly here.
+      # cosign reads ~/.docker/config.json, not helm's or oras' registry config.
       - name: Log in to GHCR for cosign
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -226,31 +270,97 @@ jobs:
             --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
             artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
 
+      # :latest, the Latest badge and krew follow the newest published stable release only. Without
+      # this, re-running an older tag's failed e2e after a newer release went out moves all three back.
+      # Here, not at the top of the job: a release published by hand meanwhile is still counted.
+      - name: Check this is the newest stable release
+        id: newest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          published=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1000 \
+            --json tagName --jq '.[].tagName')
+          newest=$(printf '%s\n%s\n' "$published" "$GITHUB_REF_NAME" | grep -v -- - | sort -V | tail -n 1)
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::${newest} is newer; ${GITHUB_REF_NAME} leaves :latest, the Latest badge and krew alone"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The newest stable tag only. A single-source imagetools create copies the index as is, so
+      # :latest gets the very digest e2e tested; the check below fails the job if it ever does not.
+      - name: Point :latest at the tested images
+        if: ${{ steps.newest.outputs.latest == 'true' }}
+        env:
+          AGENT: ${{ needs.draft.outputs.agent }}
+          CONTROLLER: ${{ needs.draft.outputs.controller }}
+          CONSOLE: ${{ needs.draft.outputs.console }}
+        run: |
+          for ref in "$AGENT" "$CONTROLLER" "$CONSOLE"; do
+            case "$ref" in
+              ghcr.io/esdmitrii/kconmon-ng-*@sha256:*) ;;
+              *) echo "::error::draft job output '${ref}' is not a digest-pinned image ref"; exit 1 ;;
+            esac
+            repo="${ref%@*}"
+            digest="${ref#*@}"
+            docker buildx imagetools create --tag "${repo}:latest" "$ref"
+            manifest=$(docker buildx imagetools inspect "${repo}:latest" --format '{{json .Manifest}}')
+            moved=$(jq -er '.digest' <<<"$manifest")
+            if [ "$moved" != "$digest" ]; then
+              echo "::error::${repo}:latest is ${moved}, not the tested ${digest}"; exit 1
+            fi
+            # Sign by digest, not tag: tags are mutable, digests are what verifiers pin.
+            cosign sign --yes "${repo}@${digest}"
+          done
+
       # After the chart push on purpose: goreleaser created the release as a DRAFT (immutable
       # releases seal assets at publish time).
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.newest.outputs.latest }}
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             # GitHub refuses --latest on a prerelease, and a prerelease must not become "latest" anyway.
             gh release edit "$GITHUB_REF_NAME" --draft=false
-          else
+          elif [ "$LATEST" = true ]; then
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          else
+            # Explicit: publishing a draft makes it Latest unless make_latest says otherwise.
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false
           fi
 
-      # Rendered and attached by the draft job; this job runs in a fresh workspace.
+  # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no longer needs a
+  # hand-written krew PR. A job of its own: the pinned action runs its container by a mutable tag,
+  # so it gets a read-only token and none of the publish job's registry logins or OIDC.
+  krew:
+    name: Open krew-index bump PR
+    needs: publish
+    if: ${{ needs.publish.outputs.latest == 'true' }}
+    runs-on: ubuntu-latest
+    # Bump PRs open in publish order, so an older tag's PR cannot land after a newer one's.
+    concurrency:
+      group: release-krew-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # Rendered and attached by the draft job; there is no checkout here, so gh gets the repo.
       - name: Fetch krew manifest from the release
-        if: ${{ !contains(github.ref_name, '-') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release download "$GITHUB_REF_NAME" --pattern kconmon.yaml
 
-      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no longer needs a
-      # hand-written krew PR.
       - name: Open krew-index bump PR
-        if: ${{ !contains(github.ref_name, '-') }}
         uses: rajatjindal/krew-release-bot@c970b8a8f6dbc2f2285a26e3ae160903b87002c3 # v0.0.51
         with:
           krew_template_file: kconmon.yaml
