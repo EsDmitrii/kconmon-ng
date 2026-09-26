@@ -21,10 +21,13 @@ export interface ZonePoint {
  *  always put between neighbours. */
 export const ZONE_GAP = 80;
 
-/** The pane's own shape (≈1440×680 at a 1440×900 window). fitView rescales the
- *  drawing to the pane, so legibility is decided by the drawing's ASPECT, not
- *  its absolute size — the closer to this, the larger everything renders. */
-const TARGET_ASPECT = 2;
+/** The desktop pane's shape (≈1440×680 at a 1440×900 window). fitView rescales
+ *  the drawing to the pane, so legibility is decided by the drawing's ASPECT, not
+ *  its absolute size — the closer to the pane's, the larger everything renders. */
+export const LANDSCAPE_PANE_ASPECT = 2;
+
+/** A portrait pane, such as a phone's (≈366×620 at a 390×844 window). */
+export const PORTRAIT_PANE_ASPECT = 0.6;
 
 function layout(
   sizes: readonly ZoneSize[],
@@ -53,20 +56,22 @@ function layout(
 
 /** How far a drawing's aspect sits from the pane's, symmetric in log space so
  *  "twice too wide" and "twice too tall" miss by the same amount. */
-const misfit = (b: { width: number; height: number }) =>
-  Math.abs(Math.log(b.width / b.height / TARGET_ASPECT));
+const misfit = (b: { width: number; height: number }, paneAspect: number) =>
+  Math.abs(Math.log(b.width / b.height / paneAspect));
 
 /**
  * packZones positions one box per zone, in the caller's order.
  *
- * 1-2 zones keep the exact one-row layout the map always had. From 3 up the
- * column count is 2 or 3 — derived from the zones' real widths, not the count
- * alone: whichever packing's bounding box sits closer to the pane's aspect,
- * so wide zones (many nodes) wrap sooner than narrow ones.
+ * On a landscape pane 1-2 zones keep the exact one-row layout the map always
+ * had, and from 3 up the column count is 2 or 3. A portrait pane may also stack
+ * them in one column. Among those the count is derived from the zones' real
+ * widths, not the count alone: whichever packing's bounding box sits closer to
+ * the pane's aspect, so wide zones (many nodes) wrap sooner than narrow ones.
  */
-export function packZones(sizes: readonly ZoneSize[]): ZonePoint[] {
-  if (sizes.length <= 2) return layout(sizes, Math.max(1, sizes.length)).points;
-  const two = layout(sizes, 2);
-  const three = layout(sizes, 3);
-  return misfit(three) <= misfit(two) ? three.points : two.points;
+export function packZones(sizes: readonly ZoneSize[], paneAspect = LANDSCAPE_PANE_ASPECT): ZonePoint[] {
+  if (sizes.length === 0) return [];
+  const options = paneAspect < 1 ? [3, 2, 1] : sizes.length <= 2 ? [sizes.length] : [3, 2];
+  const layouts = options.filter((c) => c <= sizes.length).map((cols) => layout(sizes, cols));
+  // A tie keeps the wider packing, the one listed first.
+  return layouts.reduce((a, b) => (misfit(b, paneAspect) < misfit(a, paneAspect) ? b : a)).points;
 }

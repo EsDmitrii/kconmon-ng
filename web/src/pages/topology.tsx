@@ -20,6 +20,7 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useRouter } from "@tanstack/react-router";
 import { useMatrix } from "@/hooks/use-matrix";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { useTopology } from "@/hooks/use-topology";
 import { useTheme } from "@/components/theme-provider";
 import { externalByNode } from "@/lib/agents";
@@ -29,7 +30,7 @@ import { enT, topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
 import { DEGRADED_AT, FAILING_AT, fmtRatio, isProblemCell, severityRatio } from "@/lib/matrix-cells";
 import { compareNaturalName } from "@/lib/natural-name";
 import { formatAtParam, useTimeContext } from "@/lib/timemachine";
-import { packZones } from "@/lib/zone-layout";
+import { PORTRAIT_PANE_ASPECT, packZones } from "@/lib/zone-layout";
 import type { Matrix, MatrixCell, Topology } from "@/lib/types";
 /* The matrix payload gate, imported from the page that owns the matrix rather
    than re-stated here: this map colours its boxes and draws its edges from the
@@ -107,7 +108,7 @@ const edgeId = (source: string, destination: string) =>
   `${encodeURIComponent(source)}->${encodeURIComponent(destination)}`;
 
 /** health → the word the node's aria-label announces. "ok" is spoken as
- *  "healthy" rather than in the class name's vocabulary (QA round 2, #22). */
+ *  "healthy" rather than in the class name's vocabulary. */
 const HEALTH_KEYS: Readonly<Record<"ok" | "degraded" | "failing", TopologyKey>> = {
   ok: "health.ok",
   degraded: "health.degraded",
@@ -141,7 +142,7 @@ export type MapSource = "nodes" | "agents";
  * move the Overview's own nodesTile already makes for its count — one agent per
  * node (DaemonSet), so distinct nodeNames IS the node set. What does NOT
  * survive the fallback is readiness, and `ready: undefined` is how that is
- * carried rather than guessed (QA scope 2, findings #1 and #2).
+ * carried rather than guessed.
  */
 /* The controller answers in REGISTRATION order — whichever agent happened to
    come up first — so a lane redrew itself differently after every rollout and no
@@ -219,6 +220,7 @@ export function buildFlow(
   topo: Topology,
   matrix?: Matrix,
   t: Translate<TopologyKey> = enT,
+  paneAspect?: number,
 ): { nodes: Node[]; edges: Edge[]; problemTotal: number; source: MapSource } {
   const { nodes: mapped, source } = mapNodes(topo);
   const zones = [...new Set(mapped.map((n) => n.zone))].sort();
@@ -252,7 +254,7 @@ export function buildFlow(
     const rows = Math.ceil(count / zoneColumns(count));
     return { zone: z, count, width: zoneWidth(count), height: 64 + rows * NODE_H };
   });
-  const zonePoints = packZones(zoneMeta);
+  const zonePoints = packZones(zoneMeta, paneAspect);
   const nodes: Node[] = zoneMeta.map((m, i) => ({
     id: `zone:${m.zone}`,
     type: "zone",
@@ -456,7 +458,7 @@ export function unfoldableEmpty(
  * aria-label/title into those buttons and exposes no per-button override — only
  * the container's own `aria-label` — so the three are switched off and rebuilt
  * here, where they can read this page's dictionary. `useReactFlow` is legal
- * because this renders INSIDE <ReactFlow> (QA scope 2, finding #13).
+ * because this renders INSIDE <ReactFlow>.
  */
 function MapControls() {
   const t = useT(topologyDict);
@@ -489,6 +491,7 @@ export function TopologyPage() {
   const t = useT(topologyDict);
   const { locale } = useLocale();
   const topo = useTopology();
+  const portrait = useMediaQuery("(orientation: portrait)");
   const matrix = useMatrix("tcp");
   const { theme } = useTheme();
   const { at } = useTimeContext();
@@ -505,9 +508,9 @@ export function TopologyPage() {
   const flow = useMemo(
     () =>
       topo.data
-        ? buildFlow(topo.data, matrix.data, t)
+        ? buildFlow(topo.data, matrix.data, t, portrait ? PORTRAIT_PANE_ASPECT : undefined)
         : { nodes: [], edges: [], problemTotal: 0, source: "nodes" as const },
-    [topo.data, matrix.data, t],
+    [topo.data, matrix.data, t, portrait],
   );
   /* The map has boxes when buildFlow produced at least one NODE box (a zone
      container alone is not a map) — the one condition the empty state and the
@@ -654,7 +657,7 @@ export function TopologyPage() {
       {/* The map is real and its provenance is not the usual one. Said ABOVE
           the map rather than instead of it: the boxes, the zones and every
           edge below are as measured as they ever are, and readiness is the one
-          column that is missing (QA scope 2, findings #1 and #2). */}
+          column that is missing. */}
       {topo.data && drawn && flow.source === "agents" ? (
         <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
           <p className="text-sm font-medium">{t("fromAgents.title")}</p>
@@ -702,8 +705,10 @@ export function TopologyPage() {
           </div>
 
           {/* No Card around the map: the tool variant runs the working surface
-              edge to edge (M4-5); the clip keeps the canvas corners tidy. */}
-          <div className="h-[calc(100dvh-14rem)] min-h-[420px] overflow-hidden rounded-md">
+              edge to edge; the clip keeps the canvas corners tidy. Below md the
+              header, chips and legend wrap to about 19rem, and the canvas must
+              end on screen or its bottom-left zoom controls fall below the fold. */}
+          <div className="h-[calc(100dvh-14rem)] min-h-[420px] overflow-hidden rounded-md max-md:h-[calc(100dvh-19rem)] max-md:min-h-80">
             <ReactFlow
               nodes={flow.nodes}
               edges={edges}

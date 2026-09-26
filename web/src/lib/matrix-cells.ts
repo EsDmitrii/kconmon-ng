@@ -24,7 +24,7 @@ export function isMeasured(cell: MatrixCell | undefined): boolean {
   return finite(cell.failRatio) || finite(cell.rttP95) || finite(cell.lossRatio) || finite(cell.mtuBytes);
 }
 
-/** isReducedPath: the path carries less than the source probes at, and says so (PMTUD works). */
+/** isReducedPath: the path carries less than this pair is probed at, and says so (PMTUD works). */
 export function isReducedPath(cell: MatrixCell | undefined): boolean {
   return !!cell && finite(cell.mtuBytes) && finite(cell.probeMtuBytes) && cell.mtuBytes < cell.probeMtuBytes;
 }
@@ -42,23 +42,28 @@ export function severityRatio(cell: MatrixCell | undefined): number | null {
   return ratios.length === 0 ? null : Math.max(...ratios);
 }
 
-/** cellTier is the colour/badge every surface paints from; "unknown" is reserved for silence — and only silence. */
 /**
  * pmtuReading names what a path MTU cell shows. A reduced path loses nothing (the path says how big
  * it may be), so ANY failure next to a smaller path MTU is a black hole, even while its ratio over
- * the window is still under the failing line; without a smaller MTU only the failing line makes one.
+ * the window is still under the failing line. A full-size reading is only the last probe: each probe
+ * dials a fresh socket, so an ECMP-split black hole flips the gauge between full and reduced. So a
+ * full-size path with failures is recovering only when the recent window is clean, and a black hole
+ * while it still fails; without the recent window only the failing line makes a black hole.
  */
-export function pmtuReading(cell: MatrixCell | undefined): "blackhole" | "reduced" | "full" | null {
+export function pmtuReading(cell: MatrixCell | undefined): "blackhole" | "reduced" | "recovering" | "full" | null {
   if (!cell || !finite(cell.mtuBytes)) return null;
   const fail = finite(cell.failRatio) ? cell.failRatio : 0;
-  if (fail >= FAILING_AT || (fail > 0 && isReducedPath(cell))) return "blackhole";
-  return isReducedPath(cell) ? "reduced" : "full";
+  if (isReducedPath(cell)) return fail > 0 ? "blackhole" : "reduced";
+  if (fail > 0 && finite(cell.recentFailRatio)) return cell.recentFailRatio > 0 ? "blackhole" : "recovering";
+  return fail >= FAILING_AT ? "blackhole" : "full";
 }
 
+/** cellTier is the colour/badge every surface paints from; "unknown" is reserved for silence — and only silence. */
 export function cellTier(cell: MatrixCell | undefined): CellTier {
   if (!isMeasured(cell)) return "unknown";
   // A black hole is red from its first failed probe: the 5m fail ratio lags, the legend does not.
   if (pmtuReading(cell) === "blackhole") return "bad";
+  if (pmtuReading(cell) === "recovering") return "warn";
   const ratio = severityRatio(cell);
   if (ratio !== null && ratio >= FAILING_AT) return "bad";
   if (ratio !== null && ratio >= DEGRADED_AT) return "warn";
@@ -67,11 +72,11 @@ export function cellTier(cell: MatrixCell | undefined): CellTier {
   return "ok";
 }
 
-/** isProblemCell is the topology edge filter and the worst-pairs cut: a cell
- *  whose severity has crossed the degraded line, or a reduced path MTU. Loss-only qualifies. */
+/** isProblemCell is the topology edge filter: a cell the matrix paints amber or red, so a reduced
+ *  or recovering path MTU and loss-only pairs qualify. */
 export function isProblemCell(cell: MatrixCell | undefined): boolean {
-  const ratio = severityRatio(cell);
-  return (ratio !== null && ratio >= DEGRADED_AT) || isReducedPath(cell);
+  const tier = cellTier(cell);
+  return tier === "warn" || tier === "bad";
 }
 
 /** fmtRatio renders a 0–1 ratio as the percentage every surface prints; a non-finite ratio is no measurement, not "NaN%". */
@@ -101,6 +106,9 @@ export function cellSummary(cell: MatrixCell | undefined, t: Translate<MatrixCel
         ? t("pathMtuReduced", { mtu: String(cell.mtuBytes), probe: String(cell.probeMtuBytes) })
         : t("pathMtu", { mtu: String(cell.mtuBytes) }),
     );
+    const reading = pmtuReading(cell);
+    if (reading === "blackhole") parts.push(t("mtuBlackhole"));
+    if (reading === "recovering") parts.push(t("mtuRecovering"));
   }
   return parts.join(", ");
 }

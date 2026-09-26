@@ -9,11 +9,17 @@ import type { Me } from "@/lib/types";
  * menu, refreshes together) plus a `can(permission)` predicate; UI affordances are HIDDEN when the
  * permission is absent.
  */
-export function useAuth(): { me: Me | undefined; can: (p: string) => boolean; isAnonymous: boolean } {
+export function useAuth(): {
+  me: Me | undefined;
+  can: (p: string) => boolean;
+  isAnonymous: boolean;
+  /** Why ["me"] failed, or null: AuthGate renders the shell anyway, so `me` can stay undefined for good. */
+  meError: Error | null;
+} {
   // retryOnMount false for the same reason as AuthGate (routes.tsx), which
   // shares this cache entry: a mounting consumer refetching an errored ["me"]
   // flips it to pending and flaps the gate. Login/logout invalidate the key.
-  const { data } = useQuery({
+  const { data, error } = useQuery({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
@@ -25,5 +31,5 @@ export function useAuth(): { me: Me | undefined; can: (p: string) => boolean; is
   // Optional all the way down; `me` declares `subject` required because the Go handler always
   // emits.
   const isAnonymous = data?.subject?.kind === "anonymous";
-  return { me: data, can, isAnonymous };
+  return { me: data, can, isAnonymous, meError: error };
 }

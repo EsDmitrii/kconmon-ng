@@ -7,6 +7,7 @@ import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
 import { degradedProtocolParam, readProtocolFromLocation } from "@/lib/protocol-param";
 import { MatrixPage } from "./matrix";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 const matrixBody = {
   protocol: "tcp", plane: "pod", nodes: ["a", "b"],
@@ -92,9 +93,10 @@ describe("MatrixPage", () => {
     renderPage();
     await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
 
-    // Dialled but not yet established: still honestly delayed.
+    // Dialled but not yet established: not known to be delayed, so no badge rather than a false one.
     expect(FakeSocket.instances).toHaveLength(1);
-    expect(screen.getByText("Delayed data")).toBeInTheDocument();
+    expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
 
     act(() => {
       FakeSocket.last().emitOpen();
@@ -102,6 +104,30 @@ describe("MatrixPage", () => {
     const badge = screen.getByText("Live");
     expect(badge.getAttribute("title")).toMatch(/pushed/i);
     expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
+  });
+
+  it("shows no badge while the capability probe has not answered yet", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        String(url).includes("/api/v1/version") ? new Promise<Response>(() => {}) : Promise.resolve(json(matrixBody)),
+      ),
+    );
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
+  });
+
+  it("says Delayed data once the socket it dialled has failed", async () => {
+    stubFetchRealtime();
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
+    act(() => {
+      FakeSocket.last().emitClose(1006);
+    });
+    expect(screen.getByText("Delayed data")).toBeInTheDocument();
   });
 
   it("renders the no-data cell and the self cell distinctly", async () => {
@@ -219,6 +245,49 @@ describe("MatrixPage", () => {
     window.history.replaceState({}, "", "/");
   });
 
+  it("says recovering, not black hole, when the last probe crossed at full size and the recent window is clean", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 }],
+    });
+    renderPage();
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell).toHaveTextContent("recovering");
+    expect(cell).not.toHaveTextContent("black hole");
+    window.history.replaceState({}, "", "/");
+  });
+
+  /* PMTU tiers are not the fail-ratio bands: a 3% black hole is red and a 40% recovering path amber. */
+  it("labels the PMTU legend tiers by path state, not by fail-ratio bands", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 }],
+    });
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    expect(screen.getByText("Full size")).toBeInTheDocument();
+    expect(screen.getByText("Reduced or recovering")).toBeInTheDocument();
+    expect(screen.getByText("Black hole")).toBeInTheDocument();
+    expect(screen.queryByText(/Failing · ≥ 10%/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Degraded · 1–10%/)).not.toBeInTheDocument();
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("captions the PMTU grid as a path MTU matrix, not a failure ratio one", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 }],
+    });
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    expect(screen.getByText("Node-to-node path MTU matrix")).toBeInTheDocument();
+    expect(screen.queryByText(/failure ratio matrix/)).not.toBeInTheDocument();
+    window.history.replaceState({}, "", "/");
+  });
+
   it("draws a black-holed pmtu cell with its path MTU as the hero figure", async () => {
     window.history.replaceState({}, "", "/matrix?protocol=pmtu");
     stubFetch({
@@ -226,7 +295,7 @@ describe("MatrixPage", () => {
       cells: [{ source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 }],
     });
     renderPage();
-    const cell = await screen.findByLabelText("a → b: fail 100.0%, path MTU 1400 of 1500 bytes");
+    const cell = await screen.findByLabelText("a → b: fail 100.0%, path MTU 1400 of 1500 bytes, black hole");
     expect(cell).toHaveTextContent("1400");
     expect(cell).toHaveTextContent("black hole");
     window.history.replaceState({}, "", "/");
@@ -585,20 +654,20 @@ describe("MatrixPage — a tile is a swatch", () => {
     ],
   });
 
-  it("paints a tile with the tier's soft fill, healthy green included, without the rail and without the pill", async () => {
+  it("paints a tile with the tier's tile fill, healthy green included, without the rail and without the pill", async () => {
     stubViewportWidth(700);
     stubFetch(healthyGrid(50));
     renderPage();
 
     const failing = await screen.findByLabelText(/^node-00 → node-01:/);
-    expect(failing.className).toContain("bg-health-bad-soft");
+    expect(failing.className).toContain("bg-health-bad-tile");
     expect(failing.className).toContain("before:hidden");
     expect(failing.className).toContain("rounded-xs");
     expect(failing.className).not.toContain("rounded-md");
     expect(failing.className).not.toContain("rounded-sm");
 
     const healthy = screen.getByLabelText(/^node-01 → node-00:/);
-    expect(healthy.className).toContain("bg-health-ok-soft");
+    expect(healthy.className).toContain("bg-health-ok-tile");
     expect(healthy.className).not.toContain("bg-surface-2/60");
     expect(healthy.className).toContain("before:hidden");
   });
@@ -613,7 +682,7 @@ describe("MatrixPage — a tile is a swatch", () => {
     expect(healthy.className).toContain("before:bg-health-ok");
     expect(healthy.className).toContain("rounded-md");
     expect(healthy.className).not.toContain("before:hidden");
-    expect(healthy.className).not.toContain("bg-health-ok-soft");
+    expect(healthy.className).not.toContain("bg-health-ok-tile");
   });
 });
 
@@ -1144,7 +1213,7 @@ describe("MatrixPage — column headers stay distinguishable", () => {
     expect(screen.getByText(/drop the shared prefix kconmon-prod\.node-/)).toBeInTheDocument();
   });
 
-  it("clips, rather than double-elides, a prefix-stripped header that still overflows its column", async () => {
+  it("keeps the tail of a prefix-stripped header that still overflows its column", async () => {
     stubFetch({
       ...matrixBody,
       nodes: ["kconmon-prod.node-01", "kconmon-prod.node-02"],
@@ -1155,12 +1224,33 @@ describe("MatrixPage — column headers stay distinguishable", () => {
     await screen.findByLabelText(/^kconmon-prod\.node-01 → kconmon-prod\.node-02:/);
     const elided = screen.getAllByRole("columnheader").slice(1)[0].querySelector("a") as HTMLElement;
     expect(elided).toHaveTextContent("…01");
-    /* The label already opens with an ellipsis; text-overflow would hang a
-       second one on the end ("…control-pla…"), so this label clips at the box
-       edge instead. A name that kept its prefix keeps its `truncate`. */
+    /* What is left after the shared prefix differs at its END (worker, worker2), so an overflowing
+       label clips from its start, right to left, with the text itself kept left to right. A name
+       that kept its prefix keeps its `truncate`. */
     expect(elided.className).not.toMatch(/truncate/);
     expect(elided.className).toMatch(/overflow-hidden/);
     expect(elided.className).toMatch(/whitespace-nowrap/);
+    expect(elided.className).toMatch(/text-ellipsis/);
+    expect(elided.className).toMatch(/\[direction:rtl\]/);
+    expect(elided.querySelector("bdi")).toHaveTextContent("…01");
+  });
+
+  /* The 1440px stand: a 96px column, and a 13-character remainder whose leading "…" did not fit.
+     The browser's own ellipsis replaced it AND the first letter ("…ontrol-plane"). */
+  it("keeps every character of a 13-character remainder in a column at 1440px", async () => {
+    const fleet = ["kc-accept-control-plane", "kc-accept-worker", "kc-accept-worker2", "kc-accept-worker3"];
+    stubFetch({
+      ...matrixBody,
+      nodes: fleet,
+      cells: [{ source: fleet[0], destination: fleet[1], failRatio: 0 }],
+    });
+    renderPage();
+    await screen.findByLabelText(/^kc-accept-control-plane → kc-accept-worker:/);
+    const column = screen.getAllByRole("columnheader").slice(1)[0].querySelector("a") as HTMLElement;
+    expect(column.querySelector("bdi")?.textContent).toBe("control-plane");
+    expect(column.className).toMatch(/text-ellipsis/);
+    const row = screen.getAllByRole("rowheader")[0].querySelector("a") as HTMLElement;
+    expect(row.querySelector("bdi")?.textContent).toBe("…control-plane");
   });
 
   it("leaves a header that kept its whole name on the ordinary truncation", async () => {
@@ -1510,6 +1600,31 @@ describe("MatrixPage — a plane the agent does not run", () => {
     expect(screen.getByLabelText("c → b: no data")).toBeInTheDocument();
   });
 
+  /* A 2.4.x agent advertises plane:tcp/udp/icmp/mtr and no plane:pmtu (spec 12, new console with
+     old agents): its row on the PMTU grid is 'not run', not an outage. */
+  it("reads a source without plane:pmtu as unsupported on the PMTU grid", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetchRoutes({
+      matrix: {
+        protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "t",
+        cells: [{ source: "b", destination: "a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 }],
+      },
+      topology: {
+        nodes: nodesOf("a", "b"),
+        agents: [
+          clusterAgent("a", ["plane:tcp", "plane:udp", "plane:icmp", "plane:mtr"]),
+          clusterAgent("b", ["plane:tcp", "plane:udp", "plane:icmp", "plane:mtr", "plane:pmtu"]),
+        ],
+        timestamp: "t",
+      },
+    });
+    renderPage();
+    const cell = await screen.findByLabelText("a → b: the source does not run PMTU probes");
+    expect(screen.getByTestId("legend-unsupported")).toBeInTheDocument();
+    fireEvent.mouseEnter(cell.querySelector("div.border-dashed") as Element);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("a does not run PMTU probes");
+  });
+
   it("shows the legend row only while such a cell is on the grid", async () => {
     stubFetchRoutes({
       // Every one of a's cells is measured: the state has nowhere to occur.
@@ -1549,5 +1664,29 @@ describe("MatrixPage — a plane the agent does not run", () => {
     expect(screen.getByTestId("legend-unsupported")).toHaveTextContent(
       "Не запускается · источник не запускает зонды этого протокола",
     );
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("MatrixPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

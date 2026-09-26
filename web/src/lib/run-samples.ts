@@ -270,10 +270,17 @@ export const MICROSECOND_FLOOR_NS = 100_000;
  *  in milliseconds. On the MAGNITUDE, so a negative reading — the wire's
  *  nonsense, not ours — reads "-4µs" rather than "-0.0ms"; and never for a
  *  genuine zero, which stays "0.0ms" because "0µs" reads as a measurement. */
-export function fmtMicrosNs(ns: number): string | undefined {
+export function fmtMicrosNs(ns: number, locale: string = "en"): string | undefined {
   const abs = Math.abs(ns);
-  return abs > 0 && abs < MICROSECOND_FLOOR_NS ? `${Math.round(ns / 1e3)}µs` : undefined;
+  const [micro] = LATENCY_UNITS[locale] ?? LATENCY_UNITS.en;
+  return abs > 0 && abs < MICROSECOND_FLOOR_NS ? `${Math.round(ns / 1e3)}${micro}` : undefined;
 }
+
+/** A latency's unit and decimal mark follow the page's language, as formatDurationNs's spans do. */
+const LATENCY_UNITS: Record<string, readonly [string, string, string]> = {
+  en: ["µs", "ms", "."],
+  ru: [" мкс", " мс", ","],
+};
 
 /** fmtNsCompact renders a nanosecond duration the way a figure column wants
  *  it: microseconds below the floor, one decimal of a millisecond up to 10ms
@@ -282,12 +289,13 @@ export function fmtMicrosNs(ns: number): string | undefined {
  *  em dash is what every cell already says for one — `(NaN / 1e6).toFixed(0)`
  *  is the string "NaN", and "NaNms" is a value an operator would go looking
  *  for. */
-export function fmtNsCompact(ns?: number): string {
+export function fmtNsCompact(ns?: number, locale: string = "en"): string {
   if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
-  const micros = fmtMicrosNs(ns);
+  const micros = fmtMicrosNs(ns, locale);
   if (micros !== undefined) return micros;
+  const [, milli, mark] = LATENCY_UNITS[locale] ?? LATENCY_UNITS.en;
   const ms = ns / 1e6;
-  return ms < 10 ? `${ms.toFixed(1)}ms` : `${ms.toFixed(0)}ms`;
+  return `${(ms < 10 ? ms.toFixed(1) : ms.toFixed(0)).replace(".", mark)}${milli}`;
 }
 
 /** A rendered span is a WORD, not a value: ru reads «5 с / 12 мин / 24 ч» while measured latencies
@@ -297,8 +305,9 @@ const DURATION_UNITS: Record<string, readonly [string, string, string]> = {
   ru: [" с", " мин", " ч"],
 };
 
-/** Whole units only — "2m53s" would claim a precision a derived cadence does not have — and it
- *  lives here so the create form and the run permalink cannot drift on the same number. */
+/** Whole units only — "2m53s" would claim a precision a derived cadence does not have — except
+ *  that past an hour the minutes stay ("1h 30m", not "2h"). It lives here so the create form and
+ *  the run permalink cannot drift on the same number. */
 export function formatDurationNs(ns: number, locale: string): string {
   const [sec, min, hour] = DURATION_UNITS[locale] ?? DURATION_UNITS.en;
   /* A span that is not a number is drawn as no span. The alternative is what
@@ -307,8 +316,10 @@ export function formatDurationNs(ns: number, locale: string): string {
      one thing the owner's bar says may never reach the screen. */
   const s = Number.isFinite(ns) ? Math.round(ns / 1e9) : 0;
   if (s < 60) return `${s}${sec}`;
-  if (s < 3600) return `${Math.round(s / 60)}${min}`;
-  return `${Math.round(s / 3600)}${hour}`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}${min}`;
+  const rest = m % 60;
+  return rest === 0 ? `${m / 60}${hour}` : `${Math.floor(m / 60)}${hour} ${rest}${min}`;
 }
 
 /**
@@ -355,10 +366,11 @@ export function cadenceParts(ns: number): { value: number; unit: DurationUnitNam
      "NaNh" into a caption, and "Infinityh" into the cadence tile — which is the
      one thing the owner's bar says may never reach the screen. */
   const s = Number.isFinite(ns) ? Math.round(ns / 1e9) : 0;
-  // Whole minutes read as minutes; 90s does NOT round up to "2m" (rev13).
+  // Whole minutes read as minutes, whole hours as hours; 90s does NOT round up to "2m" (rev13),
+  // nor 66m down to "1h".
   if (s < 60 || s % 60 !== 0) return { value: s, unit: "second" };
-  if (s < 3600) return { value: Math.round(s / 60), unit: "minute" };
-  return { value: Math.round(s / 3600), unit: "hour" };
+  if (s < 3600 || s % 3600 !== 0) return { value: s / 60, unit: "minute" };
+  return { value: s / 3600, unit: "hour" };
 }
 
 /** ACCUSATIVE, because every sentence that interpolates one of these reaches it
@@ -406,18 +418,27 @@ export function formatCadenceProse(ns: number, locale: string): string {
  */
 export const MTR_PER_PAIR_BUDGET_NS = 90_000_000_000;
 
+/**
+ * Over a black hole a path MTU probe waits out a read deadline per lost
+ * datagram, about 10s a probe. Mirrors checks.pmtuMinPerPairTimeout.
+ */
+export const PMTU_PER_PAIR_BUDGET_NS = 15_000_000_000;
+
 /** Mirrors checks.maxConcurrency / checks.maxPerSourceConcurrency. */
 export const MAX_CONCURRENCY = 8;
 export const MAX_PER_SOURCE_CONCURRENCY = 2;
 
 /**
  * perPairBudgetNs is how long ONE probe is expected to take. It is zero for
- * every type but mtr: a tcp/udp/icmp/dns/http probe answers in milliseconds and
- * its timeout only bounds one that has already failed, so planning a cadence
- * around it would slow down every healthy run. Mirrors checks.perPairBudget.
+ * every type but mtr and pmtu: a tcp/udp/icmp/dns/http probe answers in
+ * milliseconds and its timeout only bounds one that has already failed, so
+ * planning a cadence around it would slow down every healthy run. Mirrors
+ * checks.perPairBudget.
  */
 export function perPairBudgetNs(checkType: string): number {
-  return checkType === "mtr" ? MTR_PER_PAIR_BUDGET_NS : 0;
+  if (checkType === "mtr") return MTR_PER_PAIR_BUDGET_NS;
+  if (checkType === "pmtu") return PMTU_PER_PAIR_BUDGET_NS;
+  return 0;
 }
 
 function ceilDiv(a: number, b: number): number {
@@ -694,39 +715,37 @@ export function observedCadence(groups: readonly PairSamples[]): ObservedCadence
 }
 
 /**
- * snapshotForSample answers which stored ROUTE a single probe walked.
- *
- * A run's results carry an outcome and a duration but no hops — the path lives
- * in the MTR projection, keyed by pair — so the link between the two is the
- * clock: the stored path whose [firstSeen, lastSeen] window covers the probe's
- * own instant. Both ends count as inside; a probe recorded exactly as a path was
- * first seen is that path.
- *
- * Undefined when nothing covers it, deliberately. Falling back to the nearest
- * path would put a route under a tick that did not walk it, which is a more
- * confident lie than showing nothing.
- *
- * The grace on the leading edge is for routes ALREADY STORED. The projection now
- * stamps a route with its result row's own recorded_at, but rows written before
- * that used the clock at the projection call — a few hundred microseconds later
- * than the trace that created them. Without the grace the tick that CREATED a
- * route was the one tick told "no recorded route covers this probe", which is
- * the least believable place for that sentence to appear.
+ * SNAPSHOT_START_GRACE_MS is the slack on a stored route's leading edge. The projection stamps a
+ * route with its result row's recorded_at, but routes stored before it did carry the clock at the
+ * projection call, a few hundred microseconds after the trace that created them; without the grace
+ * the probe that created such a route is the one probe no route covers.
  */
-/** Milliseconds of slack on a stored route's leading edge; see snapshotForSample. */
 const SNAPSHOT_START_GRACE_MS = 5_000;
 
-export function snapshotForSample(
-  snapshots: readonly Pick<PathSnapshot, "id" | "firstSeen" | "lastSeen">[],
+/**
+ * coveringSnapshots is every stored route a single probe may have walked, in list order. A run's
+ * results carry an outcome and a duration but no hops, so the link is the clock: a stored path
+ * whose [firstSeen, lastSeen] window covers the probe's instant, both ends inside. Nothing covering
+ * it is [] on purpose; the nearest path would put a route under a probe that did not walk it.
+ *
+ * More than one means the pair alternated between routes (per-flow ECMP): the store only extends
+ * each route's lastSeen, so the windows overlap and the clock cannot say which one this probe
+ * walked. The leading-edge grace applies only when no window covers the probe outright, so the last
+ * probe before a route change stays with the route it walked.
+ */
+export function coveringSnapshots<S extends Pick<PathSnapshot, "id" | "firstSeen" | "lastSeen">>(
+  snapshots: readonly S[],
   recordedAt: string | undefined,
-): Pick<PathSnapshot, "id" | "firstSeen" | "lastSeen"> | undefined {
-  if (!recordedAt) return undefined;
+): S[] {
+  if (!recordedAt) return [];
   const at = new Date(recordedAt).getTime();
-  if (Number.isNaN(at)) return undefined;
-  /* The list arrives newest-first, so the first cover IS the newest cover. */
-  return snapshots.find((s) => {
-    const from = new Date(s.firstSeen).getTime();
-    const to = new Date(s.lastSeen).getTime();
-    return Number.isFinite(from) && Number.isFinite(to) && at >= from - SNAPSHOT_START_GRACE_MS && at <= to;
-  });
+  if (Number.isNaN(at)) return [];
+  const covers = (grace: number) =>
+    snapshots.filter((s) => {
+      const from = new Date(s.firstSeen).getTime();
+      const to = new Date(s.lastSeen).getTime();
+      return Number.isFinite(from) && Number.isFinite(to) && at >= from - grace && at <= to;
+    });
+  const strict = covers(0);
+  return strict.length > 0 ? strict : covers(SNAPSHOT_START_GRACE_MS);
 }

@@ -5,6 +5,18 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { ExplorePage } from "./explore";
 
+/* The page waits for the subject and needs promql:query (pages/explore.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
+
 /** /explore engaged: the range picker keeps working, anchored BACK from `t` rather than from now. */
 
 const AT = "2026-08-01T12:00:00Z";

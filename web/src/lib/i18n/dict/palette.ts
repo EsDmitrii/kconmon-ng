@@ -59,6 +59,9 @@ const en = {
   "group.Navigation": "Navigation",
   "group.Actions": "Actions",
   "group.View": "View",
+  /* Saved incidents, listed once something is typed; each row is the incident's own title. */
+  "group.Incidents": "Incidents",
+  "incident.kw": "incident",
 
   /* ── actions ───────────────────────────────────────────────────────────── */
   "action.runCheck": "Run a diagnostic check…",
@@ -122,6 +125,8 @@ export const paletteDict: Dictionary<PaletteKey> = defineDict(en, {
   "group.Navigation": "Навигация",
   "group.Actions": "Действия",
   "group.View": "Вид",
+  "group.Incidents": "Инциденты",
+  "incident.kw": "инцидент",
 
   "action.runCheck": "Запустить проверку…",
   /* The Russian blobs carry the words an operator actually types, including a

@@ -42,6 +42,14 @@ describe("Modal — the dialog contract", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
+  /* A touch screen cannot hover a title, so a clipped description is a lost one. */
+  it("wraps its description rather than clipping it", () => {
+    open();
+    const description = screen.getByText("node-a → node-b");
+    expect(description).not.toHaveClass("truncate");
+    expect(description).not.toHaveAttribute("title");
+  });
+
   it("takes focus itself on open, so the title is read before any control", () => {
     open();
     expect(screen.getByRole("dialog")).toHaveFocus();

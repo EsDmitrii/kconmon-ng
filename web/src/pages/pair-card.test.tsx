@@ -16,6 +16,7 @@ import {
   unknownPairEndpoints,
 } from "./pair-card";
 import type { RunDetail } from "@/lib/types";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -76,6 +77,7 @@ function renderPage(
     incidents?: unknown[];
     topology?: unknown;
     pmtuMatrix?: unknown;
+    pmtuState?: "pending" | "500";
   } = {},
 ) {
   const { permissions = ["runs:create"], runs = [], runDetails = {}, onCreate, incidents = [] } = opts;
@@ -87,6 +89,17 @@ function renderPage(
     if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.includes("/api/v1/matrix") && href.includes("protocol=pmtu") && opts.pmtuState === "pending") {
+      return new Promise<Response>(() => {});
+    }
+    if (href.includes("/api/v1/matrix") && href.includes("protocol=pmtu") && opts.pmtuState === "500") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ type: "about:blank", title: "boom", status: 500, detail: "prometheus down" }), {
+          status: 500,
+          headers: { "Content-Type": "application/problem+json" },
+        }),
+      );
+    }
     if (href.includes("/api/v1/matrix") && href.includes("protocol=pmtu") && opts.pmtuMatrix) {
       return Promise.resolve(json(opts.pmtuMatrix));
     }
@@ -265,13 +278,14 @@ describe("PairCardPage", () => {
     expect(link).toHaveAttribute("title", id);
     expect(link.className).toContain("mono-data");
     expect(link.className).toContain("truncate");
-    // A 36-character UUID gets twice the track of a word, a duration and a stamp,
-    // and a whole row below sm — the node card's own rule for its agent id.
+    // A word, a duration and a stamp take their own width and the 36-character UUID the rest,
+    // with a whole row below sm — the node card's own rule for its agent id.
     const cell = link.closest("div");
     expect(cell?.className).toContain("col-span-2");
     expect(cell?.className).toContain("sm:col-span-1");
     const dl = link.closest("dl");
-    expect(dl?.className).toContain("sm:grid-cols-[minmax(0,2fr)_1fr_1fr_1fr]");
+    expect(dl?.className).toContain("sm:grid-cols-[minmax(0,1fr)_auto_auto_auto]");
+    expect(screen.getByText("Recorded").nextElementSibling?.className).toContain("sm:whitespace-nowrap");
     expect(dl?.className).not.toContain("sm:grid-cols-4");
     // The other three cells are what they were.
     expect(screen.getByText("ok")).toBeInTheDocument();
@@ -289,6 +303,28 @@ describe("PairCardPage — path MTU", () => {
     ],
   };
 
+  it("says Recovering for a direction whose last probe crossed at full size after failures", async () => {
+    const healed = { ...pmtuMatrix, cells: [
+      { source: "node-a", destination: "node-b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 },
+      { source: "node-b", destination: "node-a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+    ] };
+    renderPage("/pairs/node-a/node-b", { pmtuMatrix: healed });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    await waitFor(() => expect(within(card).getByText("Recovering")).toBeInTheDocument());
+    expect(within(card).queryByText("Black hole")).toBeNull();
+  });
+
+  it("keeps a full-size direction that still fails in the recent window a black hole", async () => {
+    const ecmp = { ...pmtuMatrix, cells: [
+      { source: "node-a", destination: "node-b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0.5 },
+      { source: "node-b", destination: "node-a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+    ] };
+    renderPage("/pairs/node-a/node-b", { pmtuMatrix: ecmp });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    await waitFor(() => expect(within(card).getByText("Black hole")).toBeInTheDocument());
+    expect(within(card).queryByText("Recovering")).toBeNull();
+  });
+
   it("shows both directions' path MTU and what each one means", async () => {
     renderPage("/pairs/node-a/node-b", { pmtuMatrix });
     const card = await screen.findByRole("region", { name: "Path MTU" });
@@ -296,6 +332,19 @@ describe("PairCardPage — path MTU", () => {
     expect(within(card).getByText("Black hole")).toBeInTheDocument();
     expect(within(card).getByText("1500 bytes")).toBeInTheDocument();
     expect(within(card).getByText("Full size")).toBeInTheDocument();
+  });
+
+  it("does not claim 'not measured' while the PMTU matrix is still loading", async () => {
+    renderPage("/pairs/node-a/node-b", { pmtuState: "pending" });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    expect(within(card).queryByText("No path MTU measured for this pair.")).toBeNull();
+  });
+
+  it("says the PMTU matrix failed instead of 'not measured'", async () => {
+    renderPage("/pairs/node-a/node-b", { pmtuState: "500" });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    expect(await within(card).findByText(/prometheus down/)).toBeInTheDocument();
+    expect(within(card).queryByText("No path MTU measured for this pair.")).toBeNull();
   });
 
   it("says so when nothing measured the pair's path MTU", async () => {
@@ -411,5 +460,28 @@ describe("PairCardPage — open incidents rail", () => {
     const rows = await within(rail).findAllByTestId("related-incident");
     expect(rows).toHaveLength(1);
     expect(within(rows[0]).getByRole("link", { name: "loss on the pair" })).toBeInTheDocument();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("PairCardPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage("/pairs/node-a/node-b");
+    await screen.findByText("50.0%");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage("/pairs/node-a/node-b");
+    await screen.findByText("50.0%");
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

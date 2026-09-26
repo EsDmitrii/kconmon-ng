@@ -17,7 +17,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *
  * NOT HERE, on purpose:
  *   - permission strings (`events:read`, `incidents:write`, `promql:query`),
- *     config keys (`console.database.mode`, `console.prometheus.address`) and
+ *     config keys (`database.dsnFile`, `console.prometheus.address`) and
  *     endpoints (`GET /api/v1/audit`, `/api/v1/mtr/snapshots`). Identifiers.
  *   - node, zone, target and incident names, incident ids, pinned-ref kinds and
  *     ids, and `params.kind` in the header badge: wire values.
@@ -88,8 +88,7 @@ const en = {
     "The target list needs targets:read. The scope still works from a permalink — the URL carries the target's " +
     "name, not its id.",
   "form.urlNote":
-    "Everything above is in the URL (?kind=&scope=&from=&to=) — this page is shareable as it stands, " +
-    "which is also what makes an incident permalink free.",
+    "The address of this page carries the scope and range above, so it can be shared as a link as it stands.",
   /* {params} is the list of URL keys, the URL's own vocabulary — data. The
      parser is total and degrades every malformed value to something fetchable,
      which is right; doing it in SILENCE was not. */
@@ -110,8 +109,7 @@ const en = {
      range from the URL — saying so beats a link that quietly drops half of
      what it promised. */
   "actions.compareNote":
-    "The Metrics page binds its A/B slots to curated metrics and reads no range from the URL, so this link " +
-    "opens the page and the window has to be chosen there.",
+    "Opens Metrics, which limits its A/B slots to curated metrics; pick the time range there.",
   /* Two keys around the run-id link. */
   "actions.runStarted.before": "Run",
   "actions.runStarted.after": "started.",
@@ -145,6 +143,8 @@ const en = {
   "incident.aria": "Incident",
   "incident.resolved": "Resolved",
   "incident.open": "Open",
+  /* The badge under the Time Machine when the viewed instant is before the incident was saved. */
+  "incident.notYetSaved": "Not yet saved at this instant",
   "incident.openedBy": "opened by {who} · {at}",
   "incident.resolvedAt": " · resolved {at}",
   "incident.copyPermalink": "Copy permalink",
@@ -252,7 +252,11 @@ const en = {
      what the bound is. */
   "source.database":
     "Events, audit, annotations, path history, runs, cluster events and maintenance are all stored — set " +
-    "console.database.mode. None of them was requested.",
+    "database.dsnFile (Helm: database.existingSecret). None of them was requested.",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so none of the stored sources was requested: {error}",
+  "config.failed.generic": "the request failed",
   "source.events": "Fleet events and Kubernetes events need events:read — neither was requested.",
   /* "Audit rows", not "config changes" (QA round 5, #19): most of what the
      audit log records is a READ decision, not a change. */
@@ -271,7 +275,7 @@ const en = {
      call is still counted above and still in the export. The reader who wants
      the calls back gets them one click away, on the folded row itself. */
   "source.auditFold":
-    "Consecutive read-only API calls (GET, and the console's own PromQL queries) are folded into one row each; " +
+    "Consecutive read-only API calls (GET, the console's own PromQL queries and draft previews) are folded into one row each; " +
     "the calls are still counted and exported, and each folded row opens on request.",
   "source.annotations": "Annotations need annotations:read — no note was requested.",
   "source.mtr": "Path changes need mtr:read — no MTR snapshot was requested.",
@@ -448,8 +452,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
     "Списку целей нужно право targets:read. По постоянной ссылке область всё равно откроется: в адресе лежит имя " +
     "цели, а не её идентификатор.",
   "form.urlNote":
-    "Всё, что выше, лежит в адресе (?kind=&scope=&from=&to=), так что страницу можно кинуть коллеге как есть. " +
-    "Постоянная ссылка на инцидент отсюда же и берётся, бесплатно.",
+    "Адрес страницы хранит область и диапазон, выбранные выше, так что им можно поделиться как ссылкой.",
   "ignored.body":
     "В ссылке было {params}, и прочитать это страница не смогла. Ниже показаны значения по умолчанию, а адресная " +
     "строка приведена к тому, что на экране.",
@@ -463,8 +466,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "actions.saveIncident": "Сохранить как инцидент",
   "actions.createMaintenance": "Создать окно работ",
   "actions.compareNote":
-    "Слоты A/B в Метриках привязаны к готовым графикам, а диапазон из адреса та страница не читает. Ссылка просто " +
-    "откроет её, интервал придётся выставить руками.",
+    "Откроет Метрики, где в слотах A/B только готовые графики; диапазон времени выберите там.",
   "actions.runStarted.before": "Запуск",
   "actions.runStarted.after": "начат.",
   "actions.runFailed": "Не удалось запустить",
@@ -492,6 +494,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "incident.aria": "Инцидент",
   "incident.resolved": "Закрыт",
   "incident.open": "Открыт",
+  "incident.notYetSaved": "На этот момент ещё не сохранён",
   "incident.openedBy": "открыл {who} · {at}",
   "incident.resolvedAt": " · закрыт {at}",
   "incident.copyPermalink": "Скопировать ссылку",
@@ -574,7 +577,9 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
 
   "source.database":
     "События, аудит, заметки, история путей, запуски, события кластера и окна работ хранятся в базе, а её надо " +
-    "задать: console.database.mode. Ни один из этих источников не запрашивался.",
+    "задать: database.dsnFile (Helm: database.existingSecret). Ни один из этих источников не запрашивался.",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому ни один из хранимых источников не запрашивался: {error}",
+  "config.failed.generic": "запрос не выполнен",
   "source.events": "Событиям флота и Kubernetes нужно право events:read. Ни то, ни другое не запрашивалось.",
   "source.audit": "Строкам аудита нужно право audit:read. Журнал аудита не запрашивался.",
   "source.auditWindow":
@@ -583,7 +588,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
     "попадают, могут вытесниться с этой страницы. По области они тоже НЕ сужаются: журнал аудита общий на весь " +
     "кластер и фильтра по области у него нет, так что здесь запросы всех субъектов, а не только этой пары.",
   "source.auditFold":
-    "Подряд идущие вызовы API только на чтение (GET и собственные PromQL-запросы консоли) свёрнуты в одну строку " +
+    "Подряд идущие вызовы API только на чтение (GET, собственные PromQL-запросы консоли и предпросмотры черновиков) свёрнуты в одну строку " +
     "каждая серия; сами вызовы по-прежнему учтены в счётчике и попадают в выгрузку, а свёрнутая строка " +
     "раскрывается по запросу.",
   "source.annotations": "Заметкам нужно право annotations:read. Ни одна не запрашивалась.",

@@ -220,6 +220,25 @@ function evenly(name: string, from: number, count: number, step = 60_000): echar
 
 const oneSeries = (option: echarts.EChartsOption): ReadoutSeries => readoutSeries(option)[0];
 
+describe("readout rows keep the option's own series index", () => {
+  /* echart.tsx places the dot with convertToPixel({seriesIndex: row.index}); an all-NaN series
+     dropped from the model must not shift a later series onto another series' y axis. */
+  it("skips an all-NaN series without renumbering the ones after it", () => {
+    const model = readoutSeries({
+      series: [
+        { name: "A · n1→n2", type: "line", data: [[0, "NaN"], [60_000, "NaN"]] },
+        evenly("A · n1→n3", 0, 3),
+        { ...evenly("B · n1→n3", 0, 3), yAxisIndex: 1 },
+      ],
+    });
+    const { rows } = pickReadoutRows(model, 60_000);
+    expect(rows.map((r) => [r.seriesName, r.index])).toEqual([
+      ["A · n1→n3", 1],
+      ["B · n1→n3", 2],
+    ]);
+  });
+});
+
 describe("readoutSeries reads a chart's own series out of the option it was handed", () => {
   it("carries each series' name, its colour and its points", () => {
     const model = readoutSeries({ series: [evenly("rtt p95", 1_000, 3)] });
@@ -494,6 +513,7 @@ describe("nearestInstant snaps across a panel's series the way its axis pointer 
     color: null,
     points: Array.from({ length: n }, (_, i) => [from + i * 600_000, i] as const),
     step: 600_000,
+    optionIndex: 0,
   });
 
   it("answers the nearest sample of the nearest series", () => {

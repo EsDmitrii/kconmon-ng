@@ -33,10 +33,16 @@ export function degradedProtocolParam(search: string): Protocol | null {
   return raw === resolved ? null : resolved;
 }
 
+/** matrixHref is a link to the Matrix on protocol `p`; the default stays unspelled, as it does in
+ *  the Matrix's own address bar. */
+export function matrixHref(p: Protocol): string {
+  return p === "tcp" ? "/matrix" : `/matrix?${PROTOCOL_PARAM}=${p}`;
+}
+
 /** writeProtocol is the ONE writer of ?protocol=, shared with the object cards
  *  so a second surface cannot invent a second spelling of the same key. */
 export function writeProtocol(p: Protocol): void {
   const url = new URL(window.location.href);
   url.searchParams.set(PROTOCOL_PARAM, p);
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }

@@ -124,6 +124,7 @@ const en = {
   "form.edit": "Edit {name}",
   "form.create": "New rule",
   "form.name": "Name",
+  "form.nameRequired": "A name is required.",
   "form.nameHint":
     "Seeds the alert's own name, so it becomes a Prometheus label value. CamelCase is the convention.",
   "form.kind": "Kind",
@@ -242,6 +243,11 @@ const en = {
   "foreign.unavailable": "Foreign rules are unavailable",
   "foreign.import": "Import {name}",
   "foreign.import.verb": "Import",
+  "foreign.importConfirm": "Confirm import of {name}",
+  "foreign.importConfirm.verb": "Confirm import",
+  /* {count} is ForeignRule.alertRules, the entries an import copies; `rules` counts recording entries too. */
+  "foreign.importConfirm.note":
+    "This creates {count} enabled console {rules}, one per alerting rule; recording rules are skipped.",
   "foreign.importRefused": "The import was refused",
 
   /* ── maintenance windows ───────────────────────────────────────────────── */
@@ -366,6 +372,7 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "form.edit": "Изменить {name}",
   "form.create": "Новое правило",
   "form.name": "Имя",
+  "form.nameRequired": "Имя обязательно.",
   "form.nameHint":
     "Ложится в основу имени алерта и становится значением метки Prometheus. По соглашению пишут CamelCase.",
   "form.kind": "Вид",
@@ -466,6 +473,11 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "foreign.unavailable": "Чужие правила недоступны",
   "foreign.import": "Импортировать {name}",
   "foreign.import.verb": "Импортировать",
+  "foreign.importConfirm": "Подтвердить импорт {name}",
+  "foreign.importConfirm.verb": "Подтвердить импорт",
+  "foreign.importConfirm.note":
+    "Импорт создаст {count} {rules} консоли, по одному на каждое правило оповещения. Созданное сразу включено, " +
+    "правила записи пропускаются.",
   "foreign.importRefused": "Импорт отклонён",
 
   "maintenance.heading": "Окна работ",

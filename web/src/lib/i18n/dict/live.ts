@@ -60,7 +60,6 @@ const en = {
   "pause": "Pause",
   "resume": "Resume",
   "resume.buffered": "Resume ({count} buffered)",
-  "paused.badge": "Paused · {count} buffered",
   /* Paused hides the transport badge, which is the one thing that would say
      whether the feed an operator is about to resume is still there at all. */
   "paused.socket.live": "Paused · socket live",
@@ -122,6 +121,11 @@ const en = {
     "No events will arrive here while that is the case — the feed is not broken, it is unfed. Matrix and Topology fall back to 15s polling, and the feed resumes on its own within 15s of the stream coming back.",
   "history.title": "Event history is unavailable",
   "history.fallback": "failed to load event history",
+  "history.retry": "Retry",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so event history was not requested: {error}",
+  "config.failed.generic": "the request failed",
 
   /* ── blank slates ───────────────────────────────────────────────────────── */
   "empty.waiting.title": "Waiting for events",
@@ -167,7 +171,6 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
   "pause": "Пауза",
   "resume": "Продолжить",
   "resume.buffered": "Продолжить (в буфере {count})",
-  "paused.badge": "Пауза · в буфере {count}",
   "paused.socket.live": "Пауза · сокет жив",
   "paused.socket.down": "Пауза · сокет отключён",
   "connecting": "Подключение…",
@@ -216,6 +219,9 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
     "Пока так, события сюда приходить не будут: лента не сломана, её просто не кормят. Матрица и Топология уходят на опрос раз в 15 с, а лента подхватится сама в пределах 15 с после того, как поток вернётся.",
   "history.title": "История событий недоступна",
   "history.fallback": "не удалось загрузить историю событий",
+  "history.retry": "Повторить",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому история событий не запрашивалась: {error}",
+  "config.failed.generic": "запрос не выполнен",
 
   "empty.waiting.title": "Ждём события",
   "empty.waiting.body":

@@ -14,10 +14,20 @@ import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
-import { useDatabaseAvailable } from "@/hooks/use-capabilities";
-import { ApiError, getConfig, getRun, getRuns, getTarget, listChecks, listSchedules, promqlQuery, promqlQueryRange } from "@/lib/api";
+import { useConsoleConfig, useDatabaseAvailable } from "@/hooks/use-capabilities";
+import {
+  ApiError,
+  getRun,
+  getRuns,
+  getTarget,
+  listAllChecks,
+  listAllSchedules,
+  promqlQuery,
+  promqlQueryRange,
+  queryErrorMessage,
+} from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
-import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { fixedDecimal, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
 import type { InvestigationScope } from "@/lib/investigation-sources";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
@@ -173,10 +183,6 @@ function cadence(s: Schedule, locale: Locale, t: Translate<CardsKey>): string {
   }
 }
 
-function queryErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
-}
-
 /** PermissionCard is PAGES.md:126-129's pattern, the same one targets.tsx uses:
  *  name the permission, say what the reader CAN still do, and never render a
  *  disabled control in place of one they simply do not have. */
@@ -212,10 +218,10 @@ function ListSkeleton() {
 function useTargetChecks(targetId: string, enabled: boolean) {
   const definitionsQuery = useQuery({
     queryKey: ["checks", "target", targetId],
-    queryFn: () => listChecks({ targetId }),
+    queryFn: () => listAllChecks({ targetId }),
     enabled,
   });
-  const definitions = useMemo(() => definitionsQuery.data?.definitions ?? [], [definitionsQuery.data]);
+  const definitions = useMemo(() => definitionsQuery.data?.items ?? [], [definitionsQuery.data]);
   /* Both lists on this card are paged: a target can carry as many checks as
      somebody has declared, and the run scan returns whatever it scanned. */
   const defsPager = usePager(definitions, { resetKey: targetId });
@@ -223,10 +229,10 @@ function useTargetChecks(targetId: string, enabled: boolean) {
   const schedulesQuery = useQuery({
     queryKey: ["schedules", "target", targetId, ids.join(",")],
     queryFn: async () => {
-      const pages = await Promise.all(ids.map((id) => listSchedules({ definitionId: id })));
+      const pages = await Promise.all(ids.map((id) => listAllSchedules({ definitionId: id })));
       const byDefinition: Record<string, Schedule[]> = {};
       pages.forEach((page, i) => {
-        byDefinition[ids[i]] = page.schedules;
+        byDefinition[ids[i]] = page.items;
       });
       return byDefinition;
     },
@@ -235,6 +241,7 @@ function useTargetChecks(targetId: string, enabled: boolean) {
   return {
     definitions,
     defsPager,
+    truncated: definitionsQuery.data?.truncated === true,
     schedules: schedulesQuery.data ?? {},
     isLoading: definitionsQuery.isLoading || (ids.length > 0 && schedulesQuery.isLoading),
     error: definitionsQuery.error ?? schedulesQuery.error,
@@ -266,7 +273,7 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
             // Same treatment as the Schedules tab's own rows: the cadence advances whether the fire
             // produced a run or not.
             // An enabled schedule under a DISABLED definition fires nothing at all — that is a
-            // paused check, and it is its own state rather than a shade of "enabled" (finding 25).
+            // paused check, and it is its own state rather than a shade of "enabled".
             const paused = s.enabled && !definition.enabled;
             // Shown whether or not the schedule is switched on: a run that failed, failed, and
             // switching the cadence off afterwards does not unmake it.
@@ -288,7 +295,8 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
                   </Badge>
                 </span>
                 <span className="type-meta nums min-w-0 truncate">
-                  <span>{t("schedule.next", { at: fmtTime(s.nextFireAt, locale) })}</span>
+                  {/* A disabled or paused schedule keeps a stored time it will not keep. */}
+                  <span>{t("schedule.next", { at: fmtTime(s.enabled && !paused ? s.nextFireAt : null, locale) })}</span>
                   {" · "}
                   <span>{t("schedule.last", { at: fmtTime(s.lastFiredAt, locale) })}</span>
                 </span>
@@ -313,7 +321,7 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
 
 function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }) {
   const t = useT(cardsDict);
-  const { definitions, defsPager, schedules, isLoading, error } = useTargetChecks(targetId, canRead);
+  const { definitions, defsPager, truncated, schedules, isLoading, error } = useTargetChecks(targetId, canRead);
   /* The Time Machine's honest line for this panel; saying so is the only option that is both true and cheap. */
   const { at } = useTimeContext();
 
@@ -346,7 +354,7 @@ function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }
               <DefinitionRow key={d.id} definition={d} schedules={schedules[d.id] ?? []} />
             ))}
           </ul>
-          <Pager pager={defsPager} subject={t("target.checks.subject")} className="px-0" />
+          <Pager pager={defsPager} subject={t("target.checks.subject")} truncated={truncated} className="px-0" />
           </>
         ) : null}
       </section>
@@ -366,12 +374,11 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
   const { locale } = useLocale();
   const { theme } = useTheme();
   /* ONE hour, resolved once, for the chart below AND for the bar under it —
-     see useWindowAnchor (QA scope 2, finding #20). */
+     see useWindowAnchor. */
   const range = useWindowAnchor(HISTORY_RANGE_SECONDS);
   /* The scope is the target's NAME. */
   const { annotations, error: annotationsError, refresh } = useAnnotations(targetName, HISTORY_RANGE_SECONDS, range);
-  /* The declared change windows over the same hour and the same scope (M6 Task
-     9), and for the same reason the annotations are fetched here: a provider's
+  /* The declared change windows over the same hour and the same scope, and for the same reason the annotations are fetched here: a provider's
      maintenance on this target does not depend on Prometheus, so the bands are
      read even where the chart above cannot be. */
   const {
@@ -590,10 +597,8 @@ function RunsTab({ targetName }: { targetName: string }) {
 
 type TargetTab = "checks" | "history" | "runs";
 
-/** Three real tabs and no placeholders (M4 Plan Decision 17). Alerts,
- *  Incidents, Maintenance and Audit-per-target are ABSENT rather than empty:
- *  their tables land in M5-M7, and an absent tab is honest where an empty one
- *  promises something that does not exist. */
+/** Three real tabs and no placeholders: a tab with nothing behind it promises something that does
+ *  not exist, so a view the card has no data for is absent rather than empty. */
 const TABS: { value: TargetTab; labelKey: CardsKey }[] = [
   { value: "checks", labelKey: "tab.checks" },
   { value: "history", labelKey: "tab.history" },
@@ -639,10 +644,10 @@ export function TargetCardPage() {
   const id = targetIdFromPath(window.location.pathname);
   const { at } = useTimeContext();
   const { me, can } = useAuth();
-  const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
+  const { available: dbAvailable, resolved: dbResolved, error: dbConfigError } = useDatabaseAvailable();
   // Same ["config"] cache entry useDatabaseAvailable and AppShell already read
   // (staleTime: Infinity) — one shared fetch, read here for a second field.
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data: config } = useConsoleConfig();
   const [tab, setTab] = useState<TargetTab>("checks");
 
   const authResolved = me !== undefined;
@@ -695,6 +700,18 @@ export function TargetCardPage() {
       /* The DESCRIPTION is the id from the URL — data. */
       <PageShell timeMachine title={t("target.title")} description={id}>
         <PermissionCard permission="targets:read">{t("target.gate.read")}</PermissionCard>
+      </PageShell>
+    );
+  }
+
+  if (dbConfigError !== null) {
+    return (
+      <PageShell timeMachine title={t("target.title")} description={id}>
+        <Card role="status" className="p-6">
+          <p className="text-sm">
+            {t("target.config.failed", { error: queryErrorMessage(dbConfigError, t("target.config.failed.generic")) })}
+          </p>
+        </Card>
       </PageShell>
     );
   }
@@ -760,10 +777,10 @@ export function TargetCardPage() {
               missing number in front of it; the badge beside it already says
               the state in words, and it is the honest one. Round 2's finding
               #16 fixed exactly this on the node card and it was never carried
-              across to this one (QA round 5, finding #7). */}
+              across to this one. */}
           {health.percent === null ? null : (
             <span className="nums text-sm text-muted-foreground">
-              {t("health.percent", { percent: health.percent.toFixed(1) })}
+              {t("health.percent", { percent: fixedDecimal(health.percent, 1, locale) })}
             </span>
           )}
           <Badge variant={TIER_VARIANT[health.tier]} dot>
@@ -793,7 +810,7 @@ export function TargetCardPage() {
         </div>
         <div className="flex flex-col gap-2">
           <RelatedIncidents scope={investigationScope} />
-          {/* scopeNode, not scope (QA round 4, finding #22). Every event a
+          {/* scopeNode, not scope. Every event a
               probe of this target produces is scoped per SOURCE node
               ("node-a→edge-gw", internal/console/events/live_event.go's
               pairScope), and `?scope=` is exact equality — so this rail was

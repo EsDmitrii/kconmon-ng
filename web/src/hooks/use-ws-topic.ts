@@ -21,6 +21,8 @@ export function resetWsClient(): void {
 export interface WsTopicResult<T> {
   data: T | undefined;
   connected: boolean;
+  /** Enabled, and the socket has not yet opened or failed since this hook subscribed: neither live nor delayed is known. */
+  connecting: boolean;
   lastSeq: number;
 }
 
@@ -43,6 +45,8 @@ export function useWsTopic<T>(topic: string, opts?: { enabled?: boolean }): WsTo
   const enabled = opts?.enabled ?? true;
   const [value, setValue] = useState<TopicValue<T>>({ topic, seq: 0 });
   const [connected, setConnected] = useState(false);
+  /* The same rule useRun follows: a socket still being dialled is not "delayed". */
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     if (!enabled) {
@@ -54,7 +58,10 @@ export function useWsTopic<T>(topic: string, opts?: { enabled?: boolean }): WsTo
     }
     const ws = getWsClient();
     setConnected(ws.state === "open");
-    const offState = ws.onStateChange((s) => setConnected(s === "open"));
+    const offState = ws.onStateChange((s) => {
+      setConnected(s === "open");
+      if (s !== "connecting") setSettled(true);
+    });
     const off = ws.subscribe<T>(topic, (env: WsEnvelope<T>) => {
       if (env.type === "error") {
         console.warn("console websocket: server rejected topic", topic, env.data);
@@ -68,6 +75,8 @@ export function useWsTopic<T>(topic: string, opts?: { enabled?: boolean }): WsTo
       }
       setValue({ topic, data: env.data, seq: env.seq });
     });
+    // After subscribe, which is what dials a socket that was not open yet.
+    setSettled(ws.state !== "connecting");
     // Both teardowns are idempotent (WsClient's unsubscribe latches on
     // `released`, the state listener is removed from a Set), so a StrictMode
     // remount re-subscribes cleanly and a topic change leaks nothing.
@@ -80,5 +89,10 @@ export function useWsTopic<T>(topic: string, opts?: { enabled?: boolean }): WsTo
   // Read through the tag, not around it: anything held for a different topic is
   // not this topic's state, however recently it arrived.
   const current = value.topic === topic;
-  return { data: current ? value.data : undefined, connected, lastSeq: current ? value.seq : 0 };
+  return {
+    data: current ? value.data : undefined,
+    connected,
+    connecting: enabled && !settled,
+    lastSeq: current ? value.seq : 0,
+  };
 }

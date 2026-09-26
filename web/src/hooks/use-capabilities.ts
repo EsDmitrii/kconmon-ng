@@ -21,16 +21,24 @@ export function useCapabilities(): { realtime: boolean; resolved: boolean } {
 }
 
 /**
- * useDatabaseAvailable reports whether GET /api/v1/events has anything behind it; the Live page
- * uses this to decide whether to fetch scrollback.
+ * useConsoleConfig is GET /api/v1/config, read once per session: staleTime is per observer on the
+ * shared key, so a caller spelling its own options without Infinity would refetch on every mount.
  */
-export function useDatabaseAvailable(): { available: boolean; resolved: boolean } {
-  const { data, isPending } = useQuery({
-    queryKey: ["config"],
-    queryFn: getConfig,
-    staleTime: Infinity,
-  });
+export function useConsoleConfig() {
+  return useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+}
+
+/**
+ * useDatabaseAvailable reports whether the console has a database (config.database.configured);
+ * every history-backed surface gates on it. `error` is set when GET /api/v1/config itself failed
+ * and there is no cached answer: a caller shows that failure (its dictionary's config.failed)
+ * instead of its no-database line.
+ */
+export function useDatabaseAvailable(): { available: boolean; resolved: boolean; error: Error | null } {
+  const { data, isPending, error: queryError } = useConsoleConfig();
   const available = data?.database?.configured ?? false;
   const resolved = !isPending;
-  return useMemo(() => ({ available, resolved }), [available, resolved]);
+  // A failed /config also reads as resolved && !available; `error` is what tells the two apart.
+  const error = data === undefined ? queryError : null;
+  return useMemo(() => ({ available, resolved, error }), [available, resolved, error]);
 }

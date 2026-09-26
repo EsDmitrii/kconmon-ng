@@ -17,6 +17,7 @@ import {
   unfoldableEmpty,
 } from "./topology";
 import type { Matrix, Topology } from "@/lib/types";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 /* React Flow is REAL in this file — the tool-surface tests count its node boxes — but the props
    the page hands it are the map's contract: the zoom floor, the fit options, the label an edge
@@ -1324,5 +1325,79 @@ describe("TopologyPage — an external agent on the live map", () => {
     await screen.findByTestId("edge-caption");
     expect(screen.getAllByText("external")).toHaveLength(1);
     expect(within(screen.getByLabelText("n1, zone z1, healthy")).queryByText("external")).not.toBeInTheDocument();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("TopologyPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    restoreViewport();
+    resetTheme();
+  });
+
+  const renderMap = () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topo));
+        if (href.startsWith("/api/v1/matrix")) return Promise.resolve(json(matrix));
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+  };
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderMap();
+    await screen.findByTitle("n1");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("stacks the zones in one column on a portrait screen and keeps them in a row otherwise", async () => {
+    const zoneX = () =>
+      ((flowSpy.props as unknown as { nodes: { type?: string; position: { x: number; y: number } }[] }).nodes ?? [])
+        .filter((n) => n.type === "zone")
+        .map((n) => n.position);
+
+    renderMap();
+    await screen.findByTitle("n1");
+    const landscape = zoneX();
+    expect(landscape).toHaveLength(2);
+    expect(landscape[0].y).toBe(landscape[1].y);
+    cleanup();
+
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(orientation: portrait)",
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    renderMap();
+    await screen.findByTitle("n1");
+    const portrait = zoneX();
+    expect(portrait).toHaveLength(2);
+    expect(portrait[0].x).toBe(portrait[1].x);
+    expect(portrait[1].y).toBeGreaterThan(portrait[0].y);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderMap();
+    await screen.findByTitle("n1");
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

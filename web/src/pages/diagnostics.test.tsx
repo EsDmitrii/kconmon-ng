@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
-import { DiagnosticsPage, estimatePairCount, estimateRawPairCount, RUN_DURATIONS } from "./diagnostics";
+import { CHECK_TYPES } from "@/lib/types";
+import { diagnosticsDict } from "@/lib/i18n/dict/diagnostics";
+import { ADHOC_SHAPE, DiagnosticsPage, estimatePairCount, estimateRawPairCount, RUN_DURATIONS } from "./diagnostics";
+import { EXTERNAL_RUN_TYPES, probesNodesOnly } from "./targets";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -80,6 +84,8 @@ function renderPage(opts: {
    * pages/live.test.tsx), for tests that need cursor-dependent pages. Takes
    * precedence over the static `runs` list when supplied. */
   onRuns?: (qs: URLSearchParams) => Response;
+  /** Replaces the 200 GET /api/v1/config would answer with. */
+  configResponse?: () => Response;
   /** Mounts a <LocaleProvider> above the page. Absent — every case but the ru
    *  smoke pin at the bottom of this file — there is no provider at all, which
    *  lib/i18n defines as English. */
@@ -96,6 +102,7 @@ function renderPage(opts: {
     onSaveCheck,
     at,
     onRuns,
+    configResponse,
     locale,
   } = opts;
   if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
@@ -108,7 +115,9 @@ function renderPage(opts: {
     const method = (init?.method ?? "GET").toUpperCase();
     urls.push(href);
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
-    if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(databaseConfigured)));
+    if (href.includes("/api/v1/config")) {
+      return Promise.resolve(configResponse ? configResponse() : json(configBody(databaseConfigured)));
+    }
     if (href.includes("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes, agents)));
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets, nextCursor: "" }));
     if (href === "/api/v1/checks" && method === "POST") {
@@ -522,7 +531,7 @@ describe("DiagnosticsPage history", () => {
   it("shows the non-persistence note when database.configured is false", async () => {
     renderPage({ nodes: ["a", "b"], databaseConfigured: false });
     expect(await screen.findByText(/history is not persisted/i)).toBeInTheDocument();
-    expect(screen.getByText(/console\.database\.mode/)).toBeInTheDocument();
+    expect(screen.getByText(/database\.dsnFile \(Helm: database\.existingSecret\)/)).toBeInTheDocument();
   });
 
   it("does not show the note when the database is configured", async () => {
@@ -554,7 +563,7 @@ describe("DiagnosticsPage history", () => {
     expect(link).toHaveAttribute("href", "/diagnostics/runs/run-1");
   });
 
-  it("'Load older' appends the next page via cursor and disables itself once nextCursor is empty", async () => {
+  it("'Load older' appends the next page via cursor and goes away once nextCursor is empty", async () => {
     const page1 = { runs: [runRow("run-1")], nextCursor: "cursor-1" };
     const page2 = { runs: [runRow("run-2")], nextCursor: "" };
     renderPage({
@@ -571,7 +580,51 @@ describe("DiagnosticsPage history", () => {
 
     // Appended, not replaced -- page one's row is still there alongside page two's.
     expect(screen.getByRole("link", { name: "run-1" })).toBeInTheDocument();
-    expect(loadOlder).toBeDisabled();
+    // Exhausted: a disabled button that cannot say why is a dead end, so there is none.
+    expect(screen.queryByRole("button", { name: "Load older" })).not.toBeInTheDocument();
+    expect(screen.getByText("No older runs.")).toBeInTheDocument();
+  });
+
+  it("says nothing of older runs when there are no runs at all", async () => {
+    renderPage({ nodes: ["a", "b"], runs: [] });
+    await screen.findByText("No runs yet");
+    expect(screen.queryByText("No older runs.")).not.toBeInTheDocument();
+  });
+
+  it("says the configuration could not be read instead of asking for database.dsnFile", async () => {
+    renderPage({ nodes: ["a", "b"], configResponse: () => problem(502, "Bad Gateway", "ingress upstream gone") });
+    expect(await screen.findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/database\.dsnFile/);
+  });
+
+  it("keeps 'Load older' usable after a failed older page, and the retry lands", async () => {
+    const page1 = { runs: [runRow("run-1")], nextCursor: "cursor-1" };
+    const page2 = { runs: [runRow("run-2")], nextCursor: "" };
+    let olderCalls = 0;
+    renderPage({
+      nodes: ["a", "b"],
+      onRuns: (qs) => {
+        if (qs.get("cursor") !== "cursor-1") return json(page1);
+        olderCalls += 1;
+        if (olderCalls === 1) {
+          return new Response(JSON.stringify({ type: "about:blank", title: "Bad Gateway", status: 502 }), {
+            status: 502,
+            headers: { "Content-Type": "application/problem+json" },
+          });
+        }
+        return json(page2);
+      },
+    });
+
+    await screen.findByRole("link", { name: "run-1" });
+    const loadOlder = screen.getByRole("button", { name: "Load older" });
+    fireEvent.click(loadOlder);
+    await waitFor(() => expect(olderCalls).toBe(1));
+    await waitFor(() => expect(loadOlder).not.toBeDisabled());
+
+    fireEvent.click(loadOlder);
+    await screen.findByRole("link", { name: "run-2" });
+    expect(screen.getByRole("link", { name: "run-1" })).toBeInTheDocument();
   });
 
   it("does not show 'Load older' when there is no history yet", async () => {
@@ -791,6 +844,35 @@ describe("DiagnosticsPage run history filters", () => {
     expect(await screen.findByText(/no runs match these filters/i)).toBeInTheDocument();
     expect(screen.queryByText(/no runs yet/i)).not.toBeInTheDocument();
   });
+
+  it("drops the previous filter's rows when the new filter's page one fails, and offers a retry", async () => {
+    let mtrDown = true;
+    renderPage({
+      onRuns: (qs) => {
+        if (qs.get("type") !== "mtr") return json({ runs: [runRow("r-tcp")], nextCursor: "" });
+        if (mtrDown) {
+          return new Response(JSON.stringify({ type: "about:blank", title: "bad gateway", status: 502, detail: "store unavailable" }), {
+            status: 502,
+            headers: { "Content-Type": "application/problem+json" },
+          });
+        }
+        return json({ runs: [runRow("r-mtr", { type: "mtr" })], nextCursor: "" });
+      },
+    });
+
+    await screen.findByText("r-tcp");
+    fireEvent.change(screen.getByLabelText(/filter runs by check type/i), { target: { value: "mtr" } });
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("store unavailable");
+    expect(screen.queryByText("r-tcp")).not.toBeInTheDocument();
+    // A failed read is not an answer: no slate claiming the filter matched nothing.
+    expect(screen.queryByText(/no runs match these filters/i)).not.toBeInTheDocument();
+
+    mtrDown = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("r-mtr")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 /* QA scope 4, finding #10. One field with one label, one placeholder and no
@@ -806,9 +888,10 @@ describe("DiagnosticsPage — the external destination follows the check type", 
     expect(screen.getByLabelText(/^Destination host \(port optional\)/)).toBeInTheDocument();
     expect(screen.getByText(/Without a port the agent dials 80/i)).toBeInTheDocument();
 
+    // udp: only a kconmon agent echoes its probe, so no address shape is the right one.
     fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
-    expect(screen.getByLabelText(/^Destination host:port/)).toBeInTheDocument();
-    expect(screen.getByText(/udp has no default/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Destination address$/)).toBeInTheDocument();
+    expect(screen.getByText(/only a kconmon agent does/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("radio", { name: "ICMP" }));
     expect(screen.getByLabelText(/^Destination host$/)).toBeInTheDocument();
@@ -832,14 +915,15 @@ describe("DiagnosticsPage — the external destination follows the check type", 
     fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "10.0.0.1" } });
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
 
-    // udp has no default port, so the very same address is now unrunnable —
-    // and the value is still there to be corrected, not silently dropped.
+    // udp cannot take an external destination, so the very same address is now
+    // unrunnable — and the value is still there for the way back, not silently dropped.
     fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
-    expect(screen.getByLabelText(/^Destination host/)).toHaveValue("10.0.0.1");
-    expect(screen.getByRole("alert")).toHaveTextContent(/udp has no default port/i);
+    expect(screen.getByLabelText(/^Destination (host|address)/)).toHaveValue("10.0.0.1");
+    expect(screen.getByRole("alert")).toHaveTextContent(/udp probes kconmon nodes only/i);
     expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "10.0.0.1:53" } });
+    fireEvent.click(screen.getByRole("radio", { name: "TCP" }));
+    expect(screen.getByLabelText(/^Destination host/)).toHaveValue("10.0.0.1");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
   });
@@ -849,11 +933,71 @@ describe("DiagnosticsPage — the external destination follows the check type", 
 
     await pickDestination(/ad-hoc/i);
     fireEvent.click(screen.getByRole("radio", { name: "DNS" }));
-    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, udp, icmp and mtr only/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, icmp and mtr only/i);
     expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("radio", { name: "HTTP" }));
-    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, udp, icmp and mtr only/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, icmp and mtr only/i);
+  });
+
+  it("offers an external destination only for the agent's externalCapableChecks: tcp, icmp and mtr", () => {
+    expect(CHECK_TYPES.filter((ct) => ADHOC_SHAPE[ct] !== "unsupported")).toEqual(["tcp", "icmp", "mtr"]);
+    expect(CHECK_TYPES.filter((ct) => ADHOC_SHAPE[ct] !== "unsupported")).toEqual(
+      CHECK_TYPES.filter((ct) => EXTERNAL_RUN_TYPES.has(ct)),
+    );
+  });
+
+  /* The ad-hoc hint key is built from the type name, so a type that joins the nodes-only set must
+     bring its own sentence or the field would show the raw key. */
+  it("has a nodes-only hint for every type that probes kconmon nodes only", () => {
+    for (const ct of CHECK_TYPES.filter(probesNodesOnly)) {
+      expect(diagnosticsDict.en).toHaveProperty(`adhoc.hint.${ct}`);
+      expect(diagnosticsDict.ru).toHaveProperty(`adhoc.hint.${ct}`);
+    }
+  });
+
+  /* The agent refuses udp as an external run and the reconciler skips it as a continuous one: the
+     probe counts a reply only when the far end echoes its sequence number, which only an agent does.
+     So the save route the dns and http lines point at is not open to udp either. */
+  it("sends udp to nodes instead of suggesting a definition", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "10.0.0.1:53" } });
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/udp probes kconmon nodes only/i);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/definition/i);
+    expect(screen.queryByText(/continuous external checker/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
+  });
+
+  it("refuses udp toward a saved target as well, and sends nothing", async () => {
+    const { createCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"], targets: [targetRow()] });
+
+    fireEvent.click(await screen.findByRole("radio", { name: "UDP" }));
+    await pickDestination(/^target$/i);
+    const picker = await screen.findByLabelText("Destination target");
+    await waitFor(() => expect(within(picker).getByRole("option", { name: "api-gw" })).toBeInTheDocument());
+    fireEvent.change(picker, { target: { value: "t-1" } });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/udp probes kconmon nodes only/i);
+    const start = screen.getByRole("button", { name: /start run/i });
+    expect(start).toBeDisabled();
+    fireEvent.click(start);
+    expect(createCalls).toHaveLength(0);
+  });
+
+  /* The store refuses a pmtu definition with an external destination, so the save route the dns
+     and http lines point at is not open to pmtu. */
+  it("sends pmtu to nodes instead of suggesting a definition the store would refuse", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.click(screen.getByRole("radio", { name: "PMTU" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/kconmon nodes only/i);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/definition/i);
+    expect(screen.queryByText(/continuous external checker/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
   });
 
   it("refuses a URL for a type that dials the string itself", async () => {
@@ -953,6 +1097,21 @@ describe("DiagnosticsPage duration selector", () => {
     );
   });
 
+  it("plans a pmtu run around its per-pair timeout and says so without calling it a trace", async () => {
+    renderPage({ nodes: ["a", "b"] });
+
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "PMTU" }));
+    fireEvent.click(screen.getByRole("radio", { name: "1m" }));
+    // Two pairs, one batch of 15s (checks.pmtuMinPerPairTimeout): 4 samples in a minute, not 12.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/A PMTU probe can take up to 15s per pair, so a 1m run probes each pair every 15s — about 4 samples per pair/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/MTR trace/i)).not.toBeInTheDocument();
+  });
+
   // Every offered option must sit inside the server's own accepted window, so
   // the UI can never lead an operator into the 422 it defines.
   it("offers only durations the server accepts", () => {
@@ -1002,6 +1161,29 @@ describe("DiagnosticsPage — Russian", () => {
     // Two nodes → two pairs → «~2 пары», the few form a two-form language
     // would render as «~2 пар».
     expect(screen.getByText("~2 пары")).toBeInTheDocument();
+  });
+});
+
+/* A Russian run history listed "succeeded" and "partial", and its status filter offered the
+   store's six English words. The wire value still travels in ?status=. */
+describe("DiagnosticsPage — run statuses in Russian", () => {
+  it("translates the status badge and the filter options, and filters by the wire value", async () => {
+    const { urls } = renderPage({
+      locale: "ru",
+      runs: [runRow("r-1"), runRow("r-2", { status: "partial" }), runRow("r-3", { status: "failed" })],
+    });
+    /* The same words are the filter's options; the badges are the ones outside it. */
+    const badge = (word: string) => screen.queryAllByText(word).filter((el) => el.tagName !== "OPTION");
+    await waitFor(() => expect(badge("успешно")).toHaveLength(1));
+    expect(badge("частично")).toHaveLength(1);
+    expect(badge("сбой")).toHaveLength(1);
+    expect(screen.queryByText("succeeded")).toBeNull();
+
+    const filter = screen.getByRole("combobox", { name: "Фильтр запусков по статусу" });
+    const options = within(filter).getAllByRole("option").map((o) => o.textContent);
+    expect(options).toEqual(["Все статусы", "в очереди", "выполняется", "успешно", "частично", "сбой", "отменён"]);
+    fireEvent.change(filter, { target: { value: "failed" } });
+    await waitFor(() => expect(urls.some((u) => u.includes("status=failed"))).toBe(true));
   });
 });
 
@@ -1258,5 +1440,29 @@ describe("DiagnosticsPage — 2.4.0 polish", () => {
     expect(last?.get("type")).toBeNull();
     expect(last?.get("status")).toBeNull();
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("DiagnosticsPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage({ nodes: ["a", "b"], databaseConfigured: true, runs: [runRow("run-1")] });
+    await screen.findByRole("radio", { name: "TCP" });
+    await screen.findByRole("heading", { name: /run history/i });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage({ nodes: ["a", "b"], databaseConfigured: true, runs: [runRow("run-1")] });
+    await screen.findByRole("radio", { name: "TCP" });
+    await screen.findByRole("heading", { name: /run history/i });
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

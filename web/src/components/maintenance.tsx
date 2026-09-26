@@ -62,10 +62,9 @@ export interface TimeWindow {
  * useWindowAnchor is the ONE `now` a surface takes, for its chart AND for the
  * bar beneath it.
  *
- * Both used to call `new Date()` in their own queryFn, milliseconds to seconds
- * apart, and a window declared in that gap was counted by the bar while sitting
- * outside the range the chart had already resolved (QA scope 2, finding #20).
- * Taken ONCE per mount rather than on a ticker: the chart it must agree with
+ * Two `new Date()` calls in two queryFns land milliseconds to seconds apart,
+ * and a window declared in that gap would be counted by the bar while sitting
+ * outside the range the chart had already resolved. Taken ONCE per mount rather than on a ticker: the chart it must agree with
  * fetches once too, and a bar whose range crept forward under a static chart
  * would be the same bug wearing a clock.
  */
@@ -196,14 +195,13 @@ function CreateMaintenanceForm({
   const t = useT(maintenanceDict);
   /* NOW, unless now sits outside the frozen window this bar lists — in which
      case the hour that ENDS at that window's end, so both edges of the declared
-     window land inside the one on screen (QA scope 3, finding #5). */
+     window land inside the one on screen. */
   const [start, setStart] = useState(() =>
     floorToMinute(defaultStartIn(new Date(), frozenWindow, DEFAULT_WINDOW_SECONDS)),
   );
   const [end, setEnd] = useState(() => new Date(start.getTime() + DEFAULT_WINDOW_SECONDS * 1000));
   const [reason, setReason] = useState("");
-  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
-     begin() is a REF write, so three clicks in one task produce one request.
+  /* The in-flight guard, not just a disabled look: begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end: endSubmit } = useSubmitGuard();
   const [error, setError] = useState<string>();
@@ -237,9 +235,8 @@ function CreateMaintenanceForm({
 
   return (
     <Card asChild className="p-4">
-      {/* role="form", not role="dialog" — the twin of the annotation form's own
-          change (QA round 3, finding #15), and for the same reason: this is a
-          disclosure with no focus trap and no Escape-to-dismiss, and claiming
+      {/* role="form", not role="dialog", like the annotation form and for the
+          same reason: this is a disclosure with no focus trap and no Escape-to-dismiss, and claiming
           the dialog role promises a screen-reader user three behaviours it does
           not have. Escape-to-discard stays deliberately absent: the reason box
           holds typed text, and losing it to a stray keypress has no undo. */}
@@ -247,6 +244,9 @@ function CreateMaintenanceForm({
         <p className="text-xs text-muted-foreground">
           {t("form.scope.before")}{" "}
           <span className="font-medium text-foreground">{scopeLabel(scope, t)}</span> {t("form.scope.after")}
+        </p>
+        <p className={cn("text-xs", scope === GLOBAL_SCOPE ? "text-health-warn" : "text-muted-foreground")}>
+          {scope === GLOBAL_SCOPE ? t("form.webhooks.global") : t("form.webhooks.scoped", { scope })}
         </p>
         <div className="flex flex-wrap items-start gap-3">
           <Field label={t("form.start")}>
@@ -328,30 +328,21 @@ export function MaintenanceRow({
       {/* Both edges, always. A window rendered by its start alone reads as an
           instant, which is the one thing it never is.
 
-          QA round 5, finding #6: w-28 was too tight for the pair even in the
-          compact form, so the END was the part that got cut — and a window
-          whose end is "Aug 12, 14:…" tells an operator nothing about when the
-          change actually finishes, which is the single fact they came for.
+          A cut END is the worst truncation here: a window whose end is
+          "Aug 12, 14:…" tells an operator nothing about when the change
+          finishes, which is the single fact they came for. So the column FITS
+          and never truncates: shrink-0, so flex takes the space out of the
+          REASON instead, which already truncates and carries its own title.
+          Below lg the range takes a full row of its own above the reason
+          rather than fighting it for one line.
 
-          The fix is a column that FITS and never truncates: shrink-0, so flex
-          takes the space out of the REASON instead, which already truncates and
-          already carries its own title. Below 700px (max-lg here matches the
-          app's own breakpoint use) the range takes a full row of its own above
-          the reason rather than fighting it for one line — basis-full only at
-          that width.
-
-          QA overflow sweep: w-44 did not actually fit. "Aug 9, 11:31 AM →
-          Aug 9, 01:31 PM" measures 198px against an 11rem (176px) column, and
-          because whitespace-nowrap sat on the WHOLE span with no clipping
-          ancestor, the 22px spilled out of the box instead of wrapping. Two
-          changes, and both are needed:
-
-            - w-52 (13rem, 208px) so the ordinary range still gets its one line;
-            - nowrap moved OFF the container and onto each stamp, which leaves
-              the arrow as the only break opportunity. A longer form than the
-              one measured (a two-digit day, a locale that spells the month out)
-              now folds into a second line at the arrow — never mid-timestamp,
-              never past the edge. Widening alone would only move the cliff. */}
+          Two things keep it inside its box:
+            - w-52 (13rem, 208px), wide enough for the ordinary range
+              ("Aug 9, 11:31 AM → Aug 9, 01:31 PM" is 198px) on one line;
+            - nowrap on each stamp, not on the container, which leaves the
+              arrow as the only break opportunity. A longer form (a two-digit
+              day, a locale that spells the month out) folds into a second line
+              at the arrow — never mid-timestamp, never past the edge. */}
       <span
         data-testid="maintenance-stamp"
         className="nums w-full shrink-0 basis-full text-muted-foreground lg:w-52 lg:basis-auto"
@@ -362,13 +353,13 @@ export function MaintenanceRow({
         <span className="whitespace-nowrap">{fmtStampCompact(w.endAt, locale)}</span>
       </span>
       {/* min-w-[10rem]: the confirm state adds a second button to this row, and
-          flex took the space out of the one column that identifies WHICH window
-          is about to be deleted — the reason collapsed to a single character
-          under the very click that asks you to confirm it (QA scope 2, #19).
-          With a floor on the column the row wraps instead, which is the same
-          give the stamp already takes below lg. */}
+          flex would take the space out of the one column that identifies WHICH
+          window is about to be deleted, collapsing the reason to a single
+          character under the very click that asks you to confirm it. With a
+          floor on the column the row wraps instead, which is the same give the
+          stamp already takes below lg. */}
       {/* Below lg the reason wraps to two lines instead of truncating: on a
-          phone the whole row is the reason, and "Rolling the CNI upg…" told an
+          phone the whole row is the reason, and "Rolling the CNI upg…" tells an
           operator nothing about which window this is. From lg up it is the
           single truncating line beside the range, full text on title. */}
       <span
@@ -472,8 +463,8 @@ export function MaintenanceBar({
   const [createdNote, setCreatedNote] = useState<string>();
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  /* The twin of components/annotations.tsx's reset (QA scope 3, finding #4):
-     the note describes one scope and one window and must not outlive either. */
+  /* The twin of components/annotations.tsx's reset: the note describes one
+     scope and one window and must not outlive either. */
   const noteScope = `${scope}|${frozenWindow ? `${frozenWindow.from.getTime()}-${frozenWindow.to.getTime()}` : "live"}`;
   const [seenScope, setSeenScope] = useState(noteScope);
   if (seenScope !== noteScope) {
@@ -487,8 +478,8 @@ export function MaintenanceBar({
   };
 
   /* Focus comes back to the control that opened the form, the same contract
-     AnnotationBar keeps (QA round 2, finding #20): the form is unmounted by
-     then, and without this a keyboard user is dropped on <body>. */
+     AnnotationBar keeps: the form is unmounted by then, and without this a
+     keyboard user is dropped on <body>. */
   const closeAndRefocus = () => {
     setOpen(false);
     triggerRef.current?.focus();

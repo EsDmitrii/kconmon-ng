@@ -9,6 +9,8 @@ import {
   severityRatio,
 } from "./matrix-cells";
 import type { MatrixCell } from "./types";
+import { translate, type Translate } from "@/lib/i18n";
+import { matrixCellsDict, type MatrixCellsKey } from "@/lib/i18n/dict/matrix-cells";
 
 /** The shared cell reading. */
 
@@ -117,11 +119,32 @@ describe("path MTU cells", () => {
     expect(isMeasured({ source: "a", destination: "b", failRatio: null, mtuBytes: 1500 })).toBe(true);
   });
 
+  it("flags a recovering path as a problem pair even under the 1% line, as the grid paints it amber", () => {
+    const recovering = {
+      source: "a", destination: "b", failRatio: 0.005, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0,
+    };
+    expect(cellTier(recovering)).toBe("warn");
+    expect(isProblemCell(recovering)).toBe(true);
+  });
+
   it("flags a reduced path as a problem pair, and a full one not", () => {
     expect(isProblemCell(reduced)).toBe(true);
     expect(isProblemCell(ok)).toBe(false);
     expect(isReducedPath(reduced)).toBe(true);
     expect(isReducedPath({ ...reduced, probeMtuBytes: undefined })).toBe(false);
+  });
+
+  /* The grid's aria-label is this sentence and hides the visible sub-line, so the verdict word
+     has to be in it. */
+  it("names a black hole and a recovering path in the summary, in both languages", () => {
+    expect(cellSummary(blackhole)).toBe("fail 100.0%, path MTU 1400 of 1500 bytes, black hole");
+    const recovering = {
+      source: "a", destination: "b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0,
+    };
+    expect(cellSummary(recovering)).toBe("fail 40.0%, path MTU 1500 bytes, recovering");
+    const ruT: Translate<MatrixCellsKey> = (k, v) => translate(matrixCellsDict, "ru", k, v);
+    expect(cellSummary(blackhole, ruT)).toContain("чёрная дыра");
+    expect(cellSummary(recovering, ruT)).toContain("после сбоя");
   });
 
   it("says the path MTU in the summary", () => {
@@ -131,8 +154,8 @@ describe("path MTU cells", () => {
 });
 
 describe("pmtuReading", () => {
-  const cell = (failRatio: number | null, mtuBytes: number, probeMtuBytes = 1500) => ({
-    source: "a", destination: "b", failRatio, mtuBytes, probeMtuBytes,
+  const cell = (failRatio: number | null, mtuBytes: number, probeMtuBytes = 1500, recentFailRatio?: number) => ({
+    source: "a", destination: "b", failRatio, mtuBytes, probeMtuBytes, recentFailRatio,
   });
   it("reads a full path, a reduced one and a black hole", () => {
     expect(pmtuReading(cell(0, 1500))).toBe("full");
@@ -142,7 +165,37 @@ describe("pmtuReading", () => {
   });
   it("calls a fresh black hole one before its ratio crosses the failing line", () => {
     expect(pmtuReading(cell(0.03, 1400))).toBe("blackhole");
-    expect(pmtuReading(cell(0.03, 1500))).toBe("full");
+  });
+  /* Recovering is a pair whose recent probes are clean after failures: the window still holds
+     them, the last minutes do not. */
+  it("reads a full-size path with failures only earlier in the window as recovering, amber", () => {
+    expect(pmtuReading(cell(0.03, 1500, 1500, 0))).toBe("recovering");
+    expect(pmtuReading(cell(0.4, 1500, 1500, 0))).toBe("recovering");
+    expect(cellTier(cell(0.4, 1500, 1500, 0))).toBe("warn");
+  });
+  /* Each probe dials a fresh UDP socket, so an ECMP-split black hole fails some of the probes while
+     the gauge flips between reduced and full size. A full-size reading is only the last probe. */
+  it("keeps an ECMP-split black hole red when its last probe crossed at full size", () => {
+    expect(pmtuReading(cell(0.2, 1500, 1500, 0.5))).toBe("blackhole");
+    expect(cellTier(cell(0.2, 1500, 1500, 0.5))).toBe("bad");
+    expect(pmtuReading(cell(0.4, 1500, 1500, 0.34))).toBe("blackhole");
+    expect(cellTier(cell(0.03, 1500, 1500, 0.1))).toBe("bad");
+  });
+  it("does not call a pair recovering without the recent window: the failing line decides", () => {
+    expect(pmtuReading(cell(0.25, 1500))).toBe("blackhole");
+    expect(cellTier(cell(0.25, 1500))).toBe("bad");
+    expect(pmtuReading(cell(0.5, 1500))).toBe("blackhole");
+    expect(pmtuReading(cell(1, 1460, 1450))).toBe("blackhole");
+    expect(cellTier(cell(1, 1460, 1450))).toBe("bad");
+    expect(pmtuReading(cell(0.05, 1500))).toBe("full");
+    expect(cellTier(cell(0.05, 1500))).toBe("warn");
+  });
+  it("keeps a reduced reading with failures in the window a black hole even when recent probes are clean", () => {
+    expect(pmtuReading(cell(0.2, 1400, 1500, 0))).toBe("blackhole");
+  });
+  it("keeps the failing line as the only rule when the probe size is unknown", () => {
+    const noProbe = { source: "a", destination: "b", failRatio: 0.4, mtuBytes: 1500 };
+    expect(pmtuReading(noProbe)).toBe("blackhole");
   });
   it("has nothing to say about a cell with no path MTU", () => {
     expect(pmtuReading({ source: "a", destination: "b", failRatio: 0 })).toBeNull();

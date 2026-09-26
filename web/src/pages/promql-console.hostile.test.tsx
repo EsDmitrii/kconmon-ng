@@ -6,6 +6,18 @@ import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { PromQLConsolePage } from "./promql-console";
 
+/* The page waits for the subject and needs promql:query (pages/promql-console.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
+
 /**
  * promql-console.hostile.test.tsx — the Console driven the way an operator
  * actually drives it: wrong queries, wrong shapes, wrong order, twice at once.

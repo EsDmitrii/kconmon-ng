@@ -8,6 +8,19 @@ import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
 import { PromQLConsolePage, ResultTabs, toChartModel } from "./promql-console";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
+
+/* The page waits for the subject and needs promql:query (pages/promql-console.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
 
 /* The page mounts CodeMirror and ECharts; neither renders honestly in jsdom
    (no layout, no canvas), and neither is what these cases are about. Both are
@@ -125,6 +138,19 @@ afterEach(() => {
   /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
      left behind would flip every later case in this one. */
   localStorage.removeItem(LOCALE_STORAGE_KEY);
+  auth.granted = ["promql:query"];
+});
+
+/* Run answered 403 for a role without promql:query; the editor and Run are absent instead. */
+describe("PromQL console without promql:query", () => {
+  it("shows the permission card instead of the editor and Run", async () => {
+    auth.granted = ["topology:read"];
+    const { calls } = renderConsole();
+    expect(await screen.findByText("Requires the promql:query permission")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run" })).toBeNull();
+    expect(screen.queryByTestId("promql-editor")).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe("Console result tabs", () => {
@@ -709,5 +735,40 @@ describe("Console figures", () => {
     expect(label.className).toContain("mono-data");
     expect(screen.getByRole("columnheader", { name: "value" }).className).toContain("text-right");
     expect(screen.getByRole("columnheader", { name: "pod" }).className).not.toContain("text-right");
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("PromQLConsolePage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderConsole({
+      answer: {
+        status: "success",
+        data: { resultType: "vector", result: [{ metric: { __name__: "up", node: "node-a" }, value: [1_754_000_000, "1"] }] },
+      },
+    });
+    run();
+    await screen.findByText("node-a");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderConsole({
+      answer: {
+        status: "success",
+        data: { resultType: "vector", result: [{ metric: { __name__: "up", node: "node-a" }, value: [1_754_000_000, "1"] }] },
+      },
+    });
+    run();
+    await screen.findByText("node-a");
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

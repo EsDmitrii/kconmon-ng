@@ -8,15 +8,15 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  * NOT HERE, on purpose:
  *   - the run id, the node names on both sides of every pair, `run.plane`, and
  *     `run.type.toUpperCase()` ("TCP", "MTR"): identifiers and protocol names.
- *   - the run STATUS and every pair STATE badge (pending / running / succeeded
- *     / failed / partial / cancelled / dispatched / timeout). They are the
- *     store's own enum, they are what the API answers and what an operator
- *     greps a log for, and the Run checks history list beside them prints the
- *     same words.
  *   - a pair's `error` string and a cancel refusal's problem.detail: the
  *     server wrote them.
- *   - every measured VALUE: fmtNsCompact's latencies and fmtPercent's ratios,
- *     because a millisecond is a millisecond in both languages.
+ *
+ * The run STATUS and every pair STATE badge are translated (status.*), with
+ * the words dict/diagnostics.ts gives the Run checks list: ru fails as «сбой».
+ * A status this build has never heard renders verbatim.
+ *
+ * Measured VALUES keep their figures but not their spelling: fmtNsCompact and
+ * fmtPercent take the locale, so ru reads «73 мкс», «0,3 мс» and «50,0%».
  *
  * DURATIONS are no longer on that list. A rendered span ("5s", "12m") is a word
  * rather than a measurement, so formatDurationNs now takes the locale and ru
@@ -70,6 +70,15 @@ const en = {
   /* The status badge's title for the one enum word that does not explain itself. The runner's
      finalStatus says "partial" when neither every pair succeeded nor every pair failed. */
   "status.partial.title": "Some pairs succeeded and some failed",
+  /* The store's run statuses and pair states; English keeps the wire words. */
+  "status.pending": "pending",
+  "status.running": "running",
+  "status.succeeded": "succeeded",
+  "status.partial": "partial",
+  "status.failed": "failed",
+  "status.cancelled": "cancelled",
+  "status.timeout": "timeout",
+  "status.dispatched": "dispatched",
   /* Said once in the Pairs header when every row carries the identical error; the rows still
      print it, clamped, and the expanded row prints it whole. {count} is the pair count. */
   "pairs.sameError": "all {count} pairs failed with the same error",
@@ -95,6 +104,15 @@ const en = {
      dispatcher — so it gets this instead of a stored hop table captioned as the
      route it took. */
   "trace.probeFailed": "This probe recorded no route: it never completed a trace.",
+  /* The pair row's twins of the two lines above: the row stands for the pair's latest probe. */
+  "trace.pairFailed": "This pair's latest probe recorded no route: it never completed a trace.",
+  "trace.noneForPair": "No recorded route covers this pair's latest probe.",
+  /* Per-flow ECMP: the pair alternated between routes and their windows overlap, so the clock
+     cannot tell which one the probe walked. */
+  "trace.severalForProbe":
+    "Several recorded routes cover this probe: the pair alternated between paths, and which one this probe walked is not recorded here.",
+  "trace.severalForPair":
+    "Several recorded routes cover this pair's latest probe: the pair alternated between paths, and which one it walked is not recorded here.",
   /* A long interval run holds more results than one response may carry, so the page is looking at
      the newest slice of it. Every figure above is computed from what is on screen, which makes this
      sentence the difference between a summary and a wrong one. */
@@ -123,7 +141,7 @@ const en = {
   "detail.pmtu.ok": "full size: the probe-size datagram crossed",
   "detail.pmtu.reduced": "reduced: the path is smaller and says so with ICMP",
   "detail.pmtu.blackhole": "black hole: full-size datagrams vanish with no ICMP error",
-  "detail.pmtu.unreachable": "unreachable: even the small datagram was lost",
+  "detail.pmtu.unreachable": "unreachable: no size crossed reliably, not an MTU verdict",
   "detail.pmtu.path": "Path MTU",
   "detail.pmtu.pathValue": "{mtu} of {probe} bytes",
   "detail.pmtu.truncated": "at least; the search stopped at its time budget",
@@ -258,6 +276,14 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "pairs.okOfTotal": "{ok}/{total} успешно",
   "pairs.okOfTotal.basis": "по последнему зонду каждой пары",
   "status.partial.title": "Часть пар прошла, часть не прошла",
+  "status.pending": "в очереди",
+  "status.running": "выполняется",
+  "status.succeeded": "успешно",
+  "status.partial": "частично",
+  "status.failed": "сбой",
+  "status.cancelled": "отменён",
+  "status.timeout": "таймаут",
+  "status.dispatched": "отправлена",
   /* Без склонения числительного: «у всех пар (2)» читается при любом {count}. */
   "pairs.sameError": "у всех пар ({count}) одна и та же ошибка",
 
@@ -269,12 +295,18 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "trace.none": "Для этой пары маршрут ещё не записан.",
   "trace.noneForProbe": "Ни один записанный маршрут не покрывает этот зонд.",
   "trace.probeFailed": "Этот зонд не записал маршрут: трассировка не дошла до конца.",
+  "trace.pairFailed": "Последний зонд этой пары не записал маршрут: трассировка не дошла до конца.",
+  "trace.noneForPair": "Ни один записанный маршрут не покрывает последний зонд этой пары.",
+  "trace.severalForProbe":
+    "Этот зонд покрывают несколько записанных маршрутов: пара чередовала пути, и по какому из них прошёл зонд, здесь не записано.",
+  "trace.severalForPair":
+    "Последний зонд этой пары покрывают несколько записанных маршрутов: пара чередовала пути, и по какому из них он прошёл, здесь не записано.",
   "results.truncated":
     "Показаны {count} последних результатов: прогон записал больше, чем помещается в одну выдачу, поэтому цифры выше описывают этот срез, а не весь прогон.",
   "trace.probe": "Зонд №{seq}",
   "trace.sharedRoute":
     "Хопы ниже — это маршрут, по которому прошёл зонд, свёрнутый по всем трассировкам этого маршрута. Пока маршрут не менялся, все зонды показывают одно и то же.",
-  "trace.openInExplorer": "Открыть в обзоре MTR",
+  "trace.openInExplorer": "Открыть в Обозревателе MTR",
   "timeline.tick.open": "Показать маршрут этого зонда",
 
   "detail.source": "Откуда",
@@ -286,7 +318,7 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "detail.pmtu.ok": "полный размер: датаграмма размера пробы прошла",
   "detail.pmtu.reduced": "уменьшен: путь меньше и сообщает об этом по ICMP",
   "detail.pmtu.blackhole": "чёрная дыра: полноразмерные датаграммы пропадают без ICMP-ошибки",
-  "detail.pmtu.unreachable": "недоступен: пропала даже маленькая датаграмма",
+  "detail.pmtu.unreachable": "недоступен: ни один размер не прошёл надёжно, это не вердикт по MTU",
   "detail.pmtu.path": "MTU пути",
   "detail.pmtu.pathValue": "{mtu} из {probe} байт",
   "detail.pmtu.truncated": "как минимум; поиск упёрся в лимит времени",

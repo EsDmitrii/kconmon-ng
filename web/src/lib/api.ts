@@ -78,13 +78,25 @@ export class ApiError extends Error {
   }
 }
 
+/** isSettledClientError: a 4xx other than 429 is the server's final answer; retrying or polling will not change it. */
+export function isSettledClientError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  const s = error.problem.status;
+  return s !== undefined && s >= 400 && s < 500 && s !== 429;
+}
+
+/**
+ * isAuthUnavailable is the server's 503 "authentication unavailable": a credential was presented but
+ * the session, user or token store did not answer. The session is not known to be bad, so this is a
+ * retry, never a sign-out (only a 401 redirects to /login).
+ */
+export function isAuthUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && error.problem.status === 503 && error.problem.title === "authentication unavailable";
+}
+
 /** retryUnlessClientError is the app-wide react-query retry predicate (main.tsx). */
 export function retryUnlessClientError(failureCount: number, error: unknown): boolean {
-  if (error instanceof ApiError) {
-    const s = error.problem.status;
-    if (s !== undefined && s >= 400 && s < 500 && s !== 429) return false;
-  }
-  return failureCount < 1;
+  return !isSettledClientError(error) && failureCount < 1;
 }
 
 // LOGIN_PATH is the SPA route (web/src/pages/login.tsx), distinct from
@@ -100,8 +112,9 @@ const CSRF_HEADER_NAME = "X-CSRF-Token";
 // the CSRF header attached here that requires it there.
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-// POST /api/v1/auth/login's own 401 means "wrong credentials", not "your session is gone".
-const NO_REDIRECT_ON_401 = new Set(["/api/v1/auth/login"]);
+// POST /api/v1/auth/login's own 401 means "wrong credentials", not "your session is gone"; the
+// password change answers both ways, so changeOwnPassword decides for itself.
+const NO_REDIRECT_ON_401 = new Set(["/api/v1/auth/login", "/api/v1/auth/password"]);
 
 function readCookie(name: string): string | undefined {
   for (const part of document.cookie.split("; ")) {
@@ -198,6 +211,19 @@ function unreadable(status: number): Problem {
  */
 export function isServerSentence(err: unknown): err is ApiError {
   return err instanceof ApiError && err.problem.type !== PROBLEM_TYPE_UNREADABLE;
+}
+
+/**
+ * queryErrorMessage is what a surface says when something failed: the server's
+ * own words whenever it wrote any, and the caller's own sentence when it did
+ * not. A refusal that never reached the console (a gateway's HTML 502, a
+ * proxy's empty problem document) can arrive with no detail and a blank or
+ * absent title, and a blank error slot is worse than a generic one.
+ */
+export function queryErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof ApiError)) return fallback;
+  const said = [error.problem.detail, error.problem.title].map((s) => s?.trim() ?? "").find((s) => s !== "");
+  return said ?? fallback;
 }
 
 /** readJSON is `resp.json()` with the parser's exception folded away: a body
@@ -584,26 +610,20 @@ export function deleteSchedule(id: string): Promise<void> {
 }
 
 /*
- * MTR path history All three ride the same apiFetch and the same handle<T> everything above uses;
- * the permission card on the /mtr page therefore exists for hand-rolled roles.
+ * MTR path history. These ride the same apiFetch and handle<T> everything above uses; the
+ * permission card on the /mtr page therefore exists for hand-rolled roles.
  */
+
+/** The server's page maximum for /api/v1/mtr/destinations (mtr.go pageMaxLimit). */
+export const MTR_DESTINATIONS_LIMIT = 500;
 
 /**
  * getMTRDestinations is GET /api/v1/mtr/destinations: the (source, destination) pairs path history
- * knows about.
- *
- * The limit is EXPLICIT, and the listing is WALKED to the end.
- *
- * The endpoint is bounded (pairs are sources x destinations, so a large fleet is a large listing)
- * and the call used to send no limit at all, taking the 100-row default: on a stand with 101 traced
- * pairs one pair vanished from the Explorer entirely — its path history unreachable from the UI —
- * and every aggregate count under the destination it belonged to was quietly short. Sending the
- * server's maximum fixed one page and left the same hole one order of magnitude further out; the
- * cursor is what closes it. Pages arrive ordered by (sourceNode, destination) and this file's
- * callers sort for display.
+ * knows about, walked to the end at the server's page maximum. Pairs are sources x destinations, so
+ * a large fleet is a large listing, and a pair left on an unread page would drop out of the Explorer
+ * with its path history unreachable. Pages arrive ordered by (sourceNode, destination); callers sort
+ * for display.
  */
-export const MTR_DESTINATIONS_LIMIT = 500;
-
 export function getMTRDestinations(): Promise<{ items: MTRDestination[]; truncated: boolean }> {
   return collectPages(
     (cursor) => {
@@ -617,7 +637,7 @@ export function getMTRDestinations(): Promise<{ items: MTRDestination[]; truncat
 }
 
 // getMTRSnapshots is GET /api/v1/mtr/snapshots: one page of the DISTINCT
-// routes a pair has taken, newest last_seen first, behind the same opaque
+// routes a pair has taken, newest first_seen first, behind the same opaque
 // keyset cursor getRuns/getEvents use; unlike every other list function here the two filters are
 // not optional.
 export function getMTRSnapshots(q: PathSnapshotQuery): Promise<PathSnapshotPage> {
@@ -625,6 +645,25 @@ export function getMTRSnapshots(q: PathSnapshotQuery): Promise<PathSnapshotPage>
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
   if (q.cursor) qs.set("cursor", q.cursor);
   return apiFetch(`/api/v1/mtr/snapshots?${qs}`).then((r) => handle<PathSnapshotPage>(r));
+}
+
+/** The server's page maximum for /api/v1/mtr/snapshots (mtr.go pageMaxLimit). */
+const MTR_SNAPSHOTS_LIMIT = 500;
+
+/**
+ * listAllMTRSnapshots is getMTRSnapshots to exhaustion; see collectPages. Asking which route covered
+ * an instant needs every route: the order is first_seen, and a route first seen long ago may still
+ * be walked now, behind any number of routes first seen after it.
+ */
+export function listAllMTRSnapshots(
+  source: string,
+  destination: string,
+): Promise<{ items: PathSnapshot[]; truncated: boolean }> {
+  return collectPages(
+    (cursor) => getMTRSnapshots({ source, destination, limit: MTR_SNAPSHOTS_LIMIT, cursor }),
+    (page) => page.snapshots,
+    (page) => page.nextCursor,
+  );
 }
 
 // getMTRSnapshot is GET /api/v1/mtr/snapshots/{id}: one stored path with its full hop payload;
@@ -722,6 +761,33 @@ export function getIncidents(q: IncidentQuery = {}): Promise<IncidentPage> {
   return apiFetch(`/api/v1/incidents${suffix ? `?${suffix}` : ""}`)
     .then((r) => handle<IncidentPage>(r))
     .then((p) => ({ ...p, incidents: p.incidents ?? [], nextCursor: p.nextCursor ?? "" }));
+}
+
+/**
+ * scanIncidents walks GET /api/v1/incidents until `want` rows pass `keep` or the list ends, in the
+ * server's order (newest created first). The Time Machine's "open at t" is no server filter at all:
+ * from/to match the window an incident was saved with, not when it was declared or resolved, and
+ * LIMIT cuts by created_at, so one page could hold no row open at t and hide an older one that was.
+ * `truncated` means the collectPages cap stopped the walk first; as there, the caller shows it.
+ */
+export async function scanIncidents(
+  q: IncidentQuery,
+  keep: (i: Incident) => boolean,
+  want: number,
+): Promise<{ incidents: Incident[]; truncated: boolean }> {
+  const incidents: Incident[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < MAX_COLLECT_PAGES; i++) {
+    const page = await getIncidents({ ...q, cursor });
+    for (const row of page.incidents) {
+      if (!keep(row)) continue;
+      incidents.push(row);
+      if (incidents.length >= want) return { incidents, truncated: false };
+    }
+    cursor = page.nextCursor || undefined;
+    if (!cursor) return { incidents, truncated: false };
+  }
+  return { incidents, truncated: true };
 }
 
 // getIncident is GET /api/v1/incidents/{id} — the permalink's own read
@@ -906,6 +972,14 @@ export function updateUser(id: string, patch: UserPatchRequest): Promise<Console
   }).then((r) => handle<ConsoleUser>(r));
 }
 
+/**
+ * deleteUser is DELETE /api/v1/users/{id} (204): the user's API tokens are revoked first, and 409
+ * refuses the last enabled user who can manage users.
+ */
+export function deleteUser(id: string): Promise<void> {
+  return apiFetch(`/api/v1/users/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
 /** resetUserPassword is POST /api/v1/users/{id}/password; every session of that user goes stale. */
 export function resetUserPassword(id: string, password: string): Promise<void> {
   return apiFetch(`/api/v1/users/${encodeURIComponent(id)}/password`, {
@@ -924,7 +998,17 @@ export function changeOwnPassword(currentPassword: string, newPassword: string):
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ currentPassword, newPassword }),
-  }).then(handleVoid);
+  })
+    .then(handleVoid)
+    .catch((err: unknown) => {
+      if (err instanceof ApiError && err.problem.status === 401 && !isWrongCurrentPassword(err)) redirectToLogin();
+      throw err;
+    });
+}
+
+/** isWrongCurrentPassword tells changeOwnPassword's "current password does not match" from a lost session. */
+export function isWrongCurrentPassword(err: unknown): boolean {
+  return err instanceof ApiError && err.problem.status === 401 && err.problem.title === "invalid credentials";
 }
 
 /** listRoles is GET /api/v1/rbac/roles: the CUSTOM roles; the built-ins are compiled in. */

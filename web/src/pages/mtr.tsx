@@ -18,12 +18,12 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useTopology } from "@/hooks/use-topology";
 import {
-  ApiError,
   createRun,
   getMTRDestinations,
   getMTRSnapshot,
   getMTRSnapshots,
   listAllTargets,
+  queryErrorMessage,
 } from "@/lib/api";
 import { stampFull, useLocale, useT, type Translate } from "@/lib/i18n";
 import { countForm, mtrDict, type MTRKey } from "@/lib/i18n/dict/mtr";
@@ -133,6 +133,14 @@ export function deepLinkDestination(search: string): string | null {
 export function deepLinkSource(search: string): string | null {
   const raw = new URLSearchParams(search).get(SOURCE_PARAM);
   return raw ? raw : null;
+}
+
+/** writePairParams puts the picked pair in the address in the same shape a deep link reads back. */
+function writePairParams(pair: Pair): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set(SOURCE_PARAM, pair.source);
+  url.searchParams.set(DESTINATION_PARAM, pair.destination);
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 /**
@@ -256,10 +264,6 @@ function changeText(snapshots: PathSnapshot[], i: number, t: Translate<MTRKey>):
   });
 }
 
-function queryErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
-}
-
 /* ── shared chrome ──────────────────────────────────────────────────────── */
 
 /** PermissionCard is PAGES.md:126-129's pattern, the same component targets.tsx and target-card.tsx already use. */
@@ -378,7 +382,7 @@ function DestinationCard({
             )}
           />
           {/* The NAME wins the width fight, the same rule the source rows below
-              follow (QA scope 4, finding #5), and it wins it OUTRIGHT: the name
+              follow, and it wins it OUTRIGHT: the name
               does not shrink at all, so the counts are the first to give, and it
               truncates only when it alone is wider than the row (max-w-full).
               The zero-basis flex-1 it had before handed the name only what the
@@ -427,13 +431,12 @@ function DestinationCard({
                       "transition-colors duration-(--dur) ease-(--ease) hover:bg-accent",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       /* The source name is the row's primary content and reads in
-                         the foreground; only the counts beside it stay muted
-                         (M4-2 muted audit). */
+                         the foreground; only the counts beside it stay muted. */
                       active && "bg-accent font-medium",
                     )}
                   >
-                    {/* The NAME wins the width fight (QA scope 4, finding
-                        #5). The count used to be shrink-0, so in Russian —
+                    {/* The NAME wins the width fight. The count used to be
+                        shrink-0, so in Russian —
                         where "трассировок" is three times the width of
                         "traces" — it ate the row and the source collapsed
                         to «от qa-nod…», which names nothing. Now the name is
@@ -509,14 +512,18 @@ function DestinationsPane({
       const row = groups
         .find((g) => g.destination === linked)
         ?.sources.find((s) => s.sourceNode === linkedSource);
-      if (row) onSelect(row);
+      /* The pair is also written back into the URL, so a remount (a trip to the Runner and back)
+         reads it again; re-selecting the pair already shown would close its open path. */
+      if (row) {
+        if (selected?.source !== row.sourceNode || selected.destination !== row.destination) onSelect(row);
+      }
       /* A link whose pair path history has never seen: say so about THAT pair.
          The generic "pick a source" answered a question nobody asked — the
          reader arrived from a run detail that already told them there was no
          route, and clicked a link that then mentioned the pair nowhere. */
       else onLinkedPairMissing?.({ source: linkedSource, destination: linked });
     }
-  }, [groups, linked, linkedSource, size, turned, setPage, onSelect, onLinkedPairMissing]);
+  }, [groups, linked, linkedSource, size, turned, setPage, onSelect, onLinkedPairMissing, selected]);
 
   return (
     <Pane title={t("destinations.title")}>
@@ -535,9 +542,7 @@ function DestinationsPane({
       {/* The honest empty state: path history is a PROJECTION of MTR results
           the console ingested, so "nothing here" means "nobody has run one",
           not "the feature is broken" — and the place to run one is
-          Diagnostics. (Task 8 adds a Runner tab to this very page; until it
-          lands, sending the reader somewhere that exists beats naming a tab
-          that does not.) */}
+          Diagnostics. */}
       {query.isSuccess && groups.length === 0 ? (
         <EmptyNote>
           {/* Three keys, not one interpolation: the link sits INSIDE the
@@ -733,7 +738,7 @@ function HistoryPane({
         />
       ) : null}
 
-      {/* No "on the left" (QA round 4, finding #20): under ~700px the three
+      {/* No "on the left": under ~700px the three
           panes stack, and the destinations pane is ABOVE this one, not beside
           it — the copy was pointing at empty space. The neutral wording is
           true at every width. */}
@@ -758,8 +763,8 @@ function HistoryPane({
       ) : null}
 
       {/* Two, not one: "tick two paths to diff them" in front of a list with a
-          single row is an instruction the reader cannot follow (QA scope 4,
-          finding #13). The checkbox still renders on a lone row — a "Load
+          single row is an instruction the reader cannot follow. The checkbox
+          still renders on a lone row — a "Load
           older" away there may be a second. */}
       {snapshots.length >= 2 ? (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -1036,7 +1041,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   const external = destinationKind !== "node";
   /* Zero while the destination side cannot resolve: sources x destinations has
      no second factor yet, and "~10 pairs" for a run the server would refuse is
-     a number about nothing (QA scope 4, finding #9). */
+     a number about nothing. */
   const pairCount = incompleteDestination
     ? 0
     : external
@@ -1081,7 +1086,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
     } catch (err) {
       // problem+json is the SERVER's refusal, verbatim; only the network-level
       // fallback is the console's own sentence.
-      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("runner.submitFailed"));
+      setSubmitError(queryErrorMessage(err, t("runner.submitFailed")));
     }
     setSubmitting(false);
   }
@@ -1268,7 +1273,7 @@ export function MTRPage() {
   const { locale } = useLocale();
   const { at } = useTimeContext();
   const { me, can } = useAuth();
-  const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
+  const { available: dbAvailable, resolved: dbResolved, error: dbConfigError } = useDatabaseAvailable();
   const [pair, setPair] = useState<Pair | null>(null);
   const [snapshot, setSnapshot] = useState<PathSnapshot | null>(null);
   /* Set once, by a deep link whose pair path history does not hold: pane 2 then
@@ -1301,6 +1306,7 @@ export function MTRPage() {
     setTraceTotal(row.traceCount);
     setSnapshot(null);
     setCompare([]);
+    writePairParams(next);
   }, []);
 
   const onToggleCompare = useCallback((id: string) => setCompare((prev) => toggleCompare(prev, id)), []);
@@ -1320,6 +1326,14 @@ export function MTRPage() {
     );
   } else if (!can("mtr:read")) {
     body = <PermissionCard permission="mtr:read">{t("permission.body")}</PermissionCard>;
+  } else if (dbConfigError !== null) {
+    body = (
+      <Card role="status" className="p-6">
+        <p className="text-sm">
+          {t("config.failed", { error: queryErrorMessage(dbConfigError, t("config.failed.generic")) })}
+        </p>
+      </Card>
+    );
   } else if (!dbAvailable) {
     body = (
       <Card role="status" className="p-6">

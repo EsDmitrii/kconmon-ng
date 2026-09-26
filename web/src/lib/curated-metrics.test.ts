@@ -257,6 +257,23 @@ describe("toSeriesOption", () => {
     expect(xAxis.axisLabel?.hideOverlap).toBe(true);
   });
 
+  /* Labels are HH:mm, so a tick less than a minute from the next printed the same text twice:
+     MTR Path history right after a run spans about a minute and read "02:48 02:48 02:49 02:49". */
+  it("never prints the same clock twice on a window of a minute or two", async () => {
+    const { init } = await import("echarts");
+    const start = new Date(2026, 8, 20, 2, 48, 10);
+    for (const spanMs of [50_000, 90_000, 150_000]) {
+      const end = new Date(start.getTime() + spanMs);
+      const chart = init(null, null, { renderer: "svg", ssr: true, width: 1200, height: 240 });
+      chart.setOption(toSeriesOption(tcpP95, matrixResult, false, { start, end }));
+      const svg = chart.renderToSVGString();
+      chart.dispose();
+      const labels = [...svg.matchAll(/>(\d{2}:\d{2})</g)].map((m) => m[1]);
+      expect(labels.length, `span ${spanMs}ms`).toBeGreaterThan(0);
+      expect(new Set(labels).size, `span ${spanMs}ms: ${labels.join(" ")}`).toBe(labels.length);
+    }
+  });
+
   it("formats ratio-unit values as a percent on the y axis", () => {
     const udpLoss = CURATED_CHARTS.find((c) => c.id === "udp-loss")!;
     const option = toSeriesOption(udpLoss, matrixResult, false);
@@ -381,9 +398,14 @@ describe("legend elision (M3-6)", () => {
 describe("timeAxisLabel", () => {
   const local = (h: number, m: number, s = 0) => new Date(2026, 8, 6, h, m, s).getTime();
 
-  it("prints the clock as HH:mm, 24-hour, seconds trimmed", () => {
-    expect(timeAxisLabel(local(23, 52, 7), "en")).toBe("23:52");
+  it("prints a whole minute as HH:mm, 24-hour", () => {
+    expect(timeAxisLabel(local(23, 52), "en")).toBe("23:52");
     expect(timeAxisLabel(local(9, 5), "en")).toBe("09:05");
+  });
+
+  it("keeps the seconds of a tick between whole minutes, so two ticks in one minute differ", () => {
+    expect(timeAxisLabel(local(23, 52, 7), "en")).toBe("23:52:07");
+    expect(timeAxisLabel(local(2, 48, 30), "ru")).toBe("02:48:30");
   });
 
   it("adds the day on a second line where the day turns", () => {

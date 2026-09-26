@@ -4,6 +4,8 @@ import { DOCS_BASE_URL } from "@/components/page-help";
 import { DEFAULT_LOCALE, type Locale } from "@/lib/i18n";
 import { chromeDict, NAV_KEYS } from "@/lib/i18n/dict/chrome";
 import { NAV_DESC_KEYS, paletteDict, type PaletteKey } from "@/lib/i18n/dict/palette";
+import { incidentPermalink } from "@/lib/investigation-sources";
+import type { Incident } from "@/lib/types";
 import { NAV_ITEMS } from "@/nav";
 
 /** commands.ts — the command palette's REGISTRY and its SCORING. */
@@ -50,16 +52,17 @@ export interface CommandContext {
 }
 
 /** CommandGroup stays an ENGLISH UNION, because it is a type before it is a word: entries are declared with it. */
-export type CommandGroup = "Navigation" | "Actions" | "View";
+export type CommandGroup = "Navigation" | "Actions" | "View" | "Incidents";
 
 /** GROUP_ORDER is the order the palette renders its section headers in. */
-export const GROUP_ORDER: CommandGroup[] = ["Navigation", "Actions", "View"];
+export const GROUP_ORDER: CommandGroup[] = ["Navigation", "Actions", "View", "Incidents"];
 
 /** GROUP_KEYS turns a group into the dictionary key that names it on screen. */
 export const GROUP_KEYS: Readonly<Record<CommandGroup, PaletteKey>> = {
   Navigation: "group.Navigation",
   Actions: "group.Actions",
   View: "group.View",
+  Incidents: "group.Incidents",
 };
 
 export interface Command {
@@ -350,11 +353,34 @@ function viewCommands(ctx: CommandContext): Command[] {
 }
 
 /**
- * buildRegistry assembles the palette's whole vocabulary for one subject in one console state;
- * disabling (DISABLE=time) is deliberately left to isCommandDisabled.
+ * incidentCommands turns saved incidents into rows that open their permalinks. The title is the
+ * operator's own text, the same in both languages; the scope and the word "incident" are keywords.
  */
-export function buildRegistry(ctx: CommandContext): Command[] {
-  return [...navCommands(), ...actionCommands(), ...viewCommands(ctx)].filter(
+function incidentCommands(incidents: readonly Incident[]): Command[] {
+  const out: Command[] = [];
+  for (const incident of incidents) {
+    if (typeof incident?.id !== "string" || incident.id === "") continue;
+    if (typeof incident.title !== "string" || incident.title.trim() === "") continue;
+    const scope = typeof incident.scope === "string" ? incident.scope : "";
+    out.push({
+      id: `incident:${incident.id}`,
+      title: incident.title,
+      group: "Incidents",
+      keywords: [...(scope ? [scope] : []), ...kw("incident.kw")],
+      permission: "incidents:read",
+      perform: (ctx) => ctx.navigate(incidentPermalink(incident.id)),
+    });
+  }
+  return out;
+}
+
+/**
+ * buildRegistry assembles the palette's whole vocabulary for one subject in one console state;
+ * disabling (DISABLE=time) is deliberately left to isCommandDisabled. `incidents` are the saved
+ * incidents the palette has read, if any.
+ */
+export function buildRegistry(ctx: CommandContext, incidents: readonly Incident[] = []): Command[] {
+  return [...navCommands(), ...actionCommands(), ...viewCommands(ctx), ...incidentCommands(incidents)].filter(
     (c) => (c.permission === undefined || ctx.can(c.permission)) && (c.visibleWhen?.(ctx) ?? true),
   );
 }

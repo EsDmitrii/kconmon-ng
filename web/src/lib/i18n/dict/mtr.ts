@@ -16,7 +16,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *   - node names, destination names, target names, path hashes (`shortHash`),
  *     hop addresses, and the ad-hoc address placeholder.
  *   - permission strings (`mtr:read`, `runs:create`, `targets:read`), config
- *     keys (`console.database.mode`) and endpoints (`POST /api/v1/runs`).
+ *     keys (`database.dsnFile`) and endpoints (`POST /api/v1/runs`).
  *   - every problem+json detail a failed read or a refused run carries.
  *   - the duration tokens 1m … 24h; only "Instant" is a word, and it lives in
  *     dict/diagnostics.ts because RUN_DURATIONS does.
@@ -55,7 +55,11 @@ const en = {
     "Path history is telemetry, and every built-in role holds this permission — viewer included, which is the role an " +
     "anonymous session gets. Seeing this card means the role in use was defined by hand without it; ask an admin to " +
     "add mtr:read to it.",
-  "database.gate": "Path history is projected into the database — set console.database.mode",
+  "database.gate": "Path history is projected into the database — set database.dsnFile (Helm: database.existingSecret)",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so path history was not requested: {error}",
+  "config.failed.generic": "the request failed",
 
   "view.aria": "View",
   "view.explorer": "Explorer",
@@ -222,11 +226,11 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "title": "Маршруты · MTR",
   "description": "Все различные маршруты, по которым ходили трассировки флота, и когда каждый из них менялся.",
   "help.body":
-    "Два вида: «Обзор» листает все различные маршруты, по которым ходили трассировки флота, «Запуск» стартует новые. " +
+    "Два вида: «Обозреватель» листает все различные маршруты, по которым ходили трассировки флота, «Запуск» стартует новые. " +
     "Выберите назначение, под ним источник — история путей покажет маршруты этой пары во времени со сводками изменений по хопам, а два отмеченных маршрута сравниваются бок о бок. " +
     "История путей — проекция из базы, поэтому странице нужны база данных консоли и право mtr:read, которое есть у каждой встроенной роли.",
   "description.at":
-    "Все различные маршруты, по которым ходили трассировки флота. Обзор ниже не обрезан по {at} — он живой.",
+    "Все различные маршруты, по которым ходили трассировки флота. Обозреватель ниже не обрезан по {at} — он живой.",
   "explorer.atNote":
     "У GET /api/v1/mtr/destinations и у чтений истории путей за этими тремя панелями нет параметра времени, поэтому " +
     "ниже показаны маршруты, записанные на сейчас, включая те, что трассировали позже выбранного момента.",
@@ -238,10 +242,12 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
     "История путей относится к телеметрии, и право на неё есть у любой встроенной роли, включая viewer, который " +
     "достаётся анонимной сессии. Раз вы видите эту карточку, роль собрали руками и права в ней не оказалось. " +
     "Попросите админа добавить mtr:read.",
-  "database.gate": "История путей проецируется в базу, задайте console.database.mode",
+  "database.gate": "История путей проецируется в базу, задайте database.dsnFile (Helm: database.existingSecret)",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому история путей не запрашивалась: {error}",
+  "config.failed.generic": "запрос не выполнен",
 
   "view.aria": "Вид",
-  "view.explorer": "Обзор",
+  "view.explorer": "Обозреватель",
   "view.runner": "Запуск",
 
   "destinations.title": "Назначения",
@@ -342,7 +348,7 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "runner.submitFailed": "Не удалось запустить трассировку",
   "runner.started.before": "Запуск начат,",
   "runner.started.link": "посмотреть можно здесь",
-  "runner.started.after": ". Его путь попадёт в историю на вкладке «Обзор», когда запуск закончится.",
+  "runner.started.after": ". Его путь попадёт в историю на вкладке «Обозреватель», когда запуск закончится.",
 });
 
 /**

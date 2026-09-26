@@ -4,7 +4,8 @@ import { EChart } from "@/components/echart";
 import { fmtTime, shortHash } from "@/components/mtr-hop-table";
 import { useTheme } from "@/components/theme-provider";
 import { useTopology } from "@/hooks/use-topology";
-import { getConfig, promqlQueryRange } from "@/lib/api";
+import { useConsoleConfig } from "@/hooks/use-capabilities";
+import { promqlQueryRange } from "@/lib/api";
 import { type CuratedChart, toSeriesOption } from "@/lib/curated-metrics";
 import { useLocale, useT } from "@/lib/i18n";
 import { PROMQL_MAX_RANGE_MS } from "@/lib/investigation-sources";
@@ -73,10 +74,7 @@ function msOf(ts: string): number {
   return Number.isNaN(ms) ? Date.now() : ms;
 }
 
-/**
- * PathChangesTimeline is MTR_EXPLORER.md's "'path changes' timeline overlaid with the pair's loss
- * series from Prometheus".
- */
+/** PathChangesTimeline overlays the pair's path changes on its loss series from Prometheus. */
 export function PathChangesTimeline({
   source,
   destination,
@@ -96,7 +94,7 @@ export function PathChangesTimeline({
   const { locale } = useLocale();
   const { theme } = useTheme();
   const topo = useTopology();
-  const configQuery = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const configQuery = useConsoleConfig();
 
   const promResolved = configQuery.data !== undefined;
   const promConfigured = configQuery.data?.prometheus?.configured ?? false;
@@ -110,10 +108,9 @@ export function PathChangesTimeline({
      Snapshots arrive ordered by last_seen (the store's ORDER BY last_seen DESC,
      id DESC), which says nothing about first_seen: a route the pair keeps
      reverting to has both the oldest first_seen and the newest last_seen, so it
-     sorts FIRST. Reading the last row opened the window at a route that began
-     yesterday while another began a week ago, and every marker then collapsed
-     onto the left edge (owner report: the strip's hairline sits outside the
-     plot). */
+     sorts FIRST. Reading the last row would open the window at a route that
+     began yesterday while another began a week ago, and every marker would
+     collapse onto the left edge, outside the plot. */
   const oldestFirstSeen = useMemo(() => {
     let oldest = "";
     for (const s of snapshots) {
@@ -199,8 +196,8 @@ export function PathChangesTimeline({
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
   // throwing (lib/api.ts's `handle`), so a query-level failure shows up here.
   /* Both failure shapes, not just Prometheus's own envelope: the proxy answers
-     problem+json for a refused range and lib/api.ts THROWS on that, so a rejected
-     request used to leave the strip silently chartless with nothing said. */
+     problem+json for a refused range and lib/api.ts THROWS on that, and a rejected
+     request must not leave the strip silently chartless with nothing said. */
   const queryError =
     data?.status === "error"
       ? (data.error ?? t("changes.queryFailed"))
@@ -250,12 +247,11 @@ export function PathChangesTimeline({
             to answer.
 
             pointer-events-auto on the marker itself, inside a
-            pointer-events-none track (QA round 4, finding #8): the track spans
-            the full width and would otherwise swallow every hover meant for
-            the chart underneath, while the 1px marker it exists to position
-            could not be hovered at all — so its title, the only place the
-            full path hash and the first-seen stamp are written, was
-            unreachable. The hit area is padded out to 9px around the hairline
+            pointer-events-none track: the track spans the full width and would
+            otherwise swallow every hover meant for the chart underneath, while
+            the 1px marker it exists to position could not be hovered at all —
+            and its title is the only place the full path hash and the
+            first-seen stamp are written. The hit area is padded out to 9px around the hairline
             (px-1) because a 1px pointer target is not one.
 
             The track itself sits on the CHART'S PLOT RECTANGLE (PLOT_GRID) —
@@ -270,10 +266,9 @@ export function PathChangesTimeline({
           {placed.map(({ snap: s, pct, padPct }) => {
             return (
               <li key={s.id} className="absolute top-0 h-full -translate-x-1/2" style={{ left: `${pct}%` }}>
-                {/* A BUTTON, because the reader tried to click one and nothing
-                    happened (owner report). It selects the same route the list
-                    row below selects, so the strip is a way INTO the history
-                    rather than a picture of it. */}
+                {/* A BUTTON: it selects the same route the list row below
+                    selects, so the strip is a way INTO the history rather than
+                    a picture of it. */}
                 <button
                   type="button"
                   aria-pressed={s.id === selectedId}

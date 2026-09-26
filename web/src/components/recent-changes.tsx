@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
-import { ApiError, getEvents } from "@/lib/api";
+import { getEvents, queryErrorMessage } from "@/lib/api";
 import { localeTag, stampFull, useLocale, useT } from "@/lib/i18n";
 import { recentChangesDict } from "@/lib/i18n/dict/recent-changes";
 import { useTimeContext } from "@/lib/timemachine";
@@ -17,7 +17,7 @@ import { EmptyState } from "./ui/empty-state";
 import { scrollRegionClass } from "./ui/scroll-region";
 import { Skeleton } from "./ui/skeleton";
 
-/** GET /api/v1/events page size for the rail — task-25-brief.md's own number. */
+/** GET /api/v1/events page size for the rail. */
 export const RECENT_CHANGES_LIMIT = 50;
 
 // A cap on the merged (history + live) ring.
@@ -54,11 +54,8 @@ function isKnownSeverity(v: string): v is LiveEventSeverity {
   return v === "info" || v === "warn" || v === "error";
 }
 
-/* fmtTime used to be a bare toLocaleTimeString here: 3:12 PM in this rail
-   against the Live feed's 15:12 for the same event, and an operator flipping
-   between the two had to translate one into the other (QA scope 2, finding #9).
-   The shared idiom is lib/utils' fmtEventStamp — hour12:false, plus the day for
-   a row that is not from today (#10). */
+/* Stamps go through lib/utils' fmtEventStamp, the Live feed's own idiom (hour12:false, plus the day
+   for a row that is not from today), so one event reads the same in both places. */
 
 /** mergeCapped is pushEvents plus RECENT_CHANGES_CAP, preserving pushEvents'
  * "return prev unchanged when nothing new arrived" identity so an unrelated
@@ -75,7 +72,7 @@ export type RecentChangesProps =
   | { scope?: undefined; scopeNode: string };
 
 export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps) {
-  const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
+  const { available: dbAvailable, resolved: dbResolved, error: configError } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const t = useT(recentChangesDict);
   const { locale } = useLocale();
@@ -123,11 +120,7 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
     return () => off();
   }, [scope, scopeNode, filterValue, at]);
 
-  const historyError = historyQuery.isError
-    ? historyQuery.error instanceof ApiError
-      ? (historyQuery.error.problem.detail ?? historyQuery.error.problem.title)
-      : t("error.fallback")
-    : null;
+  const historyError = historyQuery.isError ? queryErrorMessage(historyQuery.error, t("error.fallback")) : null;
 
   // "Loading" spans two waits, not one: whether this replica even has a database (dbResolved) comes
   // back before the events page itself does.
@@ -153,7 +146,11 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
 
         {/* Degraded, not broken: no database means no scrollback, but the
             live half of this rail keeps working off the socket regardless. */}
-        {dbResolved && !dbAvailable ? (
+        {configError !== null ? (
+          <p role="status" className="border-b border-border px-4 py-2 text-xs leading-relaxed text-muted-foreground">
+            {t("config.failed", { error: queryErrorMessage(configError, t("config.failed.generic")) })}
+          </p>
+        ) : dbResolved && !dbAvailable ? (
           <p role="status" className="border-b border-border px-4 py-2 text-xs leading-relaxed text-muted-foreground">
             {t("db.note")}
           </p>

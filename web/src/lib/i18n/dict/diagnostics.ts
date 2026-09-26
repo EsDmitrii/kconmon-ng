@@ -17,7 +17,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *   - run ids, node names, target names, the ad-hoc address, and the address
  *     placeholder ("10.0.0.1 or https://example.test/health") — a literal an
  *     operator copies, not prose.
- *   - `console.database.mode`, `runs:create`, `GET /api/v1/runs`: config keys,
+ *   - `database.dsnFile`, `runs:create`, `GET /api/v1/runs`: config keys,
  *     permission strings, endpoints.
  *   - every problem+json detail from a rejected run or definition, including
  *     ADHOC_ADDRESS_ERROR (lib/utils.ts) and the phrase table in
@@ -62,6 +62,9 @@ const en = {
   "duration.caption.interval.mtr":
     "An MTR trace takes up to {budget} per pair, so a {label} run traces every {interval} — " +
     "about {samples} traces per pair. The run stays running, and cancellable, until it finishes.",
+  "duration.caption.interval.pmtu":
+    "A PMTU probe can take up to {budget} per pair, so a {label} run probes each pair every {interval} — " +
+    "about {samples} samples per pair. The run stays running, and cancellable, until it finishes.",
 
   /* ── the cadence control ───────────────────────────────────────────────────
      "Auto" posts nothing and is exactly the behaviour that existed before this
@@ -94,26 +97,31 @@ const en = {
   /* ── the external destination, per check type (QA scope 4, finding #10) ───
      One label and one placeholder used to serve all six types. These follow
      what internal/agent/tasks.go actually does with the string: tcp defaults a
-     missing port to 80, udp has no default (0 is dialled), icmp and mtr have
-     no ports at all, and dns and http are not in externalCapableChecks. The
-     port numbers and the type names are syntax and stand in both languages. */
+     missing port to 80, icmp and mtr have no ports at all, and udp, dns and
+     http are not in externalCapableChecks. The port numbers and the type names
+     are syntax and stand in both languages. */
   "adhoc.label.hostPort": "Destination host (port optional)",
-  "adhoc.label.hostPortRequired": "Destination host:port",
   "adhoc.label.hostOnly": "Destination host",
   "adhoc.label.unsupported": "Destination address",
   "adhoc.hint.hostPort": "A host, an IP, or host:port. Without a port the agent dials 80.",
-  "adhoc.hint.hostPortRequired": "A host or IP with a port — udp has no default, so an address without one dials nothing.",
   "adhoc.hint.hostOnly": "A host or an IP. There are no ports here; one written in is ignored.",
   "adhoc.hint.unsupported":
     "A one-off RUN cannot probe an external destination with this check type. Saving it as a definition below can — " +
     "that is the continuous external checker, which does speak dns and http.",
   "adhoc.mismatch.unsupported":
-    "Start run would be refused: an agent answers a one-off external probe for tcp, udp, icmp and mtr only. " +
+    "Start run would be refused: an agent answers a one-off external probe for tcp, icmp and mtr only. " +
     "Pick one of those, send the run at nodes, or save this as a definition instead.",
+  "adhoc.hint.pmtu": "pmtu speaks the kconmon echo protocol, which no external host answers.",
+  "adhoc.mismatch.pmtu":
+    "Start run would be refused: pmtu probes kconmon nodes only, as a run or as a saved check. Pick Nodes as the destination.",
+  "adhoc.hint.udp":
+    "udp counts a packet as answered only when the far end echoes its sequence number back, and only a kconmon agent does.",
+  "adhoc.mismatch.udp":
+    "Start run would be refused: udp probes kconmon nodes only, as a run or as a saved check, since any other host reads as 100% loss. " +
+    "Pick Nodes as the destination.",
   "adhoc.mismatch.url":
     "This check type resolves and dials the string itself, so a scheme and a path are never read — drop them and " +
     "leave the host, with a port if you need one.",
-  "adhoc.mismatch.port": "udp has no default port, so this address needs one written in: host:port.",
 
   /* A RESET, and it says so (QA round 4, #15): the glyph alone read as "swap
      the two columns" or "run every pair". */
@@ -163,7 +171,11 @@ const en = {
 
   /* ── run history ───────────────────────────────────────────────────────── */
   "history.title": "Run history",
-  "history.notPersisted": "History is not persisted — set console.database.mode",
+  "history.notPersisted": "History is not persisted — set database.dsnFile (Helm: database.existingSecret)",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so whether history is kept is unknown: {error}",
+  "config.failed.generic": "the request failed",
   /* The bound on the Time Machine's cut, stated rather than implied: GET
      /api/v1/runs has no `to` parameter, so the cut happens in the browser over
      the pages already loaded. */
@@ -171,6 +183,7 @@ const en = {
     "GET /api/v1/runs has no time filter, so this cut to the viewed instant happens in the browser over the " +
     "pages loaded here — a run older than them is not reached by paging backwards from this list.",
   "history.unavailable": "Run history is unavailable",
+  "history.retry": "Retry",
   /* The two history filters (QA scope 4, finding #11). They ride the server's
      own ?type=&status=, so the options are the store's enum and stand
      untranslated — only the "everything" row and the control names are words. */
@@ -178,6 +191,14 @@ const en = {
   "history.filter.type.all": "All types",
   "history.filter.status.aria": "Filter runs by status",
   "history.filter.status.all": "All statuses",
+  /* A run's status, on its badge and in the filter; the wire value stays in ?status=. */
+  "status.pending": "pending",
+  "status.running": "running",
+  "status.succeeded": "succeeded",
+  "status.partial": "partial",
+  "status.failed": "failed",
+  "status.cancelled": "cancelled",
+  "status.timeout": "timeout",
   "history.empty.title": "No runs yet",
   "history.empty.body": "Runs started from the form above (or by another operator) show up here.",
   /* A filter that matched nothing is not an empty history, and the form above
@@ -196,6 +217,7 @@ const en = {
   "history.subject": "runs",
   "history.loadOlder": "Load older",
   "history.loadingOlder": "Loading older…",
+  "history.exhausted": "No older runs.",
 
   /* ── no runs:create ────────────────────────────────────────────────────── */
   "gate.title": "Starting a run requires the runs:create permission",
@@ -235,6 +257,10 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
     "Трассировка MTR занимает до {budget} на пару, поэтому за {label} каждая пара трассируется " +
     "раз в {interval}, это примерно {samples} трассировок на пару. " +
     "Запуск идёт и остаётся отменяемым, пока не закончится.",
+  "duration.caption.interval.pmtu":
+    "Проба PMTU может занять до {budget} на пару, поэтому за {label} каждая пара зондируется " +
+    "раз в {interval}, это примерно {samples} проб на пару. " +
+    "Запуск идёт и остаётся отменяемым, пока не закончится.",
 
   "form.sampleInterval": "Период опроса",
   "form.sampleInterval.aria": "Период опроса",
@@ -257,22 +283,27 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "form.destinationTarget.placeholder": "выберите цель…",
   "form.destinationAddress": "Адрес назначения",
   "adhoc.label.hostPort": "Хост назначения (порт необязателен)",
-  "adhoc.label.hostPortRequired": "Хост назначения и порт",
   "adhoc.label.hostOnly": "Хост назначения",
   "adhoc.label.unsupported": "Адрес назначения",
   "adhoc.hint.hostPort": "Хост, IP или host:port. Без порта агент пойдёт на 80.",
-  "adhoc.hint.hostPortRequired": "Хост или IP с портом: у udp дефолтного порта нет, без него стучаться некуда.",
   "adhoc.hint.hostOnly": "Хост или IP. Портов тут нет, написанный порт просто проигнорируют.",
   "adhoc.hint.unsupported":
     "Разовый запуск по внешнему адресу с таким типом проверки не пойдёт. А вот определением ниже сохранить можно: " +
     "постоянные внешние проверки dns и http умеют.",
   "adhoc.mismatch.unsupported":
-    "«Запустить» откажет: разовую внешнюю проверку агент делает только для tcp, udp, icmp и mtr. " +
+    "«Запустить» откажет: разовую внешнюю проверку агент делает только для tcp, icmp и mtr. " +
     "Возьмите один из них, отправьте запуск по узлам или сохраните определение.",
+  "adhoc.hint.pmtu": "pmtu говорит на эхо-протоколе kconmon, внешний хост на него не ответит.",
+  "adhoc.mismatch.pmtu":
+    "«Запустить» откажет: pmtu проверяет только узлы kconmon, и разовым запуском, и сохранённой проверкой. Выберите узлы как назначение.",
+  "adhoc.hint.udp":
+    "udp засчитывает ответ, только если дальняя сторона вернёт номер пакета, а так умеет только агент kconmon.",
+  "adhoc.mismatch.udp":
+    "«Запустить» откажет: udp проверяет только узлы kconmon, и разовым запуском, и сохранённой проверкой, любой другой хост даст 100% потерь. " +
+    "Выберите узлы как назначение.",
   "adhoc.mismatch.url":
     "Этот тип проверки резолвит и подключается ровно по строке, схему и путь никто не читает: уберите их, оставьте " +
     "хост и при необходимости порт.",
-  "adhoc.mismatch.port": "У udp дефолтного порта нет, поэтому его надо дописать: host:port.",
 
   "form.resetPickers": "Сбросить оба списка на все узлы",
   "form.resetPickers.label": "Все ↔ все",
@@ -304,15 +335,25 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "definition.saved": "Определение «{name}» сохранено",
 
   "history.title": "История запусков",
-  "history.notPersisted": "История не сохраняется, задайте console.database.mode",
+  "history.notPersisted": "История не сохраняется, задайте database.dsnFile (Helm: database.existingSecret)",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому неизвестно, сохраняется ли история: {error}",
+  "config.failed.generic": "запрос не выполнен",
   "history.atNote":
     "У GET /api/v1/runs нет фильтра по времени, поэтому обрезка по выбранному моменту делается в браузере, по " +
     "уже загруженным страницам. Запуск старше них листанием назад отсюда не достать.",
   "history.unavailable": "История запусков недоступна",
+  "history.retry": "Повторить",
   "history.filter.type.aria": "Фильтр запусков по типу проверки",
   "history.filter.type.all": "Все типы",
   "history.filter.status.aria": "Фильтр запусков по статусу",
   "history.filter.status.all": "Все статусы",
+  "status.pending": "в очереди",
+  "status.running": "выполняется",
+  "status.succeeded": "успешно",
+  "status.partial": "частично",
+  "status.failed": "сбой",
+  "status.cancelled": "отменён",
+  "status.timeout": "таймаут",
   "history.empty.title": "Запусков пока нет",
   "history.empty.body": "Запуски из формы выше (или запущенные другим оператором) появятся здесь.",
   "history.emptyFiltered.title": "Под эти фильтры ничего не подходит",
@@ -325,6 +366,7 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "history.subject": "Запуски",
   "history.loadOlder": "Загрузить старые",
   "history.loadingOlder": "Загружаем старые…",
+  "history.exhausted": "Более старых запусков нет.",
 
   "gate.title": "Для запуска нужно право runs:create",
   "gate.body": "История запусков ниже вам всё равно доступна. Попросите оператора запустить проверку.",

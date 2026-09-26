@@ -49,7 +49,7 @@ import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/
  *   - `checkType` and `sourceSelection` on a definition row, for the same
  *     reason they stay on pages/targets.tsx.
  *   - Metric names, PromQL, `checkers.external.enabled`,
- *     `console.database.mode`, `console.prometheus.address`, and every
+ *     `database.dsnFile`, `console.prometheus.address`, and every
  *     `GET /api/v1/...` in a limitation sentence.
  *   - Every server message: topology/matrix errors, problem+json details, a
  *     schedule's own lastError.
@@ -90,9 +90,12 @@ const en = {
   /* ── node card ─────────────────────────────────────────────────────────── */
   "node.title": "Node",
   "node.loading": "Loading node…",
-  "node.notFound.withName": "No node name in the URL for “{name}”.",
   "node.notFound.bare": "No node name in the URL.",
   "node.notFound.body": "This link is missing a node name.",
+  "node.notFound.unknown": "No such node",
+  "node.notFound.unknownBody":
+    "A node card is a view of a node the fleet actually reports. The name may be a typo, or the node may have " +
+    "left the fleet since this link was made.",
   "node.zone": "Zone {zone}",
   "node.stateAsOf": "{zone}state as of {at}",
   "node.topologyUnavailable": "Topology is unavailable",
@@ -167,11 +170,13 @@ const en = {
   "pair.description": "Pair connectivity (TCP matrix)",
   "pair.pmtu.title": "Path MTU",
   "pair.pmtu.none": "No path MTU measured for this pair.",
+  "pair.pmtu.failed": "The path MTU could not be read: {error}",
   "pair.pmtu.bytes": "{mtu} bytes",
   "pair.pmtu.bytesOf": "{mtu} of {probe} bytes",
   "pair.pmtu.full": "Full size",
   "pair.pmtu.reduced": "Reduced",
   "pair.pmtu.blackhole": "Black hole",
+  "pair.pmtu.recovering": "Recovering",
   "pair.notFound.bare": "No pair in the URL.",
   "pair.notFound.body": "This link is missing a source and destination.",
   "pair.matrixUnavailable": "Matrix is unavailable",
@@ -179,6 +184,10 @@ const en = {
   /* Named endpoints, so an operator can see WHICH half of the URL is the typo. */
   "pair.notFound.oneUnknown": "This fleet has no node called “{name}”.",
   "pair.notFound.bothUnknown": "This fleet has no node called “{a}” and none called “{b}”.",
+  /* The body follows the description: oneUnknownBody under oneUnknown, unknownBody under bothUnknown. A
+     plural body under one unknown name read as if the valid node had gone too. */
+  "pair.notFound.oneUnknownBody":
+    "A pair card is a view of two nodes the fleet actually reports. That name may be a typo, or the node may have left the fleet since this link was made; neither the topology nor the matrix knows it now.",
   "pair.notFound.unknownBody":
     "A pair card is a view of two nodes the fleet actually reports. The names may be a typo, or the nodes may have left the fleet since this link was made — the topology and the matrix agree that neither answers to them now.",
   "pair.notFound.back": "Back to Matrix",
@@ -215,7 +224,7 @@ const en = {
     "An unknown id and a malformed one look the same from here — both answer 404. It may have been deleted, or " +
     "the id may be a typo.",
   "target.notFound.unknownBody": "A target card needs an id: /targets/{id}.",
-  "target.notFound.back": "Back to Targets",
+  "target.notFound.back": "Back to Scheduled checks",
   "target.description": "External probe target",
   "target.descriptionAt": "External probe target — state as of {at}",
   "target.unavailable": "This target is unavailable",
@@ -225,7 +234,11 @@ const en = {
     "is granted to the operator and admin roles, and deliberately not to viewer — which is the role an anonymous " +
     "session gets. Sign in with an account that holds it.",
   "target.gate.noDatabase":
-    "Targets, definitions and schedules are stored in the database — set console.database.mode",
+    "Targets, definitions and schedules are stored in the database — set database.dsnFile (Helm: database.existingSecret)",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "target.config.failed": "Could not read the console configuration, so this target was not requested: {error}",
+  "target.config.failed.generic": "the request failed",
   "target.checks.gate":
     "The header above is everything targets:read alone can show. The definitions probing this target, and their " +
     "cadence, are read with checks:read — schedules ride on the same permission, since a cadence tells you nothing " +
@@ -321,9 +334,12 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
 
   "node.title": "Узел",
   "node.loading": "Загружаем узел…",
-  "node.notFound.withName": "В URL нет имени узла для «{name}».",
   "node.notFound.bare": "В URL нет имени узла.",
   "node.notFound.body": "В этой ссылке не хватает имени узла.",
+  "node.notFound.unknown": "Такого узла нет",
+  "node.notFound.unknownBody":
+    "Карточка узла показывает узел, о котором флот действительно сообщает. Имя может быть опечаткой, или узел " +
+    "покинул флот после того, как появилась ссылка.",
   "node.zone": "Зона {zone}",
   "node.stateAsOf": "{zone}состояние на {at}",
   "node.topologyUnavailable": "Топология недоступна",
@@ -383,17 +399,21 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "pair.description": "Связность пары (матрица TCP)",
   "pair.pmtu.title": "MTU пути",
   "pair.pmtu.none": "Для этой пары MTU пути не измерялся.",
+  "pair.pmtu.failed": "Не удалось прочитать MTU пути: {error}",
   "pair.pmtu.bytes": "{mtu} байт",
   "pair.pmtu.bytesOf": "{mtu} из {probe} байт",
   "pair.pmtu.full": "Полный размер",
   "pair.pmtu.reduced": "Уменьшен",
   "pair.pmtu.blackhole": "Чёрная дыра",
+  "pair.pmtu.recovering": "После сбоя",
   "pair.notFound.bare": "В URL нет пары.",
   "pair.notFound.body": "В этой ссылке не хватает источника и назначения.",
   "pair.matrixUnavailable": "Матрица недоступна",
   "pair.notFound.unknownEndpoints": "Такой пары нет",
   "pair.notFound.oneUnknown": "Узла «{name}» во флоте нет.",
   "pair.notFound.bothUnknown": "Ни узла «{a}», ни узла «{b}» во флоте нет.",
+  "pair.notFound.oneUnknownBody":
+    "Карточка пары показывает два узла, о которых флот действительно сообщает. Возможно, в имени опечатка, а возможно, узел успел уйти из флота с тех пор, как сделали эту ссылку: сейчас ни топология, ни матрица его не знают.",
   "pair.notFound.unknownBody":
     "Карточка пары показывает два узла, о которых флот действительно сообщает. Возможно, в именах опечатка, а возможно, узлы успели уйти из флота с тех пор, как сделали эту ссылку: сейчас ни топология, ни матрица их не знают.",
   "pair.notFound.back": "Назад к матрице",
@@ -428,7 +448,7 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
     "Неизвестный идентификатор и битый отсюда выглядят одинаково: на оба приходит 404. Может, цель удалили, а " +
     "может, в идентификаторе опечатка.",
   "target.notFound.unknownBody": "Карточке цели нужен идентификатор: /targets/{id}.",
-  "target.notFound.back": "Назад к целям",
+  "target.notFound.back": "Назад к плановым проверкам",
   "target.description": "Внешняя цель зондирования",
   "target.descriptionAt": "Внешняя цель зондирования, состояние на {at}",
   "target.unavailable": "Эта цель недоступна",
@@ -437,7 +457,9 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
     "Внешние цели, их определения проверок и расписания относятся к конфигурации, а не к телеметрии. Читать их " +
     "могут operator и admin, а viewer намеренно не может, и именно viewer достаётся анонимной сессии. Войдите " +
     "под учётной записью с нужной ролью.",
-  "target.gate.noDatabase": "Цели, определения и расписания хранятся в базе, задайте console.database.mode",
+  "target.gate.noDatabase": "Цели, определения и расписания хранятся в базе, задайте database.dsnFile (Helm: database.existingSecret)",
+  "target.config.failed": "Не удалось прочитать конфигурацию консоли, поэтому цель не запрашивалась: {error}",
+  "target.config.failed.generic": "запрос не выполнен",
   "target.checks.gate":
     "Одно только targets:read даёт ровно то, что в заголовке выше. Определения, которые зондируют эту цель, и их " +
     "периодичность читаются по checks:read. Расписания идут тем же правом: периодичность не рассказывает ничего " +

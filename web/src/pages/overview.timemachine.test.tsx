@@ -58,6 +58,10 @@ interface Options {
    *  engaged matrix's only source (lib/matrix-promql.ts). */
   promqlResponse?: () => Response;
   incidents?: unknown[];
+  /** Every incidents page names a next one, so an engaged scan runs into its page cap. */
+  incidentsEndless?: boolean;
+  /** Replaces the 200 GET /api/v1/config would answer with. */
+  configResponse?: () => Response;
   events?: unknown[];
   /** false renders the page live, for the side-by-side comparisons. */
   engaged?: boolean;
@@ -69,6 +73,8 @@ function renderOverview(opts: Options = {}) {
     topologyResponse,
     promqlResponse,
     incidents = [],
+    incidentsEndless = false,
+    configResponse,
     events = [],
     engaged = true,
   } = opts;
@@ -77,7 +83,7 @@ function renderOverview(opts: Options = {}) {
     const href = String(url);
     urls.push(href);
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
-    if (href.includes("/api/v1/config")) return Promise.resolve(json(CONFIG));
+    if (href.includes("/api/v1/config")) return Promise.resolve(configResponse ? configResponse() : json(CONFIG));
     if (href.includes("/api/v1/topology")) {
       return Promise.resolve(
         topologyResponse
@@ -88,7 +94,9 @@ function renderOverview(opts: Options = {}) {
     if (href.startsWith("/api/v1/promql")) {
       return Promise.resolve(promqlResponse ? promqlResponse() : json(vector([{ src: "a", dst: "b", value: "0.2" }])));
     }
-    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
+    if (href.startsWith("/api/v1/incidents")) {
+      return Promise.resolve(json({ incidents, nextCursor: incidentsEndless ? `c${urls.length}` : "" }));
+    }
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events, nextCursor: "" }));
     if (href.startsWith("/api/v1/alerts")) return Promise.resolve(json({ alerts: [], promConfigured: true }));
     return Promise.resolve(json({}));
@@ -177,16 +185,17 @@ describe("OverviewPage engaged — Recent events", () => {
 
 describe("OverviewPage engaged — Open incidents", () => {
   /*
-   * The store CAN express "ongoing at t": ListIncidents' from/to bound the window an incident's OWN
-   * RANGE must overlap (from_at < to AND coalesce(to_at,'infinity') >= from).
+   * ListIncidents' from/to match the window an incident was saved with, and Investigate saves a
+   * window that ends at the save, so they dropped every incident still open after it. "Open at t" is
+   * the lifecycle (created_at <= t < resolved_at), which the page filters while it scans.
    */
-  it("asks for the incidents whose range covers t, not the ones open now", async () => {
+  it("asks for neither the ones open now nor a window around t", async () => {
     const { urls } = renderOverview();
     await waitFor(() => expect(urls.some((u) => u.startsWith("/api/v1/incidents"))).toBe(true));
 
     const call = new URLSearchParams((urls.find((u) => u.startsWith("/api/v1/incidents")) ?? "").split("?")[1] ?? "");
-    expect(call.get("from")).toBe(new Date(AT).toISOString());
-    expect(call.get("to")).toBe(new Date(Date.parse(AT) + 1000).toISOString());
+    expect(call.get("from")).toBeNull();
+    expect(call.get("to")).toBeNull();
     expect(call.get("status")).toBeNull();
   });
 
@@ -197,6 +206,33 @@ describe("OverviewPage engaged — Open incidents", () => {
     const call = new URLSearchParams((urls.find((u) => u.startsWith("/api/v1/incidents")) ?? "").split("?")[1] ?? "");
     expect(call.get("status")).toBe("open");
     expect(call.get("from")).toBeNull();
+  });
+});
+
+describe("OverviewPage engaged — an incident scan that hits its page cap", () => {
+  it("says an older incident open at t may be missing", async () => {
+    renderOverview({ incidentsEndless: true });
+    const panel = await screen.findByTestId("open-incidents-panel");
+    expect(await within(panel).findByText(/The scan stopped at its page limit/)).toBeInTheDocument();
+  });
+
+  it("says nothing of a cap while live, where no scan runs", async () => {
+    renderOverview({ engaged: false, incidentsEndless: true });
+    const panel = await screen.findByTestId("open-incidents-panel");
+    await within(panel).findByText("No open incidents.", { exact: false });
+    expect(panel.textContent).not.toMatch(/page limit/);
+  });
+});
+
+describe("OverviewPage — a failed GET /api/v1/config", () => {
+  it("says the configuration could not be read instead of asking for database.dsnFile", async () => {
+    renderOverview({ engaged: false, configResponse: () => problem(502, "Bad Gateway", "ingress upstream gone") });
+    const incidents = await screen.findByTestId("open-incidents-panel");
+    const events = screen.getByRole("region", { name: "Recent events" });
+    for (const panel of [incidents, events]) {
+      expect(await within(panel).findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeInTheDocument();
+      expect(panel.textContent).not.toMatch(/database\.dsnFile/);
+    }
   });
 });
 

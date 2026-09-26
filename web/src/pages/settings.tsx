@@ -14,9 +14,10 @@ import { Input } from "@/components/ui/input";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
-import { ErrorLine, queryErrorMessage, ROW_ACTION, RowActionLabel, SectionCard } from "@/components/settings-section";
+import { ErrorLine, ROW_ACTION, RowActionLabel, SectionCard } from "@/components/settings-section";
 import { UsersSection } from "./settings-users";
 import { useAuth } from "@/hooks/use-auth";
+import { useConsoleConfig } from "@/hooks/use-capabilities";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
@@ -27,11 +28,12 @@ import {
   deleteToken,
   deleteWebhook,
   exportConfig,
-  getConfig,
   getVersion,
   importConfig,
   listTokens,
+  listUsers,
   listWebhooks,
+  queryErrorMessage,
   testWebhook,
   updateWebhook,
 } from "@/lib/api";
@@ -55,8 +57,8 @@ import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
  * WHAT IS HERE: the language switcher, local users (pages/settings-users.tsx), API tokens, webhook
- * endpoints, configuration export/import, and About. Maintenance windows are DECLARED on the chart surfaces and MANAGED on /alerting
- * (M3-14) — a second form for either here would be a second place to get the same thing wrong.
+ * endpoints, configuration export/import, and About. Maintenance windows are DECLARED on the chart surfaces and MANAGED on /alerting;
+ * a second form for either here would be a second place to get the same thing wrong.
  */
 
 /* ── shared bits (the section building blocks live in components/settings-section.tsx) ── */
@@ -239,7 +241,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
     enabled: initial?.enabled ?? true,
     secret: "",
   });
-  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+  /* The in-flight guard, not just a disabled look:
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
@@ -328,7 +330,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
 
   return (
     <Card asChild className="p-4 sm:p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 [&>*]:max-w-2xl">
         <h3 className="type-section">
           {initial ? t("webhooks.form.edit", { name: initial.name }) : t("webhooks.form.create")}
         </h3>
@@ -530,7 +532,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="shrink-0 font-medium">{hook.name}</span>
-          {/* The endpoint URL is an identifier — data face (M4 iron rule). It
+          {/* The endpoint URL is an identifier, so it wears the data face. It
               is the flexible column: flex-1 with a small floor, so a long one
               truncates and the pills stay on this line rather than wrapping
               under it; the whole value is the title. */}
@@ -737,7 +739,7 @@ function WebhooksSection() {
   );
 }
 
-/* ── API tokens (QA round 6, finding #14) ───────────────────────────────── */
+/* ── API tokens ───────────────────────────────── */
 
 /** TOKENS_ANCHOR is what components/user-menu.tsx's "Token management" points
  *  at; the link used to land on /settings, which had no tokens section at all. */
@@ -788,6 +790,7 @@ function MintedToken({ minted, onDismiss }: { minted: TokenCreateResponse; onDis
     <Card asChild className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-4 sm:p-6">
       <section aria-label={t("tokens.secret.aria")}>
         <h3 className="type-section">{t("tokens.secret.title", { name: minted.name })}</h3>
+        <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("tokens.role")}</p>
         {/* The server's bytes, selectable and wrapped — never truncated, or the
             one copy an operator gets would be a partial token. */}
         <p data-testid="minted-token" className="mono-data mt-3 break-all rounded-md bg-surface-2 p-3">
@@ -876,8 +879,9 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
 
   return (
     <Card asChild className="p-4 sm:p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4 [&>*]:max-w-2xl">
         <h3 className="type-section">{t("tokens.form.create")}</h3>
+        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">{t("tokens.role")}</p>
         <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           <div className="flex min-w-0 flex-col gap-1 text-[13px]">
             <label htmlFor={nameId} className="text-muted-foreground">
@@ -956,7 +960,7 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
   );
 }
 
-function TokenRow({ token }: { token: Token }) {
+function TokenRow({ token, ownerName }: { token: Token; ownerName?: string }) {
   const t = useT(settingsDict);
   const { locale } = useLocale();
   const qc = useQueryClient();
@@ -1011,14 +1015,15 @@ function TokenRow({ token }: { token: Token }) {
             {token.name}
           </span>
         </Td>
-        {/* The owner is a SUBJECT ID the server assigned; it prints as it came —
-            identifiers and stamps wear the data face — bounded like the name,
-            whole in the title. The secondary columns drop out on narrow screens
-            by class, so a phone keeps the name, the state and the action
-            instead of squeezing six keys into 311px. */}
+        {/* The owner is a SUBJECT ID the server assigned; it prints as the username
+            when the users list can resolve it, else as it came — identifiers and
+            stamps wear the data face — bounded like the name, the id in the title.
+            The secondary columns drop out on narrow screens by class, so a phone
+            keeps the name, the state and the action instead of squeezing six keys
+            into 311px. */}
         <Td className="hidden lg:table-cell">
           <span className="mono-data block max-w-[9rem] truncate" title={token.owner}>
-            {token.owner}
+            {ownerName ?? token.owner}
           </span>
         </Td>
         <Td className="mono-data hidden whitespace-nowrap text-muted-foreground md:table-cell">
@@ -1117,6 +1122,16 @@ function TokensSection() {
   const [minted, setMinted] = useState<TokenCreateResponse>();
   const query = useQuery({ queryKey: ["tokens"], queryFn: listTokens });
   const tokens = query.data?.tokens ?? [];
+  /* The users list is the only map from owner id to username; the Users section holds the
+     same query, so this adds no request where both render. */
+  const { can } = useAuth();
+  const { data: config } = useConsoleConfig();
+  const users = useQuery({
+    queryKey: ["users"],
+    queryFn: listUsers,
+    enabled: can("users:manage") && config?.auth?.mode === "local",
+  });
+  const usernames = new Map((users.data ?? []).map((u) => [u.id, u.username]));
   const pager = usePager(tokens);
 
   const listEmpty = query.isSuccess && tokens.length === 0;
@@ -1214,7 +1229,7 @@ function TokensSection() {
               </THead>
               <TBody>
                 {pager.visible.map((token) => (
-                  <TokenRow key={token.id} token={token} />
+                  <TokenRow key={token.id} token={token} ownerName={usernames.get(token.owner)} />
                 ))}
               </TBody>
             </Table>
@@ -1226,7 +1241,7 @@ function TokensSection() {
   );
 }
 
-/* The maintenance-windows section moved to pages/alerting.tsx (M3-14): a
+/* The maintenance-windows section lives in pages/alerting.tsx: a
    window suppresses and annotates the signals Alerting owns, and Explore
    already draws its bands. */
 
@@ -1274,6 +1289,30 @@ export function exportFilename(now: Date): string {
   return `kconmon-ng-config-${now.toISOString().slice(0, 10)}.json`;
 }
 
+/** EXPORT_SECTION_LABELS names the sections a bundle's `omitted` lists (httpapi's exportSectionGates). */
+const EXPORT_SECTION_LABELS: ReadonlyMap<string, SettingsKey> = new Map([
+  ["targets", "collection.targets"],
+  ["checkDefinitions", "collection.checkDefinitions"],
+  ["checkSchedules", "collection.checkSchedules"],
+  ["alertRules", "collection.alertRules"],
+  ["webhooks", "collection.webhooks"],
+  ["maintenanceWindows", "collection.maintenanceWindows"],
+  ["rbac", "collection.rbac"],
+]);
+
+/**
+ * omittedSections reads an exported bundle's `omitted`: the sections withheld from a caller without
+ * their own read permission. It is absent when nothing was withheld, and a name this build does not
+ * know is shown as it came.
+ */
+function omittedSections(b: ConfigBundle, t: Translate<SettingsKey>): string[] {
+  if (!Array.isArray(b.omitted)) return [];
+  return b.omitted.map((name) => {
+    const key = EXPORT_SECTION_LABELS.get(name);
+    return key ? t(key) : name;
+  });
+}
+
 /** IMPORT_COLLECTIONS is the result table's row order. */
 const IMPORT_COLLECTIONS: readonly (readonly [keyof Omit<ConfigImportResult, "dryRun">, SettingsKey])[] = [
   ["targets", "collection.targets"],
@@ -1291,17 +1330,21 @@ const IMPORT_COLLECTIONS: readonly (readonly [keyof Omit<ConfigImportResult, "dr
 
 function ImportNotes({ label, notes, tone }: { label: string; notes: ConfigImportCollectionResult["errors"]; tone: string }) {
   if (notes.length === 0) return null;
+  /* Notes sharing a sentence are one entry over all their names: the per-binding warning is
+     one long sentence, and a bundle with 63 bindings printed it 63 times. */
+  const grouped = new Map<string, string[]>();
+  for (const note of notes) grouped.set(note.reason, [...(grouped.get(note.reason) ?? []), note.name]);
   return (
     <div className="mt-3">
       <p className={cn("text-xs font-medium", tone)}>{label}</p>
       <dl className="mt-1 flex flex-col gap-1 text-xs leading-relaxed">
-        {notes.map((note, i) => (
-          <div key={`${note.name}-${i}`} className="flex flex-wrap gap-x-2">
-            <dt className="font-mono">{note.name}</dt>
+        {[...grouped].map(([reason, names], i) => (
+          <div key={`${reason}-${i}`} className="flex flex-wrap gap-x-2">
+            <dt className="font-mono">{names.join(", ")}</dt>
             {/* Verbatim. The server names the item and says why in one
                 sentence; paraphrasing it here would drop the half an operator
                 needs to fix the bundle. */}
-            <dd className="text-muted-foreground">{note.reason}</dd>
+            <dd className="text-muted-foreground">{reason}</dd>
           </div>
         ))}
       </dl>
@@ -1315,8 +1358,8 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
   return (
     <div role="status" className="mt-4">
       <p className="text-sm font-medium">{result.dryRun ? t("bundle.dryRun") : t("bundle.applied")}</p>
-      {/* Four short columns: capped, or three counts drift to the far edge of a wide card. */}
-      <Table variant="dense" containerClassName="mt-2 max-w-lg" scrollLabel={t("bundle.table.aria")}>
+      {/* Five short columns: capped, or the counts drift to the far edge of a wide card. */}
+      <Table variant="dense" containerClassName="mt-2 max-w-xl" scrollLabel={t("bundle.table.aria")}>
         <THead>
           <Tr>
             <Th className="pr-4">{t("bundle.col.collection")}</Th>
@@ -1325,6 +1368,9 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
             </Th>
             <Th numeric className="pr-4">
               {t("bundle.col.updated")}
+            </Th>
+            <Th numeric className="pr-4">
+              {t("bundle.col.unchanged")}
             </Th>
             <Th numeric className="pr-4">
               {t("bundle.col.skipped")}
@@ -1351,6 +1397,10 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
                 <Td numeric className="pr-4">
                   {c.updated}
                 </Td>
+                {/* A server older than this count sends none, and a zero would be a claim. */}
+                <Td numeric className="pr-4">
+                  {typeof c.unchanged === "number" ? c.unchanged : "—"}
+                </Td>
                 <Td numeric className="pr-4">
                   {c.skipped}
                 </Td>
@@ -1375,24 +1425,55 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
   );
 }
 
+/** isClientRefusal is a 4xx problem other than 429: the import handler answers those before it writes. */
+function isClientRefusal(err: unknown): boolean {
+  const status = err instanceof ApiError ? err.problem.status : undefined;
+  return status !== undefined && status >= 400 && status < 500 && status !== 429;
+}
+
+/* The cached lists a bundle writes to, by query-key prefix. Invalidating marks each stale, and the
+   ones on screen re-read at once. */
+const IMPORTED_QUERY_KEYS = [
+  ["webhooks"],
+  ["targets"],
+  ["target"],
+  ["definitions"],
+  ["schedules"],
+  ["checks"],
+  ["alert-rules"],
+  ["maintenance"],
+  ["alerting", "maintenance"],
+  ["investigate", "maintenance"],
+  ["investigate", "targets"],
+  ["rbac-roles"],
+];
+
 function ExportImportSection() {
   const t = useT(settingsDict);
+  const qc = useQueryClient();
   /* Spread it onto the control; the alias below is for the control that composes it with a local condition. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
   const fileId = useId();
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string>();
+  const [exportOmitted, setExportOmitted] = useState<string[]>([]);
   const [bundle, setBundle] = useState<ConfigBundle>();
   /* The picked file's NAME, kept because the visually-hidden input no longer shows it. */
   const [fileName, setFileName] = useState<string>();
   const [importing, setImporting] = useState(false);
+  /* An Apply in flight holds the file picker: a pick would supersede it and drop its answer. */
+  const [applying, setApplying] = useState(false);
   const [importError, setImportError] = useState<string>();
   const [result, setResult] = useState<ConfigImportResult>();
+  /* Bumped by every pick and every import call: an answer from a superseded call is dropped, so a
+     slow dry run of the previous file can neither replace the current plan nor re-arm Apply. */
+  const importSeq = useRef(0);
 
   async function handleExport() {
     setExporting(true);
     setExportError(undefined);
+    setExportOmitted([]);
     try {
       const b = await exportConfig();
       // Blob + object URL rather than navigating the tab to /api/v1/export: a
@@ -1406,6 +1487,7 @@ function ExportImportSection() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(href);
+      setExportOmitted(omittedSections(b, t));
     } catch (err) {
       setExportError(queryErrorMessage(err, t("bundle.exportFailed")));
     }
@@ -1413,23 +1495,42 @@ function ExportImportSection() {
   }
 
   async function runImport(b: ConfigBundle, dryRun: boolean) {
+    const seq = ++importSeq.current;
     setImporting(true);
+    if (!dryRun) setApplying(true);
     setImportError(undefined);
+    const invalidateImported = () => {
+      for (const queryKey of IMPORTED_QUERY_KEYS) void qc.invalidateQueries({ queryKey });
+    };
     try {
-      setResult(await importConfig(b, dryRun));
+      const answer = await importConfig(b, dryRun);
+      // An applied import has written whatever it wrote, even when a newer pick superseded it.
+      if (!dryRun) invalidateImported();
+      if (seq !== importSeq.current) return;
+      setResult(answer);
     } catch (err) {
+      // The server writes section by section with no single transaction: a 5xx or a lost answer
+      // may follow a partial write. A 4xx is refused before anything is written.
+      if (!dryRun && !isClientRefusal(err)) invalidateImported();
+      if (seq !== importSeq.current) return;
       setImportError(queryErrorMessage(err, t("bundle.importRefused")));
+    } finally {
+      if (!dryRun) setApplying(false);
     }
     setImporting(false);
   }
 
   async function handleFile(file: File | undefined) {
+    const seq = ++importSeq.current;
+    setImporting(false);
     setResult(undefined);
     setImportError(undefined);
     setBundle(undefined);
     setFileName(file?.name);
     if (!file) return;
-    const parsed = parseBundle(await file.text(), t);
+    const text = await file.text();
+    if (seq !== importSeq.current) return;
+    const parsed = parseBundle(text, t);
     if (!parsed.ok) {
       setImportError(parsed.message);
       return;
@@ -1455,12 +1556,17 @@ function ExportImportSection() {
           </Button>
         </div>
         {exportError ? <ErrorLine>{exportError}</ErrorLine> : null}
+        {exportOmitted.length > 0 ? (
+          <p role="status" className="max-w-prose text-xs leading-relaxed text-muted-foreground">
+            {t("bundle.exportOmitted", { sections: exportOmitted.join(", ") })}
+          </p>
+        ) : null}
       </div>
 
       <div className="mt-6 flex flex-col gap-2">
         <span className="text-[13px] text-muted-foreground">{t("bundle.field")}</span>
-        {/* The native file input is VISUALLY HIDDEN, not replaced (QA round 5,
-            finding #8). `<input type="file">` renders as the browser's own
+        {/* The native file input is VISUALLY HIDDEN, not replaced.
+            `<input type="file">` renders as the browser's own
             chrome — a grey "Choose File / no file selected" that matches
             nothing else on this page and cannot be themed at all, so in dark
             mode it was a light rectangle in the middle of a dark card.
@@ -1479,7 +1585,7 @@ function ExportImportSection() {
             accept="application/json,.json"
             /* The accessible name stays the FIELD's name, not the button's text. */
             aria-label={t("bundle.field")}
-            {...guard}
+            {...guard} disabled={writesDisabled || applying}
             onChange={(e) => void handleFile(e.target.files?.[0])}
             className="peer sr-only"
           />
@@ -1571,9 +1677,13 @@ export function subjectLine(kind: string, displayName: string): string {
 
 /** shortCommit is the twelve characters a full hash is known by on screen; anything
  *  that short already ("dev", "unknown", a seven-char short hash) prints as it came.
- *  The caller keeps the full value in the title. */
+ *  A suffix such as "-dirty" says the build is not that commit, so only the hash in
+ *  front of it is shortened. The caller keeps the full value in the title. */
 export function shortCommit(commit: string): string {
-  return commit.length > 12 ? commit.slice(0, 12) : commit;
+  const dash = commit.indexOf("-");
+  const hash = dash < 0 ? commit : commit.slice(0, dash);
+  const suffix = dash < 0 ? "" : commit.slice(dash);
+  return (hash.length > 12 ? hash.slice(0, 12) : hash) + suffix;
 }
 
 /* The generated OpenAPI shape of GET /api/v1/config. lib/types.ts's hand-written Config predates
@@ -1595,7 +1705,7 @@ const ABOUT_LINKS: ReadonlyArray<{ key: SettingsKey; href: string }> = [
 function AboutSection() {
   const t = useT(settingsDict);
   const { me } = useAuth();
-  const { data } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data } = useConsoleConfig();
   const config = data as ApiConfig | undefined;
   /* Same ["version"] entry useCapabilities polls, so this costs no extra round
      trip. The section that answers "what am I looking at" could not say WHICH
@@ -1615,8 +1725,7 @@ function AboutSection() {
         <Fact label={t("about.authMode")}>{mode}</Fact>
         <Fact label={t("about.roles")}>{roles.length > 0 ? roles.join(", ") : "—"}</Fact>
         {/* Empty segments are DROPPED, not rendered as a gap — the same
-            treatment lib/investigation-sources.ts's auditDetailLine got in
-            round 3, applied here in round 5 (finding #9). An anonymous subject
+            treatment lib/investigation-sources.ts's auditDetailLine gives. An anonymous subject
             has no displayName, and the fixed template printed the separator
             anyway: "anonymous · " reads as a name that failed to load. A
             separator is a joint between two things. */}
@@ -1714,7 +1823,7 @@ export function SettingsPage() {
   const canBundle = can("settings:write");
   /* Users exist only where the console is its own identity provider; under header or oidc the
      provider owns the accounts and the API answers 404. */
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data: config } = useConsoleConfig();
   const canUsers = can("users:manage") && config?.auth?.mode === "local";
 
   let body: ReactNode;

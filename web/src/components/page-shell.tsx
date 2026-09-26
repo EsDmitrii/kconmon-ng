@@ -10,11 +10,15 @@ import { ChartCursorProvider } from "@/lib/chart-cursor";
 
    It is also where the shared time cursor is scoped: "a page is the sync group"
    costs nothing to say here and means no page has to opt in to it. */
+/** The "page" variant's centred column, shared with the frames that stand in for a page (the pending
+ *  frame, the error panel) so swapping one for the other does not move the content. */
+export const PAGE_CONTAINER_CLASS = "mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-8 lg:px-10";
+
 export function PageShell({ title, description, actions, timeMachine = false, variant = "page", help, children }: {
   title: string;
   description?: string;
   actions?: ReactNode;
-  /** The "?" after the title (M7-5): `body` is the page's own translated
+  /** The "?" after the title: `body` is the page's own translated
    *  help.body, `slug` its docs/console/ page. One optional pair rather than
    *  two props so a body cannot ship without its docs link or vice versa.
    *  Nav pages pass it; detail routes (pair/node/target/run) skip it — their
@@ -23,11 +27,10 @@ export function PageShell({ title, description, actions, timeMachine = false, va
   /** Set by a page that RESOLVES ITS READS through `?at=` — the pages that call
    *  lib/timemachine's useTimeContext. Opt-in, and default false, because the
    *  safe failure is a missing control on a new page rather than a control that
-   *  offers a past the page then ignores (owner report: Targets, Alerting and
-   *  Settings all carried one and none of them honour it). */
+   *  offers a past the page then ignores. */
   timeMachine?: boolean;
   /** "page" (default) is the classic centred reading column, unchanged.
-   *  "tool" is for full-bleed working surfaces (M4-5: matrix, live feed,
+   *  "tool" is for full-bleed working surfaces (matrix, live feed,
    *  topology, MTR): no max-width and no centring — a slim one-row header
    *  (title + description inline, same action slot) over content that runs
    *  edge-to-edge with minimal padding. The shell has never wrapped children
@@ -38,10 +41,9 @@ export function PageShell({ title, description, actions, timeMachine = false, va
 }) {
   const tool = variant === "tool";
   return (
-    /* px-4 below 640px: at 375px the old px-8 spent 4rem of a 23.4rem viewport
-       on margin, which is what pushed the wide panels into a page-level
-       horizontal scroll (QA scope 2, finding #16). */
-    <div className={tool ? "w-full px-3 py-4 sm:px-4" : "mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-8 lg:px-10"}>
+    /* px-4 below 640px: px-8 would spend 4rem of a 23.4rem phone on margin and push the wide panels
+       into a page-level horizontal scroll. */
+    <div className={tool ? "w-full px-3 py-4 sm:px-4" : PAGE_CONTAINER_CLASS}>
       <div className={tool ? "page-enter flex flex-col gap-4" : "page-enter flex flex-col gap-7"}>
         <div
           className={
@@ -51,8 +53,8 @@ export function PageShell({ title, description, actions, timeMachine = false, va
           }
         >
           {/* The "?" is inserted CONDITIONALLY in both variants: with no `help`
-              the header DOM stays byte-for-byte what it was before M7-5, which
-              is the contract the variant tests pin. */}
+              the header DOM carries no trace of it, which is the contract the
+              variant tests pin. */}
           {tool ? (
             <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
               <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
@@ -86,7 +88,7 @@ export function PageShell({ title, description, actions, timeMachine = false, va
           {/* The Time Machine sits with the page's own time filters rather than
               in the chrome: the range presets pick how long the window is, this
               picks where it ends, and the reader looking for "deeper than 24h"
-              is looking HERE (owner report). It renders nothing where there is
+              is looking HERE. It renders nothing where there is
               no TimeMachineProvider, so a page rendered on its own is unchanged. */}
           {actions || timeMachine ? (
             <div className="flex flex-wrap items-center gap-2">

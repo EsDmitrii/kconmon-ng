@@ -3,8 +3,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
 import { NodeCardPage, nodeHealth, nodeNameFromPath } from "./node-card";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -43,12 +45,16 @@ function renderPage(
   pathname = "/nodes/node-a",
   opts: {
     runs?: unknown[];
+    runDetails?: Record<string, unknown>;
     permissions?: string[];
     incidents?: unknown[];
     topology?: unknown;
     matrix?: unknown;
+    /** Mounts a <LocaleProvider> with this stored choice; absent, the page reads English. */
+    locale?: Locale;
   } = {},
 ) {
+  if (opts.locale) localStorage.setItem(LOCALE_STORAGE_KEY, opts.locale);
   window.history.pushState({}, "", pathname);
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
@@ -65,6 +71,9 @@ function renderPage(
     if (href.startsWith("/api/v1/annotations")) return Promise.resolve(json({ annotations: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents: opts.incidents ?? [], nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
+    if (href.startsWith("/api/v1/runs/") && opts.runDetails) {
+      return Promise.resolve(json(opts.runDetails[href.slice("/api/v1/runs/".length)] ?? {}));
+    }
     if (href.startsWith("/api/v1/runs")) return Promise.resolve(json({ runs: opts.runs ?? [], nextCursor: "" }));
     return Promise.resolve(json({}));
   });
@@ -72,7 +81,13 @@ function renderPage(
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <NodeCardPage />
+      {opts.locale ? (
+        <LocaleProvider>
+          <NodeCardPage />
+        </LocaleProvider>
+      ) : (
+        <NodeCardPage />
+      )}
     </QueryClientProvider>,
   );
   return { ...utils, fetchMock, qc };
@@ -88,6 +103,7 @@ afterEach(() => {
   resetWsClient();
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 describe("nodeNameFromPath", () => {
@@ -218,6 +234,28 @@ describe("NodeCardPage", () => {
 
 /* ── QA scope 2, findings #3–#6, #14, #18, #21 ───────────────────────────── */
 
+describe("NodeCardPage — a node the fleet does not report", () => {
+  it("says there is no such node instead of drawing an empty card with live writes", async () => {
+    renderPage("/nodes/no-such-node", { permissions: ["annotations:write", "maintenance:write", "maintenance:read"] });
+
+    expect(await screen.findByText("This fleet has no node called “no-such-node”.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No such node", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/The name may be a typo, or the node may have left the fleet/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to Matrix" })).toHaveAttribute("href", "/matrix");
+    expect(screen.queryByRole("button", { name: /annotate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /maintenance/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps a node known only from a matrix cell", async () => {
+    renderPage("/nodes/node-c", {
+      matrix: { ...matrixBody, cells: [...matrixBody.cells, { source: "node-a", destination: "node-c", failRatio: 0 }] },
+    });
+    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "node-c", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText(/This fleet has no node called/)).not.toBeInTheDocument();
+  });
+});
+
 describe("NodeCardPage — the header figure and the evidence under it", () => {
   it("states the denominator when the figure rests on part of the pairs", async () => {
     renderPage("/nodes/node-a");
@@ -244,6 +282,12 @@ describe("NodeCardPage — the header figure and the evidence under it", () => {
     await waitFor(() =>
       expect(screen.getByTestId("node-health-percent")).toHaveTextContent("100.0% healthy · 1 of 2 pairs scored"),
     );
+  });
+
+  it("writes the figure with a decimal comma in Russian", async () => {
+    renderPage("/nodes/node-a", { locale: "ru" });
+    await waitFor(() => expect(screen.getByTestId("node-health-percent")).toHaveTextContent("98,0% здоровья"));
+    expect(screen.getByTestId("node-health-percent")).not.toHaveTextContent("98.0");
   });
 });
 
@@ -358,6 +402,23 @@ describe("NodeCardPage — paths into the node", () => {
     expect(screen.getByText("1400 / 1500")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "RTT p95" })).toBeNull();
   });
+
+  it("paints a recovering full-size path amber and a half-failing one red", async () => {
+    const pmtu = {
+      protocol: "pmtu",
+      plane: "pod",
+      nodes: ["node-a", "node-b", "node-c"],
+      cells: [
+        { source: "node-a", destination: "node-b", failRatio: 0.2, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 },
+        { source: "node-a", destination: "node-c", failRatio: 0.6, mtuBytes: 1501, probeMtuBytes: 1500 },
+      ],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a?protocol=pmtu", { matrix: pmtu });
+    await screen.findByRole("columnheader", { name: "Path MTU / probe" });
+    expect(screen.getByText("1500 / 1500").className).toMatch(/text-health-warn/);
+    expect(screen.getByText("1501 / 1500").className).toMatch(/text-health-bad/);
+  });
 });
 
 describe("NodeCardPage — an empty podIP", () => {
@@ -416,7 +477,8 @@ describe("NodeCardPage — the header actions reflow", () => {
 
 describe("NodeCardPage — the identity card without an agent id", () => {
   it("lays the four placeholders in one row and sets the dash in the text face, like its siblings", async () => {
-    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-zzz");
+    // node-b is in the matrix, so the fleet reports it; the topology simply has nothing on it.
+    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-b");
     await screen.findByText("Zone");
 
     const agentId = screen.getByText("Agent ID").parentElement?.querySelector("dd");
@@ -615,7 +677,8 @@ describe("NodeCardPage — identity when the topology query FAILED", () => {
   });
 
   it("keeps the em-dashes for a SUCCESSFUL topology that simply lacks the node", async () => {
-    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-zzz");
+    // node-b is in the matrix, so the fleet reports it; the topology simply has nothing on it.
+    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-b");
     await screen.findByText("Zone");
     expect(screen.queryByTestId("identity-problem")).toBeNull();
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(4);
@@ -880,5 +943,48 @@ describe("NodeCardPage — an external agent under a hostile wire", () => {
     await waitFor(() => expect(screen.getByText("Planes")).toBeInTheDocument());
     expect(screen.getByText("Planes").parentElement?.querySelector("dd")).toHaveTextContent("unknown");
     expect(screen.getByTestId("node-external-badge")).toBeInTheDocument();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("NodeCardPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage("/nodes/node-a");
+    await screen.findByTestId("node-health-percent");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage("/nodes/node-a");
+    await screen.findByTestId("node-health-percent");
+    expect(lightThemeHazards(document.body)).toEqual([]);
+  });
+});
+
+describe("NodeCardPage — Diagnostics", () => {
+  it("counts an interval run's distinct pairs, not its samples", async () => {
+    const run = { id: "r-1", createdAt: "2026-08-01T00:00:00Z", status: "succeeded", type: "tcp", plane: "pod", pairTotal: 2, pairOk: 2, pairFailed: 0 };
+    const sample = (source: string, destination: string, i: number) => ({
+      sourceNode: source,
+      destinationNode: destination,
+      success: true,
+      rttNs: 1_000_000,
+      observedAt: `2026-08-01T00:00:${String(i).padStart(2, "0")}Z`,
+    });
+    const results = [0, 1, 2].flatMap((i) => [sample("node-a", "node-b", i), sample("node-b", "node-a", i)]);
+    renderPage("/nodes/node-a", {
+      runs: [run],
+      runDetails: { "r-1": { ...run, initiatorKind: "user", initiatorId: "u1", spec: { durationNs: 600_000_000_000 }, results } },
+    });
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+    const link = await screen.findByRole("link", { name: "r-1" });
+    expect(link.closest("li")).toHaveTextContent("2 pairs");
   });
 });

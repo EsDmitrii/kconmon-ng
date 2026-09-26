@@ -12,6 +12,7 @@ import {
 } from "@/lib/commands";
 import { chromeDict, NAV_KEYS } from "@/lib/i18n/dict/chrome";
 import { paletteDict } from "@/lib/i18n/dict/palette";
+import type { Incident } from "@/lib/types";
 import { NAV_ITEMS } from "@/nav";
 
 function ctx(over: Partial<CommandContext> = {}): CommandContext {
@@ -468,9 +469,56 @@ describe("renamed nav entries still answer to their old names (M3-8)", () => {
   });
 });
 
+/* The palette found no incidents: a resolved one was reachable only by its permalink. */
+describe("incident rows", () => {
+  const incident = (over: Record<string, unknown> = {}) =>
+    ({
+      id: "inc-1",
+      title: "Loss between node-a and node-b",
+      scope: "node-a→node-b",
+      fromAt: "2026-08-08T00:00:00Z",
+      status: "resolved",
+      notes: "",
+      pinned: [],
+      createdBy: "user:ada",
+      createdAt: "2026-08-08T00:00:00Z",
+      resolvedAt: "2026-08-08T01:00:00Z",
+      ...over,
+    }) as Incident;
+
+  it("finds a saved incident by its title and opens its permalink", () => {
+    const navigate = vi.fn();
+    const registry = buildRegistry(ctx({ navigate }), [incident()]);
+    const hit = searchCommands("loss between", registry)[0];
+    expect(hit.id).toBe("incident:inc-1");
+    expect(hit.group).toBe("Incidents");
+    // A title is the operator's own words: the same in both languages.
+    expect(commandTitle(hit, "ru")).toBe("Loss between node-a and node-b");
+    hit.perform(ctx({ navigate }));
+    expect(navigate).toHaveBeenCalledWith("/investigate?incident=inc-1");
+  });
+
+  it("finds one by its scope, and by the word incident in either language", () => {
+    const registry = buildRegistry(ctx(), [incident()]);
+    for (const q of ["node-a", "incident", "инцидент"]) {
+      expect(searchCommands(q, registry).map((c) => c.id), q).toContain("incident:inc-1");
+    }
+  });
+
+  it("offers none without incidents:read", () => {
+    const registry = buildRegistry(ctx({ can: (p) => p !== "incidents:read" }), [incident()]);
+    expect(registry.some((c) => c.group === "Incidents")).toBe(false);
+  });
+
+  it("skips a row it could not open or name", () => {
+    const registry = buildRegistry(ctx(), [incident({ id: "" }), incident({ id: "inc-2", title: "" })]);
+    expect(registry.some((c) => c.group === "Incidents")).toBe(false);
+  });
+});
+
 describe("GROUP_KEYS", () => {
   it("names every group exactly once, so no section can render untranslated", () => {
-    expect(Object.keys(GROUP_KEYS).sort()).toEqual(["Actions", "Navigation", "View"]);
+    expect(Object.keys(GROUP_KEYS).sort()).toEqual(["Actions", "Incidents", "Navigation", "View"]);
     for (const key of Object.values(GROUP_KEYS)) {
       expect(paletteDict.ru[key]).toBeTruthy();
       expect(paletteDict.en[key]).toBeTruthy();

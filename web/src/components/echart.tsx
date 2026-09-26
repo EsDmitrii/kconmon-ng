@@ -21,6 +21,8 @@ import {
   type ReadoutSeries,
 } from "@/lib/chart-cursor";
 import { sharedTooltipOption } from "@/lib/chart-tooltip";
+import { chartColors } from "@/lib/chart-theme";
+import { useThemeIfAny } from "@/components/theme-provider";
 import { useT } from "@/lib/i18n";
 import { sharedDict } from "@/lib/i18n/dict/shared";
 import type { Annotation, MaintenanceWindow } from "@/lib/types";
@@ -65,7 +67,7 @@ export function EChart({
   className,
   annotations,
   maintenance,
-  dark = true,
+  dark: darkProp,
 }: {
   option: echarts.EChartsOption;
   className?: string;
@@ -73,6 +75,9 @@ export function EChart({
   maintenance?: MaintenanceWindow[];
   dark?: boolean;
 }) {
+  /* A chart that names no theme follows the console's; dark is the product default. */
+  const ambient = useThemeIfAny();
+  const dark = darkProp ?? ambient !== "light";
   const host = useRef<HTMLDivElement>(null);
   const crosshair = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts | null>(null);
@@ -113,8 +118,9 @@ export function EChart({
       sharedTooltipOption(merged, () => host.current, {
         cursorValue: () => cursorValue.current,
         more: (count) => t("tooltip.more", { count }),
+        tooltipColors: chartColors(dark ? "dark" : "light").tooltip,
       }),
-    [merged, t],
+    [merged, t, dark],
   );
 
   /** Only a TIME axis can carry an instant; see lib/chart-cursor.tsx. */
@@ -140,11 +146,11 @@ export function EChart({
     });
     const onResize = () => chart.current?.resize();
     window.addEventListener("resize", onResize);
-    /* The window event is not enough (QA scope 3, finding #12). ECharts sizes
-       its canvas ONCE, off the host's box at init, and every reflow that does
-       not change the window — a sidebar collapsing, a rail wrapping, a details
-       panel opening, the grid dropping from two columns to one at lg — left the
-       chart drawn at its old width inside a box that had moved on. The observer
+    /* The window event is not enough. ECharts sizes its canvas ONCE, off the
+       host's box at init, and every reflow that does not change the window — a
+       sidebar collapsing, a rail wrapping, a details panel opening, the grid
+       dropping from two columns to one at lg — would leave the chart drawn at
+       its old width inside a box that had moved on. The observer
        watches the box that actually matters; the window listener stays for the
        browsers that resize the viewport without laying the host out again. */
     const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
@@ -218,7 +224,7 @@ export function EChart({
      *
      * It does NOT name the values. The reader is pointing at one panel and
      * reading that panel's tooltip; a box on every neighbour covers the data it
-     * is annotating and turns a glance into a search (owner report). The line
+     * is annotating and turns a glance into a search. The line
      * answers "when", the dots answer "where", and the panel under the cursor
      * answers "how much".
      *

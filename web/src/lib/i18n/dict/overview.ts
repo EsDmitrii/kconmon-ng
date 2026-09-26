@@ -14,7 +14,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *   - a raw severity this console does not know ("no severity" is our word for
  *     an EMPTY one; anything else Prometheus labelled is printed as it came).
  *   - permission strings (incidents:read, events:read, alerts:read) and config
- *     keys (console.database.mode, console.prometheus.address) — an operator
+ *     keys (database.dsnFile, console.prometheus.address) — an operator
  *     types those into a role binding or a values file.
  *   - "#", "→" and "—". Symbols, not prose; identical in both languages.
  *
@@ -83,7 +83,8 @@ const en = {
   "tiles.failing.tone": "Fail ≥ 10%",
   "tiles.degraded": "Degraded pairs",
   "tiles.degraded.tone": "Fail 1–10%",
-  "tiles.degraded.tone.pmtu": "Reduced path or fail 1–10%",
+  "tiles.degraded.tone.pmtu": "Reduced or recovering path",
+  "tiles.failing.tone.pmtu": "Black hole",
   /* Zero over zero. A bare "0" under "Failing pairs" reads as a clean fleet,
      and the nodes tile beside it already answers "nothing measured" with an
      em-dash — the pair tiles now say it the same way. */
@@ -152,6 +153,8 @@ const en = {
   "worstPairs.empty.healthy.title": "No failing or degraded pairs",
   "worstPairs.empty.healthy.body":
     "Every scored pair is under a 1% failure ratio. Anything that crosses that line shows up here, worst first.",
+  "worstPairs.empty.healthy.body.pmtu":
+    "Every measured path carries full-size datagrams. A reduced path or a black hole shows up here, worst first.",
   /* The healthy slate's next step: the whole matrix, in the same "open X"
      shape the alerts and events panels use. */
   "worstPairs.open": "open Matrix",
@@ -183,7 +186,7 @@ const en = {
   /* NOT "nothing is firing": this card reads the rules this console manages and
      no others, so a quiet list is a fact about OUR rules, never about the
      cluster. Somebody else's rule may well be firing this second. */
-  "alerts.empty": "None of this console's rules is firing. Rules live on /alerting; Prometheus evaluates them.",
+  "alerts.empty": "None of this console's rules is firing. Rules are managed on Alerting; Prometheus evaluates them.",
   "alerts.hidden.one": "{count} more firing alert is not shown here.",
   "alerts.hidden.many": "{count} more firing alerts are not shown here.",
   /* `severity` is the Prometheus LABEL name, so it stays in both languages —
@@ -201,15 +204,17 @@ const en = {
   "incidents.title": "Open incidents",
   "incidents.denied": "Open incidents need incidents:read — none was requested.",
   "incidents.error": "The incident list is unavailable right now.",
-  "incidents.empty": "No open incidents. Saving an investigation on /investigate opens one.",
+  "incidents.empty": "No open incidents. Saving an investigation on Incidents opens one.",
   /* The empty slate's next step — the page the sentence above names. */
-  "incidents.open": "open Investigate",
+  "incidents.open": "open Incidents",
   /* Our word for an incident whose scope is EMPTY; any other scope is data. */
   "incidents.scope.global": "global",
+  /* Engaged, scanIncidents hit its page cap before the list ended (`truncated`). */
+  "incidents.scanCapped": "The scan stopped at its page limit, so an older incident open at this instant may be missing.",
 
   /* ── recent events ──────────────────────────────────────────────────────── */
   "events.title": "Recent events",
-  "events.open": "open Live",
+  "events.open": "open Events",
   "events.denied": "Fleet events need events:read — none was requested.",
   "events.error": "The event feed is unavailable right now.",
   "events.empty":
@@ -232,7 +237,11 @@ const en = {
   "age.days": "{count}d",
 
   /* Said once, by both the incidents and the events panel. */
-  "db.note": "History needs a database — set console.database.mode. Nothing was requested.",
+  "db.note": "History needs a database — set database.dsnFile (Helm: database.existingSecret). Nothing was requested.",
+  /* A failed GET /api/v1/config, told apart from a console with no database (useDatabaseAvailable's
+     `error`): the gate line above would send the operator to set a key that may well be set. */
+  "config.failed": "Could not read the console configuration, so nothing was requested: {error}",
+  "config.failed.generic": "the request failed",
 } as const;
 
 export type OverviewKey = keyof typeof en;
@@ -284,7 +293,8 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "tiles.failing.tone": "Сбой ≥ 10%",
   "tiles.degraded": "Пары с деградацией",
   "tiles.degraded.tone": "Сбой 1–10%",
-  "tiles.degraded.tone.pmtu": "Путь сужен или сбой 1–10%",
+  "tiles.degraded.tone.pmtu": "Путь сужен или после сбоя",
+  "tiles.failing.tone.pmtu": "Чёрная дыра",
   "tiles.pairs.noData": "Здесь не измерена ни одна пара, считать нечего.",
 
   "health.failing.one": "Пар со сбоями: {count}",
@@ -331,6 +341,8 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "worstPairs.empty.healthy.title": "Пар со сбоями и деградацией нет",
   "worstPairs.empty.healthy.body":
     "У всех оценённых пар доля сбоев ниже 1%. Что перевалит за эту черту, появится здесь, худшее первым.",
+  "worstPairs.empty.healthy.body.pmtu":
+    "Все измеренные пути пропускают датаграммы полного размера. Суженный путь или чёрная дыра появятся здесь, худшие первыми.",
 
   "table.caption": "Худшие пары по доле сбоев или потерям пакетов",
   "table.pair": "Пара",
@@ -351,7 +363,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "alerts.error": "Набор активных оповещений сейчас недоступен.",
   "alerts.noPrometheus":
     "Prometheus для этой консоли не настроен, задайте console.prometheus.address. Пока что состояние срабатываний брать неоткуда.",
-  "alerts.empty": "Ни одно правило этой консоли не срабатывает. Правила живут на /alerting, вычисляет их Prometheus.",
+  "alerts.empty": "Ни одно правило этой консоли не срабатывает. Правила задаются на странице «Оповещения», вычисляет их Prometheus.",
   "alerts.hidden.one": "Ещё активных оповещений не показано: {count}.",
   "alerts.hidden.many": "Ещё активных оповещений не показано: {count}.",
   "alerts.noSeverity": "без severity",
@@ -363,12 +375,13 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "incidents.title": "Открытые инциденты",
   "incidents.denied": "Открытым инцидентам нужно право incidents:read, которого у роли нет, так что запрос не отправлялся.",
   "incidents.error": "Список инцидентов сейчас недоступен.",
-  "incidents.empty": "Открытых инцидентов нет. Сохраните расследование на /investigate, и инцидент откроется.",
-  "incidents.open": "открыть Расследование",
+  "incidents.empty": "Открытых инцидентов нет. Сохраните расследование на странице «Инциденты», и инцидент откроется.",
+  "incidents.open": "открыть Инциденты",
   "incidents.scope.global": "глобальный",
+  "incidents.scanCapped": "Просмотр остановился на пределе страниц, поэтому более старый инцидент, открытый в этот момент, может отсутствовать в списке.",
 
   "events.title": "Последние события",
-  "events.open": "открыть Онлайн",
+  "events.open": "открыть События",
   "events.denied": "Событиям флота нужно право events:read. Его нет, и запрос не отправлялся.",
   "events.error": "Лента событий сейчас недоступна.",
   "events.empty":
@@ -385,5 +398,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "age.hours": "{count} ч",
   "age.days": "{count} д",
 
-  "db.note": "Истории нужна база, задайте console.database.mode. Запрос не отправлялся.",
+  "db.note": "Истории нужна база, задайте database.dsnFile (Helm: database.existingSecret). Запрос не отправлялся.",
+  "config.failed": "Не удалось прочитать конфигурацию консоли, поэтому запрос не отправлялся: {error}",
+  "config.failed.generic": "запрос не выполнен",
 });

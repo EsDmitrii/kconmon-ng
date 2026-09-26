@@ -21,17 +21,16 @@ const enT: Translate<MTRDetailKey> = (key, vars) => translate(mtrDetailDict, "en
  *  actually hold the number: milliseconds with one decimal down to 0.1ms, and
  *  MICROSECONDS below that, because a same-node hop really does answer in tens
  *  of µs and rounding it to "0.0ms" erases the measurement rather than
- *  reporting it (QA scope 4, finding #14). The floor and the µs branch are
+ *  reporting it. The floor and the µs branch are
  *  lib/run-samples' — the run permalink's duration column reads the same rule,
  *  so the two tables agree on where a millisecond stops being a unit. */
 export function fmtRttNs(ns: number | undefined): string {
   /* Anything that is not a finite NUMBER is a measurement that did not arrive,
-     and an em dash is what the table already says for one. The old guard tested
-     Number.isNaN alone, which lets three shapes through that the wire really can
-     carry: a JSON `null` (Go marshals ±Inf and a missing int64 that way) divided
-     by 1e6 is 0, so an absent RTT rendered "0.0ms" — a hop reported as answering
-     in no time at all, which is a measurement the console invented (hostile-QA
-     probe N). A string sneaks past it too and renders "NaNms". */
+     and an em dash is what the table already says for one. Number.isNaN alone
+     would let through shapes the wire really can carry: a JSON `null` (Go
+     marshals ±Inf and a missing int64 that way) divided by 1e6 is 0, which
+     would render "0.0ms" — a hop answering in no time at all, a measurement the
+     console invented. A string would render "NaNms". */
   if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
   return fmtMicrosNs(ns) ?? `${(ns / 1e6).toFixed(1)}ms`;
 }
@@ -41,8 +40,8 @@ export function fmtRttNs(ns: number | undefined): string {
  *
  * lossRatio is `0..1` in the schema and the projector writes nothing else, so
  * everything below is about a payload that did NOT come from this server: an
- * absent field rendered "NaN%" in red, and a ratio of 12 rendered "1200%",
- * which is not a number a reader can do anything with (hostile-QA probes D, O).
+ * absent field would render "NaN%" in red, and a ratio of 12 "1200%", which is
+ * not a number a reader can do anything with.
  */
 export function fmtLossPct(ratio: number | undefined): string {
   if (typeof ratio !== "number" || !Number.isFinite(ratio)) return "—";
@@ -67,9 +66,9 @@ export function isPlaceholderHop(ip: string): boolean {
  *
  * The server defends this itself (httpapi/mtr.go substitutes `[]` for a nil
  * slice), so a `null` here means a payload that did not come from it — a proxy,
- * a replay, an older build. It used to reach `.map` and take the whole console
- * down to a white screen (hostile-QA probe E), which is a far worse answer than
- * a path with no hops in it.
+ * a replay, an older build. Reaching `.map` it would take the whole console
+ * down to a white screen, which is a far worse answer than a path with no hops
+ * in it.
  */
 export function hopList(hops: readonly MTRHop[] | undefined | null): readonly MTRHop[] {
   return Array.isArray(hops) ? hops : [];
@@ -80,9 +79,9 @@ export function hopList(hops: readonly MTRHop[] | undefined | null): readonly MT
  * pages/mtr.tsx because the diff table and changes timeline label snapshots with it too.
  */
 export function shortHash(hash: string): string {
-  /* A snapshot with no pathHash is not a snapshot, but it used to be a white
-     screen — .slice on the undefined threw out of the whole page rather than
-     out of one row's label (hostile-QA probe P). */
+  /* A snapshot with no pathHash is not a snapshot, but it must not be a white
+     screen: .slice on the undefined would throw out of the whole page rather
+     than out of one row's label. */
   return typeof hash === "string" ? hash.slice(0, 12) : "";
 }
 
@@ -94,7 +93,7 @@ export type LossTier = "ok" | "warn" | "bad";
 export function lossTier(ratio: number): LossTier {
   /* A loss number that is not a number is not a FAILING hop — it is an unknown
      one, and the cell beside this prints an em dash for it. Without the guard
-     every comparison below was false and the row came out red (probe D). */
+     every comparison below is false and the row comes out red. */
   if (typeof ratio !== "number" || !Number.isFinite(ratio)) return "ok";
   if (ratio < 0.01) return "ok";
   if (ratio < 0.1) return "warn";
@@ -319,20 +318,12 @@ function HopTrend({ ip, history }: { ip: string; history: TrendHistory }) {
 /* ── horizontal overflow ────────────────────────────────────────────────── */
 
 /**
- * ScrollableX wraps a table that can still be wider than the card holding it. The card already
- * clipped its overflow silently: RTT and Loss simply were not there, with nothing saying they had
- * gone anywhere (QA scope 4, finding #6). Both halves of the fix matter — the affordance is drawn
- * ONLY while something is actually off to the right, because an edge fade that is always there is
- * decoration and teaches the reader to ignore it.
- */
-/**
  * pathChainText is the route as one readable line: the hops in order, a `*`
  * where nothing answered.
  *
- * The Explorer identified a path by a twelve-character hash, which is a key and
- * not a route — «ничего не понятно». An MTR exists to show WHERE the packets
- * went, so that is what a row leads with now; the hash stays as the thing you
- * copy into a bug report.
+ * A twelve-character hash is a key, not a route. An MTR exists to show WHERE the
+ * packets went, so that is what a row leads with; the hash stays as the thing
+ * you copy into a bug report.
  */
 export function pathChainText(hops: readonly MTRHop[]): string {
   return hopList(hops)
@@ -387,6 +378,11 @@ export function PathChain({
   );
 }
 
+/**
+ * ScrollableX wraps a table that can still be wider than the card holding it, which would otherwise
+ * clip RTT and Loss silently. The affordance is drawn ONLY while something is actually off to the
+ * right, because an edge fade that is always there is decoration and teaches the reader to ignore it.
+ */
 export function ScrollableX({ children, className }: { children: ReactNode; className?: string }) {
   const t = useT(mtrDetailDict);
   const ref = useRef<HTMLDivElement>(null);
@@ -431,8 +427,8 @@ export function ScrollableX({ children, className }: { children: ReactNode; clas
 /* ── the hop table ──────────────────────────────────────────────────────── */
 
 /**
- * TraceDetail renders ONE stored path: the snapshot's own header numbers; MTR_EXPLORER.md's `avg /
- * best / worst / jitter` columns have nothing feeding them per snapshot.
+ * TraceDetail renders ONE stored path from the snapshot's own header numbers; per-snapshot avg /
+ * best / worst / jitter have no source, so there are no such columns.
  */
 export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; history?: TrendHistory }) {
   const t = useT(mtrDetailDict);
@@ -440,8 +436,8 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
   /* Keyed by the row's POSITION in this path, not by its IP and not by the hop
      number either. A path may legitimately repeat an address (a routing loop),
      which rules the IP out; and the number is only as unique as the payload
-     makes it — two hops that arrived without one opened and closed together,
-     under one duplicated element id (hostile-QA probe Y). The position is
+     makes it — two hops that arrived without one would open and close together,
+     under one duplicated element id. The position is
      unique by construction, and the table remounts per snapshot (see the `key`
      in pages/mtr.tsx's DetailPane), so it cannot go stale under a row either. */
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -476,8 +472,8 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
       <ScrollableX className="mt-4">
         {/* FIXED layout, and a floor under the whole table.
             `table-fixed` is what stops one 63-character rDNS name from widening
-            its own column and shoving RTT and Loss off the card (QA scope 4,
-            finding #6) — under it a column cannot be argued wider by its
+            its own column and shoving RTT and Loss off the card — under it a
+            column cannot be argued wider by its
             content, so the numerics keep their places whatever the name is.
             `min-w` is the other half: below it the columns would be squeezed
             past reading, so the table stops shrinking and ScrollableX above
@@ -491,9 +487,8 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
               loss is at most "100%". The hostname is the one value with no
               bound at all — a pod's rDNS is sixty-odd characters — so it is the
               one column with no width, which under `table-fixed` means it takes
-              everything the others leave. This used to be inverted: the name
-              carried a hard 14rem cap and clipped mid-token («hostname
-              обрезается») while the columns beside it stood half empty. */}
+              everything the others leave, rather than clipping mid-token while
+              the columns beside it stand half empty. */}
           <colgroup>
             <col data-col="expand" className="w-6" />
             <col data-col="number" className="w-8" />
@@ -595,11 +590,9 @@ function HopRows({
             of unbreakable token and wrapping it onto a second line is the only
             answer that neither clips it nor widens the column. */}
         <Td className="mono-data pr-3 align-top break-all">{placeholder ? "*" : hop.ip}</Td>
-        {/* The flexible column, and NO truncation: this cell used to carry a
-            hard 14rem cap that cut `10-244-4-21.kconmon-kconmon-ng-…` mid-token
-            with room to spare beside it. A long name WRAPS inside its column
-            instead — two readable lines rather than half an address — which the
-            fixed layout above makes safe: it can no longer push anything out.
+        {/* The flexible column, and NO truncation: a long name WRAPS inside its
+            column — two readable lines rather than half an address — which the
+            fixed layout above makes safe: it cannot push anything out.
             The title stays regardless, so the whole value is one hover away
             even where the column really is narrow. */}
         <Td className="mono-data pr-3 align-top text-muted-foreground">
@@ -608,7 +601,7 @@ function HopRows({
           </span>
         </Td>
         <Td numeric className="pr-3 align-top">
-          {/* The RTT cell IS the trend affordance (Decision 13): the number the
+          {/* The RTT cell IS the trend affordance: the number the
               reader is looking at is the one the chart puts in time. Without a
               loaded history there is nothing to plot, so it stays plain text
               rather than becoming a button that answers nothing. */}
@@ -637,7 +630,11 @@ function HopRows({
             fmtRttNs(hop.rttNs)
           )}
         </Td>
-        <Td numeric className={cn("align-top", LOSS_CLASS[tier])}>{fmtLossPct(hop.lossRatio)}</Td>
+        {/* Every probe to a silent hop counts as lost, so its ratio is always 1: that is the star in
+            the address column, not a failure, and printing it red flagged a healthy path. */}
+        <Td numeric className={cn("align-top", placeholder ? "text-muted-foreground" : LOSS_CLASS[tier])}>
+          {placeholder ? "—" : fmtLossPct(hop.lossRatio)}
+        </Td>
       </Tr>
       {expanded && !placeholder ? (
         <Tr>

@@ -164,21 +164,80 @@ describe("getMatrixAt", () => {
 });
 
 describe("pmtu in the Time Machine", () => {
-  it("asks for failures, the path MTU and the probe size, and no RTT", () => {
+  it("asks for failures, the path MTU, the per-pair probe size and the recent window, and no RTT", () => {
     const q = matrixQueries("pmtu");
     expect(q.fail).toContain("kconmon_ng_pmtu_results_total");
     expect(q.mtu).toContain("kconmon_ng_pmtu_bytes");
-    expect(q.probe).toContain("kconmon_ng_agent_pmtu_probe_bytes");
+    expect(q.probe).toBe("max by (source_node, destination_node) (kconmon_ng_pmtu_probe_bytes)");
+    expect(q.recent).toBe(
+      'sum by (source_node, destination_node) (rate(kconmon_ng_pmtu_results_total{result="fail"}[3m])) / ' +
+        "sum by (source_node, destination_node) (rate(kconmon_ng_pmtu_results_total[3m]))",
+    );
     expect(q.rtt).toBeUndefined();
+    expect(matrixQueries("tcp").recent).toBeUndefined();
   });
 
-  it("folds the MTU and the source's probe size into the cells", () => {
+  it("folds the MTU and the pair's own probe size into the cells", () => {
     const fail = new Map([["a\0b", 1]]);
     const mtu = new Map([["a\0b", 1400]]);
-    const probe = new Map([["a", 1500]]);
+    const probe = new Map([["a\0b", 1500]]);
     const m = foldMatrix("pmtu", fail, new Map(), new Map(), new Date(0), mtu, probe);
     expect(m.cells).toEqual([
       { source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 },
+    ]);
+  });
+
+  /* The gauge keeps its last value while the pair's probes stop producing a verdict (0/0 is NaN,
+     dropped), so an MTU without a result in the window is a stale size, not a measurement. */
+  it("shows no MTU for a pair with no pmtu result in the window", () => {
+    const fail = vectorByPair(vector([["a", "b", "NaN"], ["a", "c", "0"]]));
+    const mtu = new Map([["a\0b", 1500], ["a\0c", 1500]]);
+    const probe = new Map([["a\0b", 1500], ["a\0c", 1500]]);
+    const m = foldMatrix("pmtu", fail, new Map(), new Map(), new Date(0), mtu, probe);
+    expect(m.cells).toEqual([
+      { source: "a", destination: "c", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+    ]);
+    expect(m.nodes).toEqual(["a", "c"]);
+  });
+
+  /* One agent reaches a VPN peer over a 1420-byte route and a LAN peer over 1500: each pair is
+     compared with its own probe size, so the VPN pair is full size and the LAN pair reduced. */
+  it("compares each pair with its own probe size, not the source's largest", () => {
+    const fail = new Map([["a\0vpn", 0], ["a\0lan", 0]]);
+    const mtu = new Map([["a\0vpn", 1420], ["a\0lan", 1400]]);
+    const probe = new Map([["a\0vpn", 1420], ["a\0lan", 1500]]);
+    const m = foldMatrix("pmtu", fail, new Map(), new Map(), new Date(0), mtu, probe);
+    expect(m.cells.map((c) => [c.destination, c.probeMtuBytes])).toEqual([["lan", 1500], ["vpn", 1420]]);
+  });
+
+  it("carries the recent-window fail ratio on pmtu cells without making cells of its own", () => {
+    const fail = new Map([["a\0b", 0.4], ["a\0c", 0.4]]);
+    const mtu = new Map([["a\0b", 1500], ["a\0c", 1500]]);
+    const probe = new Map([["a\0b", 1500], ["a\0c", 1500]]);
+    const recent = vectorByPair(vector([["a", "b", "0"], ["a", "c", "NaN"], ["x", "y", "0"]]));
+    const m = foldMatrix("pmtu", fail, new Map(), new Map(), new Date(0), mtu, probe, recent);
+    expect(m.cells).toEqual([
+      { source: "a", destination: "b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 },
+      { source: "a", destination: "c", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500 },
+    ]);
+    expect(m.nodes).toEqual(["a", "b", "c"]);
+  });
+
+  it("sends the recent-window query in the Time Machine and folds it in", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        const q = (JSON.parse(String(init?.body)) as { query: string }).query;
+        seen.push(q);
+        const v = q.includes("[3m]") ? "0" : q.includes("[5m]") ? "0.4" : "1500";
+        return Promise.resolve(json(vector([["a", "b", v]])));
+      }),
+    );
+    const m = await getMatrixAt("pmtu", AT);
+    expect(seen.some((q) => q.includes("[3m]"))).toBe(true);
+    expect(m.cells).toEqual([
+      { source: "a", destination: "b", failRatio: 0.4, mtuBytes: 1500, probeMtuBytes: 1500, recentFailRatio: 0 },
     ]);
   });
 });

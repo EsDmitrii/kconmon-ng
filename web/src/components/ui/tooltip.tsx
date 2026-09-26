@@ -11,13 +11,13 @@ const GAP = 8;
  * Tooltip: a real hover layer (not a title attribute); the bubble renders in a body portal at a
  * fixed position measured from the trigger.
  *
- * `side` is the PREFERENCE, not the outcome. A matrix cell in the top row had
- * no room above it, and the bubble that could not fit there ended up over the
- * value the operator was pointing at (QA scope 2, finding #23). After the
+ * `side` is the PREFERENCE, not the outcome. A matrix cell in the top row has
+ * no room above it, and a bubble that cannot fit there would cover the value
+ * the operator is pointing at. After the
  * bubble mounts it is measured once and, when the preferred side cannot hold
  * it, flipped to the other one; the horizontal centre is clamped into the
- * viewport by the same margin, so a first- or last-column header no longer
- * pushes half the bubble off screen.
+ * viewport by the same margin, so a first- or last-column header cannot push
+ * half the bubble off screen.
  *
  * The horizontal centring lives in the INLINE transform only. A -translate-x-1/2
  * utility on top of it doubled the shift once the entrance animation stopped

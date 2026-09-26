@@ -14,6 +14,7 @@ import {
   shortHash,
   toggleCompare,
 } from "./mtr";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 // Same reason as target-card.test.tsx: echarts.init() needs a canvas context
 // jsdom does not have. The trend's DATA is asserted in
@@ -116,6 +117,8 @@ function renderPage(
     permissions?: string[];
     databaseConfigured?: boolean;
     prometheusConfigured?: boolean;
+    /** Replaces the 200 GET /api/v1/config would answer with. */
+    configResponse?: () => Response;
     destinations?: unknown[];
     nodes?: string[];
     /** Agents the controller does NOT list as nodes. */
@@ -144,6 +147,7 @@ function renderPage(
     permissions = VIEWER,
     databaseConfigured = true,
     prometheusConfigured = true,
+    configResponse,
     destinations = [destinationRow()],
     nodes = ["node-a", "node-b", "node-c"],
     agents = [],
@@ -172,7 +176,7 @@ function renderPage(
 
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/config")) {
-      return Promise.resolve(json(configBody(databaseConfigured, prometheusConfigured)));
+      return Promise.resolve(configResponse ? configResponse() : json(configBody(databaseConfigured, prometheusConfigured)));
     }
     if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes, agents)));
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets, nextCursor: "" }));
@@ -436,11 +440,19 @@ describe("MTRPage — no mtr:read", () => {
   });
 });
 
-describe("MTRPage — database.mode=disabled", () => {
-  it("names console.database.mode and issues zero mtr requests", async () => {
+describe("MTRPage — no database configured", () => {
+  it("names database.dsnFile and issues zero mtr requests", async () => {
     const { resourceCalls } = renderPage({ databaseConfigured: false });
 
-    expect(await screen.findByText(/console\.database\.mode/)).toBeInTheDocument();
+    expect(await screen.findByText(/database\.dsnFile \(Helm: database\.existingSecret\)/)).toBeInTheDocument();
+    expect(resourceCalls()).toEqual([]);
+  });
+
+  it("says the configuration could not be read instead of asking for database.dsnFile", async () => {
+    const { resourceCalls } = renderPage({ configResponse: () => problem(502, "Bad Gateway", "ingress upstream gone") });
+
+    expect(await screen.findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/database\.dsnFile/);
     expect(resourceCalls()).toEqual([]);
   });
 });
@@ -725,6 +737,20 @@ describe("MTRPage — history pane", () => {
     const qs = new URLSearchParams(snapshotListCalls()[0].url.split("?")[1]);
     expect(qs.get("source")).toBe("node-a");
     expect(qs.get("destination")).toBe("api-gw");
+  });
+
+  it("writes the picked pair into the URL, keeping the viewed instant, so the address restores it", async () => {
+    renderPage({
+      at: "2026-08-08T00:00:00Z",
+      destinations: [destinationRow({ sourceNode: "node-a", destination: "api-gw" })],
+    });
+
+    await selectPair("node-a", "api-gw");
+
+    await waitFor(() => expect(deepLinkSource(window.location.search)).toBe("node-a"));
+    expect(deepLinkDestination(window.location.search)).toBe("api-gw");
+    expect(new URLSearchParams(window.location.search).get("at")).toBe("2026-08-08T00:00:00Z");
+    expect(window.location.pathname).toBe("/mtr");
   });
 
   it("badges every row whose path differs from the next-older one, and leaves the oldest unbadged", async () => {
@@ -1835,5 +1861,55 @@ describe("MTRPage — 2.4.0 polish", () => {
     const line = await screen.findByText("kconmon-stand-worker6 → kconmon-stand-worker9");
     expect(line.className).toMatch(/break-all/);
     expect(line.className).not.toMatch(/truncate/);
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("MTRPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  /* The hop table keeps a 32rem floor so its columns stay readable; on a phone it scrolls inside its card. */
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage({
+      onSnapshot: (id) =>
+        json(
+          snapshotRow({
+            id,
+            hops: [
+              hop({ number: 1, ip: "10.0.0.1", hostname: "gw.internal", rttNs: 2_500_000 }),
+              hop({ number: 2, ip: "203.0.113.9", hostname: undefined, rttNs: 41_000_000 }),
+            ],
+          }),
+        ),
+    });
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+    await screen.findByRole("table", { name: /hops/i });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage({
+      onSnapshot: (id) =>
+        json(
+          snapshotRow({
+            id,
+            hops: [
+              hop({ number: 1, ip: "10.0.0.1", hostname: "gw.internal", rttNs: 2_500_000 }),
+              hop({ number: 2, ip: "203.0.113.9", hostname: undefined, rttNs: 41_000_000 }),
+            ],
+          }),
+        ),
+    });
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+    await screen.findByRole("table", { name: /hops/i });
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

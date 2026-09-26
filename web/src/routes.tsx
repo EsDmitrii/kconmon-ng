@@ -6,6 +6,7 @@ import {
   lazyRouteComponent,
   Link,
   Outlet,
+  useRouter,
   useRouterState,
   type RouteComponent,
 } from "@tanstack/react-router";
@@ -13,16 +14,20 @@ import { useQuery } from "@tanstack/react-query";
 import { NAV_ITEMS } from "@/nav";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AnonymousBanner } from "@/components/anonymous-banner";
+import { PasswordDialogHost } from "@/components/change-password";
 import { CommandPalette } from "@/components/command-palette";
 import { NavDrawer } from "@/components/nav-drawer";
 import { StubPage } from "@/components/stub-page";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { TimeMachineBar } from "@/components/timemachine-bar";
-import { PageShell } from "@/components/page-shell";
+import { PAGE_CONTAINER_CLASS, PageShell } from "@/components/page-shell";
 import { RouteErrorBoundary } from "@/components/error-boundary";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ApiError, getConfig, getMe } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
+import { useConsoleConfig } from "@/hooks/use-capabilities";
+import { ApiError, getMe, isAuthUnavailable } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
 import { notFoundDict } from "@/lib/i18n/dict/not-found";
@@ -60,12 +65,15 @@ const TargetCardPage = lazyRouteComponent(() => import("@/pages/target-card"), "
  * instead of the app's real one, and check the shell renders identically.
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data: config } = useConsoleConfig();
+  const { isAnonymous } = useAuth();
+  // Until /config answers (or when it failed) only an anonymous /auth/me proves the mode.
+  const bannerMode = config?.auth.mode ?? (isAnonymous ? "anonymous" : undefined);
   const t = useT(chromeDict);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   /* The WHOLE location for the Time Machine's URL sync: a nav link back to the
-     page you are already on changes only the query, and that is exactly the
-     navigation that used to drop ?at= unseen. */
+     page you are already on changes only the query, and that navigation must
+     not drop ?at= unseen. */
   const href = useRouterState({ select: (s) => s.location.href });
   /* PageDown/End scroll the focused element's nearest scrollable ancestor, and
      only <main> scrolls here — after a nav click that ancestor is the sidebar.
@@ -82,66 +90,63 @@ export function AppShell({ children }: { children: ReactNode }) {
     // TimeMachineProvider wraps the shell rather than sitting up in main.tsx next to
     // QueryClientProvider/ThemeProvider.
     <TimeMachineProvider>
-      {/* The ⌘K palette (M7 Task 9, plan Decision 8) mounts HERE rather than in
-          main.tsx: it reads the Time Machine (Return to Live, and the
-          DISABLE=time treatment on its create actions), so it has to sit
-          inside this provider — and mounting it in the shell means the one
-          test seam that already drives AppShell drives the palette too.
-          It renders null until a hotkey opens it, so the shell's existing
-          pinned structure is untouched. */}
-      {/* The router drops ?at= when it builds the next URL; this puts it back,
-          so the address bar never claims Live while the console is at `t`. */}
-      <AtParamSync href={href} />
-      <CommandPalette />
-      {/* Twelve nav links plus the theme toggle and the user menu sit ahead of
-          the page on EVERY route, so a keyboard user pays for the sidebar once
-          per navigation. This is the standard escape hatch, and it is the
-          first thing Tab reaches: off-screen until focused (Tailwind's
-          sr-only / focus:not-sr-only pair), so the shell's pinned M2 layout is
-          unchanged for everyone else. */}
-      <a
-        href="#main-content"
-        className={cn(
-          "sr-only focus:not-sr-only",
-          "focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-popover focus:px-3 focus:py-2",
-          "focus:text-[13px] focus:text-foreground focus:shadow-card focus:outline-none focus:ring-2 focus:ring-ring",
-        )}
-      >
-        {t("shell.skipToContent")}
-      </a>
-      {/* dvh, not vh. The shell owns the whole viewport and the DOCUMENT never scrolls — only
-          <main> does — so on iOS Safari and Android Chrome the toolbars never collapse, and 100vh
-          (the LARGE viewport) is about 110px taller than what is actually visible. The bottom strip
-          of every route then sits behind the browser chrome with no scroll that can reach it: the
-          pager at the end of a table, the sidebar's own Sign out. h-screen stays as the fallback
-          for engines without dvh. */}
-      <div className="flex h-screen h-[100dvh] w-screen overflow-hidden">
-        {/* Two renderings of ONE sidebar, and CSS picks: the column exists from
-            768px up, the drawer's trigger below it. A fixed 16rem column left a
-            375px viewport with 6rem of page and a horizontal scroll on every
-            route (QA scope 2, finding #16); `min-w-0` is the other half of that
-            fix — without it a wide child (the matrix grid, a run's table) sets
-            the flex item's floor and the whole shell scrolls sideways instead
-            of the one panel that is actually too wide. */}
-        <div className="hidden md:flex">
-          <AppSidebar />
+      <PasswordDialogHost>
+        {/* The ⌘K palette mounts HERE rather than in main.tsx: it reads the Time
+            Machine (Return to Live, and the DISABLE=time treatment on its create
+            actions), so it has to sit inside this provider. It renders null
+            until a hotkey opens it. */}
+        {/* The router drops ?at= when it builds the next URL; this puts it back,
+            so the address bar never claims Live while the console is at `t`. */}
+        <AtParamSync href={href} />
+        <CommandPalette />
+        {/* Twelve nav links plus the theme toggle and the user menu sit ahead of
+            the page on EVERY route, so a keyboard user pays for the sidebar once
+            per navigation. This is the standard escape hatch, and it is the
+            first thing Tab reaches: off-screen until focused (Tailwind's
+            sr-only / focus:not-sr-only pair), so the layout is unchanged for
+            everyone else. */}
+        <a
+          href="#main-content"
+          className={cn(
+            "sr-only focus:not-sr-only",
+            "focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-popover focus:px-3 focus:py-2",
+            "focus:text-[13px] focus:text-foreground focus:shadow-card focus:outline-none focus:ring-2 focus:ring-ring",
+          )}
+        >
+          {t("shell.skipToContent")}
+        </a>
+        {/* dvh, not vh. The shell owns the whole viewport and the DOCUMENT never scrolls — only
+            <main> does — so on iOS Safari and Android Chrome the toolbars never collapse, and 100vh
+            (the LARGE viewport) is about 110px taller than what is actually visible. The bottom strip
+            of every route then sits behind the browser chrome with no scroll that can reach it: the
+            pager at the end of a table, the sidebar's own Sign out. h-screen stays as the fallback
+            for engines without dvh. */}
+        <div className="flex h-screen h-[100dvh] w-screen overflow-hidden">
+          {/* Two renderings of ONE sidebar, and CSS picks: the column exists from
+              md (48rem) up, the drawer's trigger below it. `min-w-0` keeps a wide
+              child (the matrix grid, a run's table) from setting the flex item's
+              floor, so only the panel that is too wide scrolls sideways, not the
+              whole shell. */}
+          <div className="hidden md:flex">
+            <AppSidebar />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <header className="flex items-center gap-2 px-3 pt-3 md:hidden">
+              <NavDrawer />
+              <span className="text-[15px] font-semibold tracking-tight">kconmon-ng</span>
+            </header>
+            {bannerMode !== undefined ? <AnonymousBanner mode={bannerMode} role={config?.auth.role} /> : null}
+            <TimeMachineBar />
+            {/* tabIndex -1 so the skip link's jump actually MOVES focus rather
+                than only scrolling: a <main> is not focusable on its own, and a
+                fragment jump to a non-focusable target leaves the keyboard back
+                in the sidebar on the next Tab. */}
+            <main ref={mainRef} id="main-content" tabIndex={-1} className="flex-1 overflow-auto outline-none">
+              <RouteErrorBoundary resetKey={pathname}>{children}</RouteErrorBoundary>
+            </main>
+          </div>
         </div>
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <header className="flex items-center gap-2 px-3 pt-3 md:hidden">
-            <NavDrawer />
-            <span className="text-[15px] font-semibold tracking-tight">kconmon-ng</span>
-          </header>
-          <AnonymousBanner mode={config?.auth.mode} role={config?.auth.role} />
-          <TimeMachineBar />
-          {/* tabIndex -1 so the skip link's jump actually MOVES focus rather
-              than only scrolling: a <main> is not focusable on its own, and a
-              fragment jump to a non-focusable target leaves the keyboard back
-              in the sidebar on the next Tab. */}
-          <main ref={mainRef} id="main-content" tabIndex={-1} className="flex-1 overflow-auto outline-none">
-            <RouteErrorBoundary resetKey={pathname}>{children}</RouteErrorBoundary>
-          </main>
-        </div>
-      </div>
+      </PasswordDialogHost>
     </TimeMachineProvider>
   );
 }
@@ -150,10 +155,9 @@ export function AppShell({ children }: { children: ReactNode }) {
  * BareShell is what a visitor who has not signed in gets: the product's name and
  * the card, and nothing else.
  *
- * The owner's report: /login rendered the FULL shell — every nav item from
- * Overview to Settings, the Time Machine bar, the anonymous banner — around a
- * sign-in form. That hands the product's whole feature map to somebody who has
- * not authenticated, and every link in it leads back to the same page.
+ * The full shell around a sign-in form would hand the product's whole feature
+ * map to somebody who has not authenticated, and every link in it would lead
+ * back to the same page.
  *
  * The theme toggle stays. It is a display preference the browser owns (its
  * provider is up in main.tsx, above the router), not a feature of the console,
@@ -192,9 +196,11 @@ export const NOT_FOUND_PATH_LIMIT = 120;
  */
 export function NotFoundPage() {
   const t = useT(notFoundDict);
-  /* The router's own location rather than window.location: a test drives this
-     tree with a memory history, and so does every in-app navigation. */
-  const href = useRouterState({ select: (s) => s.location.href });
+  /* The router's history rather than window.location, since a test drives this tree with a memory
+     history; and history's href rather than the router's, which re-serialises the query (":" comes
+     back as "%3A"). The selector re-runs on every navigation. */
+  const router = useRouter();
+  const href = useRouterState({ select: () => router.history.location.href });
   const shown = href.length > NOT_FOUND_PATH_LIMIT ? `${href.slice(0, NOT_FOUND_PATH_LIMIT)}…` : href;
   return (
     <PageShell title={t("title")}>
@@ -249,9 +255,12 @@ const rootRoute = createRootRoute({
  * briefly SEES the console: the shell and the route render immediately, their
  * queries all 401 and paint "authentication required" panels, and only then
  * the first 401's redirect (lib/api.ts) lands on /login — a sub-second flash
- * of the product's whole layout (owner's screen recording). While the subject
+ * of the product's whole layout. While the subject
  * is unknown, and while a 401's redirect is in flight, the screen stays on
- * GateSplash. Any OTHER failure fails open: a console that cannot ask "who am
+ * GateSplash. A 503 "authentication unavailable" (the session store did not
+ * answer) keeps the gate closed on a retry message instead: the session is
+ * still valid, so neither /login nor a subject-less shell is right. Any OTHER
+ * failure fails open: a console that cannot ask "who am
  * I" over a flaky network must degrade to the pages' own inline errors, not
  * to a permanent splash. Same ["me"] cache entry as useAuth, so the gate's
  * one answer is the answer every mounted consumer reads.
@@ -263,16 +272,45 @@ export function AuthGate({ children }: { children: ReactNode }) {
      refetch fails, the gate reopens, and the console flaps between splash and
      shell forever. An errored subject check is asked again only when login or
      logout invalidates the key. */
-  const { data, error } = useQuery({
+  const { data, error, refetch, isFetching } = useQuery({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
     retryOnMount: false,
     staleTime: Infinity,
+    /* A 503 "authentication unavailable" is the session store blinking, not a verdict on the
+       session: ask again until it answers. Only this observer polls, and only in that state. */
+    refetchInterval: (query) => (isAuthUnavailable(query.state.error) ? AUTH_UNAVAILABLE_RETRY_MS : false),
   });
   if (data !== undefined) return <>{children}</>;
+  if (isAuthUnavailable(error)) return <AuthUnavailable retrying={isFetching} onRetry={() => void refetch()} />;
   if (error !== null && !(error instanceof ApiError && error.problem.status === 401)) return <>{children}</>;
   return <GateSplash />;
+}
+
+/** How often AuthGate asks /auth/me again while the session store is down (the server sends Retry-After: 1). */
+export const AUTH_UNAVAILABLE_RETRY_MS = 2_000;
+
+/**
+ * AuthUnavailable is what the gate shows instead of the console while /auth/me answers 503
+ * "authentication unavailable". Opening the shell would render every page as if the subject had no
+ * permissions, and a trip to /login would sign out a session that is still valid.
+ */
+function AuthUnavailable({ retrying, onRetry }: { retrying: boolean; onRetry: () => void }) {
+  const t = useT(chromeDict);
+  return (
+    <div className="flex min-h-screen w-full items-center justify-center p-4">
+      <Card role="alert" className="flex max-w-md flex-col gap-3 border-l-4 border-l-health-warn p-5">
+        <p className="text-sm font-medium">{t("authGate.unavailable.title")}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">{t("authGate.unavailable.body")}</p>
+        <div>
+          <Button size="sm" variant="outline" loading={retrying} onClick={onRetry}>
+            {t("authGate.unavailable.retry")}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
 }
 
 /**
@@ -295,10 +333,10 @@ function GateSplash() {
 }
 
 /**
- * The shell is a PATHLESS LAYOUT ROUTE rather than the root's component, which
- * is the whole of the fix above: a route gets the chrome by hanging off this
- * one, and /login hangs off the root instead. Nothing has to remember to hide
- * anything, and no route can acquire the shell by accident.
+ * The shell is a PATHLESS LAYOUT ROUTE rather than the root's component: a route
+ * gets the chrome by hanging off this one, and /login hangs off the root
+ * instead. Nothing has to remember to hide anything, and no route can acquire
+ * the shell by accident.
  */
 const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -321,8 +359,7 @@ const routes = NAV_ITEMS.map((item) =>
 );
 
 /* /login is deliberately not in NAV_ITEMS (it has no sidebar entry), not gated
-   by auth, and — since the owner's report — the one route hanging off the ROOT
-   rather than off the shell. */
+   by auth, and the one route hanging off the ROOT rather than off the shell. */
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
@@ -381,10 +418,12 @@ export const routeTree = rootRoute.addChildren([
 function PagePending() {
   const t = useT(chromeDict);
   return (
-    <Card role="status" aria-live="polite" className="p-6">
-      <span className="sr-only">{t("shell.pageLoading")}</span>
-      <Skeleton className="h-10 w-full" />
-    </Card>
+    <div className={PAGE_CONTAINER_CLASS}>
+      <Card role="status" aria-live="polite" className="p-6">
+        <span className="sr-only">{t("shell.pageLoading")}</span>
+        <Skeleton className="h-10 w-full" />
+      </Card>
+    </div>
   );
 }
 

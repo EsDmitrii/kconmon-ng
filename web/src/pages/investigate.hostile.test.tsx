@@ -80,7 +80,8 @@ interface Options {
    *  empty result, so the derived source contributes no rows. */
   lossMatrix?: unknown;
   incident?: Record<string, unknown> | null;
-  failing?: { prefix: string; status?: number; detail: string }[];
+  /** `bare`: answer with a problem+json that carries neither title nor detail, as a proxy may. */
+  failing?: { prefix: string; status?: number; detail: string; bare?: boolean }[];
   topologyNodes?: { name: string; zone: string; ready: boolean }[];
   locale?: Locale;
 }
@@ -103,7 +104,15 @@ function renderPage(opts: Options = {}) {
     const href = String(url);
     const method = (init?.method ?? "GET").toUpperCase();
     const broken = failing.find((f) => href.startsWith(f.prefix));
-    if (broken !== undefined) return Promise.resolve(problem(broken.status ?? 500, broken.detail));
+    if (broken !== undefined) {
+      if (broken.bare) {
+        return Promise.resolve(new Response(JSON.stringify({ type: "about:blank", status: broken.status ?? 500 }), {
+          status: broken.status ?? 500,
+          headers: { "Content-Type": "application/problem+json" },
+        }));
+      }
+      return Promise.resolve(problem(broken.status ?? 500, broken.detail));
+    }
 
     if (href.startsWith("/api/v1/auth/me")) {
       return Promise.resolve(json({ subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions }));
@@ -422,7 +431,7 @@ describe("an empty ?incident= (finding #5)", () => {
     await new Promise((r) => setTimeout(r, 20));
     /* It used to fire GET /api/v1/incidents/ , read the 404 as "somebody deleted
        it", and render a card whose sentence named nothing at all. */
-    expect(fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/incidents"))).toEqual([]);
+    expect(fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => u.startsWith("/api/v1/incidents/"))).toEqual([]);
     expect(screen.queryByTestId("incident-not-found")).toBeNull();
     expectNoGarbage();
   });
@@ -670,5 +679,22 @@ describe("i18n", () => {
     });
     await waitFor(() => expect(screen.getAllByTestId("timeline-row").length).toBeGreaterThan(0));
     expectNoGarbage();
+  });
+});
+
+describe("an incident read refused with a problem that says nothing", () => {
+  it("falls back to the page's own sentence instead of throwing", async () => {
+    renderPage({ search: "?incident=inc-1", failing: [{ prefix: "/api/v1/incidents/inc-1", bare: true, detail: "" }] });
+    const card = await screen.findByText("No incident matches this link");
+    expect(card.parentElement?.textContent).toContain("The incident could not be read.");
+    expectNoGarbage();
+  });
+});
+
+describe("a failed GET /api/v1/config", () => {
+  it("says the configuration could not be read instead of asking for database.dsnFile", async () => {
+    renderPage({ failing: [{ prefix: "/api/v1/config", status: 502, detail: "ingress upstream gone" }] });
+    expect(await screen.findByText(/Could not read the console configuration.*ingress upstream gone/)).toBeTruthy();
+    expect(bodyText()).not.toMatch(/database\.dsnFile/);
   });
 });

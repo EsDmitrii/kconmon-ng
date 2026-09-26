@@ -13,7 +13,7 @@ import {
   useChartCursor,
   type ReadoutSeries,
 } from "@/lib/chart-cursor";
-import { ApiError } from "@/lib/api";
+import { ApiError, queryErrorMessage } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import { stampClock, translate, useLocale, useT, type Translate } from "@/lib/i18n";
 import { PROMQL_MAX_RANGE_MS } from "@/lib/investigation-sources";
@@ -29,18 +29,17 @@ const enT: Translate<SignalsKey> = (key, vars) => translate(signalsDict, "en", k
  *  the half an operator needs; the generic fallback is for a transport failure
  *  that carries no body at all. */
 function problemDetail(error: Error, t: Translate<SignalsKey> = enT): string {
-  if (error instanceof ApiError) return error.problem.detail ?? error.problem.title;
+  if (error instanceof ApiError) return queryErrorMessage(error, t("error.noBody"));
   return error.message === "" ? t("error.noBody") : error.message;
 }
 
 /** investigation-signals.tsx — the Investigate page's right-hand column: the scope's loss and RTT charts. */
 
 /*
- * The cursor markLine that used to live here is gone, and the mechanic it served
- * is not: the timeline's instant now goes into the page's cursor group
- * (lib/chart-cursor.tsx), which draws ONE line on every chart of the page rather
- * than a private one on these two. That is also what made hovering a chart able
- * to move the cursor — a markLine rebuilt per mouse position would have meant a
+ * No cursor markLine here: the timeline's instant goes into the page's cursor
+ * group (lib/chart-cursor.tsx), which draws ONE line on every chart of the page
+ * rather than a private one on these two. That is also what lets hovering a
+ * chart move the cursor — a markLine rebuilt per mouse position would mean a
  * setOption per frame.
  */
 
@@ -181,9 +180,8 @@ function SignalChart({
   emptyNote,
   refusal,
 }: {
-  /** The chart's IDENTITY, separate from its title since the title moved into
-   *  the dictionary: it used to be derived from the English words, and an id
-   *  that changes with the interface language is not an id. */
+  /** The chart's IDENTITY, separate from its translated title: an id that
+   *  changes with the interface language is not an id. */
   id: string;
   title: string;
   /** What the legend and the tooltip call the one series — see UNNAMED_SERIES. */
@@ -277,8 +275,7 @@ function CursorReadout({ snap }: { snap: readonly ReadoutSeries[] }) {
   return (
     <p data-testid="signal-cursor" className="mt-2 text-[11px] text-muted-foreground">
       {/* The SAME stamp helper the timeline row's own clock uses, so the instant
-          a reader is hovering reads identically in both places (QA scope 3,
-          finding #18). */}
+          a reader is hovering reads identically in both places. */}
       {t("cursor", { at: text })}
     </p>
   );
@@ -304,15 +301,15 @@ export function SignalPanels({
 }: {
   scopeLabel: string;
   loss: PromResult | undefined;
-  /** The loss range query's REJECTION (finding #2). */
+  /** The loss range query's REJECTION. */
   lossError?: Error | null;
   rtt: PromResult | undefined;
-  /** The RTT range query's REJECTION (finding #2). */
+  /** The RTT range query's REJECTION. */
   rttError?: Error | null;
   delta: MatrixDelta;
-  /** The fail-ratio pair's REJECTION (QA scope 3, finding #1). Without it the
-   *  chip printed "0.0% → 0.0% · +0.0 pp" over two requests that never came
-   *  back — a figure, in the place a figure lives, describing nothing. */
+  /** The fail-ratio pair's REJECTION. Without it the chip would print
+   *  "0.0% → 0.0% · +0.0 pp" over two requests that never came back — a
+   *  figure, in the place a figure lives, describing nothing. */
   deltaError?: Error | null;
   windows: MaintenanceWindow[];
   /** The investigated window. Both charts pin their x-axis to it, so the loss

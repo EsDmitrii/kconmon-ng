@@ -1,6 +1,8 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as echarts from "echarts";
+import { ThemeProvider } from "./theme-provider";
+import { chartColors } from "@/lib/chart-theme";
 
 /**
  * The one mount point every chart in this console goes through.
@@ -730,5 +732,28 @@ describe("the neighbour's dots follow its legend", () => {
     // setOption(notMerge) re-selects everything, so a remembered "off" would hide a curve that is
     // back on the screen.
     expect(neighbour().getAllByTestId("chart-readout-dot").map((d) => d.style.opacity)).toEqual(["1", "1"]);
+  });
+});
+
+/* ── the tooltip follows the console theme ───────────────────────────────── */
+
+describe("the tooltip takes the console theme", () => {
+  afterEach(() => {
+    try {
+      localStorage.removeItem("kconmon-console-theme");
+    } catch {
+      /* no storage in this environment */
+    }
+  });
+
+  it.each(["dark", "light"] as const)("paints a %s tooltip for a chart that passes no theme of its own", (theme) => {
+    localStorage.setItem("kconmon-console-theme", theme);
+    render(
+      <ThemeProvider>
+        <EChart option={TIME_OPTION} />
+      </ThemeProvider>,
+    );
+    const passed = setOption.mock.calls[0][0] as { tooltip: { backgroundColor?: string } };
+    expect(passed.tooltip.backgroundColor).toBe(chartColors(theme).tooltip.background);
   });
 });

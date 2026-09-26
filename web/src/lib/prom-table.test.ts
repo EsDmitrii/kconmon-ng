@@ -3,7 +3,35 @@ import { LAST_COL, POINTS_COL, TIME_COL, VALUE_COL, formatValue, isFigureColumn,
 import type { PromResult } from "./types";
 
 describe("toTable", () => {
-  it("maps a vector result to sorted label columns plus a value column", () => {
+  /* The value is the answer the query was run for. Behind every label column of `up` (ten of them)
+     it started past the right edge of a 1440px desktop, so it leads and the labels scroll. */
+  it("puts the value and its stamp before the label columns", () => {
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const vector = toTable(
+      {
+        status: "success",
+        data: {
+          resultType: "vector",
+          result: [
+            { metric: { job: "a", instance: "x" }, value: [1700000000, "1"] },
+            { metric: { job: "b", instance: "y" }, value: [1699999000, "0"] },
+          ],
+        },
+      },
+      iso,
+    );
+    expect(vector.columns).toEqual([VALUE_COL, TIME_COL, "instance", "job"]);
+    expect(vector.rows[0]).toEqual(["1", iso(1700000000000), "x", "a"]);
+
+    const series = toTable({
+      status: "success",
+      data: { resultType: "matrix", result: [{ metric: { host: "h" }, values: [[1700000000, "0.1"], [1700000060, "0.3"]] }] },
+    });
+    expect(series.columns).toEqual([LAST_COL, POINTS_COL, "host"]);
+    expect(series.rows).toEqual([["0.3", "2", "h"]]);
+  });
+
+  it("maps a vector result to a value column plus sorted label columns", () => {
     const res: PromResult = {
       status: "success",
       data: {
@@ -18,14 +46,14 @@ describe("toTable", () => {
     const table = toTable(res);
 
     // Labels sorted alphabetically: destination_node before source_node.
-    expect(table.columns).toEqual(["destination_node", "source_node", VALUE_COL]);
+    expect(table.columns).toEqual([VALUE_COL, "destination_node", "source_node"]);
     expect(table.rows).toEqual([
-      ["a", "b", "0.5"],
-      ["c", "a", "0.1"],
+      ["0.5", "a", "b"],
+      ["0.1", "c", "a"],
     ]);
   });
 
-  it("maps a matrix result to label columns plus points count and last value", () => {
+  it("maps a matrix result to the last value and points count plus label columns", () => {
     const res: PromResult = {
       status: "success",
       data: {
@@ -45,8 +73,8 @@ describe("toTable", () => {
 
     const table = toTable(res);
 
-    expect(table.columns).toEqual(["host", POINTS_COL, LAST_COL]);
-    expect(table.rows).toEqual([["example.com", "3", "0.3"]]);
+    expect(table.columns).toEqual([LAST_COL, POINTS_COL, "host"]);
+    expect(table.rows).toEqual([["0.3", "3", "example.com"]]);
   });
 
   it("maps a scalar result to a single value column/row", () => {
@@ -100,7 +128,7 @@ describe("toTable timestamps", () => {
     expect(table.at).toBe(1700000000000);
     expect(table.kind).toBe("instant");
     // One instant for every row means no column for it.
-    expect(table.columns).toEqual(["job", VALUE_COL]);
+    expect(table.columns).toEqual([VALUE_COL, "job"]);
   });
 
   it("stamps a range table with the instant its LAST values came from", () => {
@@ -132,10 +160,10 @@ describe("toTable timestamps", () => {
     );
 
     expect(table.at).toBeNull();
-    expect(table.columns).toEqual(["host", POINTS_COL, TIME_COL, LAST_COL]);
+    expect(table.columns).toEqual([LAST_COL, TIME_COL, POINTS_COL, "host"]);
     expect(table.rows).toEqual([
-      ["live", "1", iso(1700000060000), "0.3"],
-      ["stopped", "1", iso(1699996400000), "0.9"],
+      ["0.3", iso(1700000060000), "1", "live"],
+      ["0.9", iso(1699996400000), "1", "stopped"],
     ]);
   });
 
@@ -152,7 +180,7 @@ describe("toTable timestamps", () => {
     });
 
     expect(table.at).toBeNull();
-    expect(table.columns).toEqual(["host", POINTS_COL, LAST_COL]);
+    expect(table.columns).toEqual([LAST_COL, POINTS_COL, "host"]);
   });
 
   it("stamps a scalar, and claims no instant for a series with no points at all", () => {

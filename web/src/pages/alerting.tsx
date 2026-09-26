@@ -14,8 +14,10 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
+import { useFocusOnRefusal } from "@/hooks/use-focus-on-refusal";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { MaintenanceRow } from "@/components/maintenance";
+import { ROW_ACTION, RowActionLabel } from "@/components/settings-section";
 import {
   ApiError,
   createAlertRule,
@@ -26,6 +28,7 @@ import {
   listForeignAlertRules,
   listAllTargets,
   previewAlertRule,
+  queryErrorMessage,
   syncAlertRules,
   updateAlertRule,
 } from "@/lib/api";
@@ -50,23 +53,6 @@ import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 /** Prometheus evaluates, the console MANAGES; with alerting off this section is the only one that stops working. */
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
-
-/**
- * queryErrorMessage prefers the SERVER's own sentence and falls back to ours the
- * moment there is no sentence to prefer.
- *
- * The `.trim() ||` is the whole point (QA hostile pass). `detail ?? title` is
- * the right order, but both halves are strings that can arrive empty —
- * `{"type":"about:blank","status":500}` is a legal problem+json envelope, and a
- * proxy between the browser and the console is entitled to send one. An empty
- * string then rendered as an empty red paragraph in the list, and as NOTHING AT
- * ALL wherever the caller stores it in state and gates the JSX on truthiness:
- * a refused delete simply looked like a delete that had not been clicked.
- */
-function queryErrorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof ApiError)) return fallback;
-  return (error.problem.detail ?? error.problem.title ?? "").trim() || fallback;
-}
 
 function problemStatus(error: unknown): number | undefined {
   return error instanceof ApiError ? error.problem.status : undefined;
@@ -128,7 +114,7 @@ function ErrorLine({
 
 /** withNodes renders a translated sentence that contains LINKS — the maintenance
  *  blurb says "…on Investigate or Explore…" with each name an anchor. The same
- *  helper pages/settings.tsx keeps, duplicated the way queryErrorMessage is. */
+ *  helper pages/settings.tsx keeps. */
 function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNode[] {
   return template.split(/(\{\w+\})/).map((chunk, i) => {
     const name = /^\{(\w+)\}$/.exec(chunk)?.[1];
@@ -176,36 +162,6 @@ function PermissionCard({ permission, children }: { permission: string; children
     </Card>
   );
 }
-
-/**
- * RowActionLabel is the VISIBLE half of a row button whose label carries the
- * object's own name — pages/targets.tsx's component, for its reason, applied
- * here in the hostile pass because this page had the same defect and never got
- * the same fix.
- *
- * "Delete {name}" is the right thing for a screen reader: four buttons reading
- * "Delete" in a list are four identical announcements. On screen the VERB is
- * enough — the name is the row's first column — so `text` is the verb and
- * `title` the whole sentence, which also rides the button as its aria-label.
- * A rule name is a free string an operator types, so the span stays bounded
- * and truncating: a 400-character name once put sixteen hundred characters of
- * button text into one flex row, and nothing here may let that back in.
- *
- * Not lifted into components/ui: it is six lines with no state, and the two
- * copies are cheaper to read than a shared import that has to explain itself.
- */
-function RowActionLabel({ text, title }: { text: string; title?: string }) {
-  return (
-    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={title ?? text}>
-      {text}
-    </span>
-  );
-}
-
-/** ROW_ACTION is the compact ghost button every row action on this page is
- *  drawn as; a touch tighter on a phone so four of them share a line with
- *  the toggle. */
-const ROW_ACTION = "h-7 px-1.5 sm:px-2";
 
 function ListSkeleton() {
   const t = useT(alertingDict);
@@ -461,7 +417,7 @@ export const KIND_PARAMS: Record<AlertRuleKind, readonly ParamField[]> = {
   "external-target-down": [
     /* type "target", not "text": the value has to match a target's name
        EXACTLY or the rendered expression selects nothing, and a free box gave
-       an operator no way to know what the names are (finding #15). */
+       an operator no way to know what the names are. */
     {
       key: "targetName",
       labelKey: "param.targetName",
@@ -860,8 +816,9 @@ function RuleRow({
       )}
 
       {/* The actions are the right column: ml-auto pins them to the edge on
-          whichever line they land, so they can never fall under the data. */}
-      <span className="ml-auto flex shrink-0 items-center gap-1">
+          whichever line they land, so they can never fall under the data. On a
+          phone they wrap inside the row instead of pushing past its edge. */}
+      <span className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 sm:shrink-0">
           {/* aria-controls, not aria-expanded alone: components/mtr-hop-table.tsx
               set this shape's bar (a row that expands into a detail block names
               the block it expands), and "expanded" with nothing named leaves a
@@ -1069,8 +1026,7 @@ function PairEditor({
           <div key={i} className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
               {/* Placeholders, because "Add label" produces TWO identical empty
-                  boxes and nothing on screen says which is which (QA round 5,
-                  finding #15). The aria-labels have always been right; a sighted
+                  boxes and nothing on screen says which is which. The aria-labels have always been right; a sighted
                   operator had only the order to go on, and the order is the one
                   thing a two-box row does not communicate. The two boxes share
                   the row's width (flex-1, min-w-0) so the row is one line at
@@ -1180,11 +1136,13 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   const pristine = useRef(JSON.stringify(draftFrom(initial)));
   const dirty = JSON.stringify(draft) !== pristine.current;
   const [discarding, setDiscarding] = useState(false);
-  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+  /* The in-flight guard, not just a disabled look:
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
   const [formError, setFormError] = useState<{ message: string; field?: string }>();
+  const formRef = useRef<HTMLFormElement>(null);
+  useFocusOnRefusal(formRef, formError);
   const [preview, setPreview] = useState<AlertRulePreview>();
   /* The previewKey whose preview came back with rejected=true. Held as the KEY
      rather than a boolean so any edit to the expression clears the block on its
@@ -1335,6 +1293,10 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
     if (reservedMessage) return;
     // A refusal already on screen, next to the offending row.
     if (duplicateLabel !== undefined || duplicateAnnotation !== undefined) return;
+    if (draft.name.trim() === "") {
+      setFormError({ message: t("form.nameRequired"), field: "name" });
+      return;
+    }
     if (!duration.ok) {
       setFormError({ message: duration.message, field: "for" });
       return;
@@ -1356,9 +1318,10 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   return (
     <Card asChild className="p-4 sm:p-6">
       <form
+        ref={formRef}
         onSubmit={handleSubmit}
         aria-label={initial ? t("form.editAria", { name: initial.name }) : t("form.createAria")}
-        className="flex max-w-2xl flex-col gap-4"
+        className="flex flex-col gap-4 [&>*]:max-w-2xl"
       >
         <h2 className="type-section">
           {initial ? t("form.edit", { name: initial.name }) : t("form.create")}
@@ -1882,11 +1845,13 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<AlertRuleImportReport>();
   const [error, setError] = useState<string>();
 
   async function handleImport() {
+    reset();
     setBusy(true);
     setError(undefined);
     setReport(undefined);
@@ -1922,21 +1887,52 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
         {rule.managedBy === "" ? "—" : rule.managedBy}
       </span>
       {canManage ? (
-        <span className="ml-auto shrink-0">
+        <span className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
           {/* Same bound as the managed rows above: a PrometheusRule's
               metadata.name is up to 253 characters and this button's accessible
-              name carries it; the verb is what shows. */}
-          <Button
-            size="sm"
-            variant="ghost"
-            className={ROW_ACTION}
-            loading={busy}
-            {...guard}
-            aria-label={t("foreign.import", { name: rule.name })}
-            onClick={() => void handleImport()}
-          >
-            <RowActionLabel text={t("foreign.import.verb")} title={t("foreign.import", { name: rule.name })} />
-          </Button>
+              name carries it; the verb is what shows. Two presses, as a delete
+              takes: every entry lands as an ENABLED console rule, and undoing
+              that is one delete per rule. */}
+          {confirming ? (
+            <>
+              <span role="status" className="sr-only">
+                {t("foreign.importConfirm.note", {
+                  count: rule.alertRules,
+                  rules: t(pluralKey(rule.alertRules, "count.rules.one", "count.rules.few", "count.rules.many", locale)),
+                })}
+              </span>
+              <Button
+                ref={confirmRef}
+                size="sm"
+                className={ROW_ACTION}
+                loading={busy}
+                {...guard}
+                aria-label={t("foreign.importConfirm", { name: rule.name })}
+                onClick={() => void handleImport()}
+              >
+                <RowActionLabel
+                  text={t("foreign.importConfirm.verb")}
+                  title={t("foreign.importConfirm", { name: rule.name })}
+                />
+              </Button>
+              <Button size="sm" variant="ghost" className={ROW_ACTION} onClick={reset}>
+                {t("cancel")}
+              </Button>
+            </>
+          ) : (
+            <Button
+              ref={triggerRef}
+              size="sm"
+              variant="ghost"
+              className={ROW_ACTION}
+              loading={busy}
+              {...guard}
+              aria-label={t("foreign.import", { name: rule.name })}
+              onClick={ask}
+            >
+              <RowActionLabel text={t("foreign.import.verb")} title={t("foreign.import", { name: rule.name })} />
+            </Button>
+          )}
         </span>
       ) : null}
       {error ? (
@@ -1962,7 +1958,7 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
     <SectionCard title={t("foreign.heading")} blurb={t("foreign.blurb")}>
       {/* Whatever the server said — the 409 that names console.alerting.enabled
           and explains that the rules above are unaffected, or the 503 that names
-          console.database.mode — is rendered as it was written. Both are one
+          database.dsnFile — is rendered as it was written. Both are one
           sentence better than a paraphrase of them. The 409 takes the amber
           notice the managed section gives it, because it is the SAME standing
           condition read through a second endpoint; everything else is red. */}
@@ -2019,7 +2015,7 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
   );
 }
 
-/* ── maintenance windows (M3-14: moved here from Settings) ──────────────── */
+/* ── maintenance windows ──────────────────────────────────────────────────── */
 
 /**
  * MaintenanceSection is the ONLY unbounded view of the declared windows in this console — and it

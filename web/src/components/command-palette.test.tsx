@@ -26,21 +26,34 @@ const ALL_PERMISSIONS = [
   "annotations:write",
 ];
 
-function stubFetch(permissions: string[]) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(() =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            subject: { kind: "user", id: "u1", displayName: "U", groups: [], roles: ["admin"] },
-            permissions,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      ),
-    ),
-  );
+/** Every request answers the subject, unless `incidents` is given: then /config names a database
+ *  and GET /api/v1/incidents lists those rows. */
+function stubFetch(permissions: string[], incidents?: unknown[]) {
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  const fetchMock = vi.fn((url: string) => {
+    const href = String(url);
+    if (incidents && href.startsWith("/api/v1/config")) {
+      return Promise.resolve(
+        answer({
+          auth: { mode: "local", role: "", loginPath: "/api/v1/auth/login" },
+          anonymousBanner: false,
+          controller: { configured: true },
+          prometheus: { configured: true },
+          database: { configured: true },
+        }),
+      );
+    }
+    if (incidents && href.startsWith("/api/v1/incidents")) return Promise.resolve(answer({ incidents, nextCursor: "" }));
+    return Promise.resolve(
+      answer({
+        subject: { kind: "user", id: "u1", displayName: "U", groups: [], roles: ["admin"] },
+        permissions,
+      }),
+    );
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 async function renderPalette({
@@ -51,8 +64,9 @@ async function renderPalette({
      Settings and the 404, which do not opt in — the palette's picker command
      has nothing to click there and must not be offered. */
   timeMachine = true,
-}: { permissions?: string[]; locale?: Locale; timeMachine?: boolean } = {}) {
-  stubFetch(permissions);
+  incidents,
+}: { permissions?: string[]; locale?: Locale; timeMachine?: boolean; incidents?: unknown[] } = {}) {
+  const fetchMock = stubFetch(permissions, incidents);
   /* Seeded BEFORE the render: LocaleProvider reads the stored choice in a useState initialiser. */
   if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   const testRoot = createRootRoute({
@@ -86,7 +100,7 @@ async function renderPalette({
   // TanStack resolves the initial match asynchronously: nothing at all is in the document on the
   // first paint.
   await screen.findByLabelText("a page field");
-  return testRouter;
+  return Object.assign(testRouter, { fetchMock });
 }
 
 const palette = () => screen.getByRole("dialog", { name: /command palette/i });
@@ -298,6 +312,54 @@ describe("keyboard roving and ARIA", () => {
     fireEvent.keyDown(input(), { key: "ArrowDown" });
     fireEvent.change(input(), { target: { value: "e" } });
     expect(input()).toHaveAttribute("aria-activedescendant", options()[0].id);
+  });
+});
+
+/* The palette found no incidents: a resolved one was reachable only by its permalink. */
+describe("saved incidents", () => {
+  const saved = [
+    {
+      id: "inc-1",
+      title: "Loss between node-a and node-b",
+      scope: "node-a→node-b",
+      fromAt: "2026-08-08T00:00:00Z",
+      status: "resolved",
+      notes: "",
+      pinned: [],
+      createdBy: "user:ada",
+      createdAt: "2026-08-08T00:00:00Z",
+      resolvedAt: "2026-08-08T01:00:00Z",
+    },
+  ];
+  const incidentCalls = (fetchMock: ReturnType<typeof vi.fn>) =>
+    fetchMock.mock.calls.filter((c) => String(c[0]).startsWith("/api/v1/incidents"));
+
+  it("finds a resolved incident by its title and opens its permalink", async () => {
+    const router = await renderPalette({ permissions: [...ALL_PERMISSIONS, "incidents:read"], incidents: saved });
+    expect(incidentCalls(router.fetchMock)).toHaveLength(0);
+    pressK();
+    await waitFor(() => expect(incidentCalls(router.fetchMock)).toHaveLength(1));
+    fireEvent.change(input(), { target: { value: "loss between" } });
+    const group = await screen.findByRole("group", { name: "Incidents" });
+    expect(within(group).getByRole("option", { name: "Loss between node-a and node-b" })).toBeInTheDocument();
+    fireEvent.keyDown(input(), { key: "Enter" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/investigate"));
+    expect(router.state.location.searchStr).toContain("incident=inc-1");
+  });
+
+  it("lists no incidents until something is typed", async () => {
+    const router = await renderPalette({ permissions: [...ALL_PERMISSIONS, "incidents:read"], incidents: saved });
+    pressK();
+    await waitFor(() => expect(incidentCalls(router.fetchMock)).toHaveLength(1));
+    expect(screen.queryByRole("group", { name: "Incidents" })).not.toBeInTheDocument();
+  });
+
+  it("asks for none without incidents:read", async () => {
+    const router = await renderPalette({ incidents: saved });
+    pressK();
+    fireEvent.change(input(), { target: { value: "loss between" } });
+    expect(screen.queryByRole("group", { name: "Incidents" })).not.toBeInTheDocument();
+    expect(incidentCalls(router.fetchMock)).toHaveLength(0);
   });
 });
 

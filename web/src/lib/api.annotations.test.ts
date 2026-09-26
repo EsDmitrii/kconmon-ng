@@ -96,7 +96,13 @@ describe("listAnnotations", () => {
   });
 
   it("surfaces problem+json as an ApiError", async () => {
-    stubFetch(() => problem(503, "database unavailable", "console.database.mode is unset"));
+    stubFetch(() =>
+      problem(
+        503,
+        "annotations not available",
+        "set database.dsnFile in the console config (Helm: database.existingSecret) to enable /api/v1/annotations",
+      ),
+    );
     await expect(listAnnotations({ scope: "" })).rejects.toBeInstanceOf(ApiError);
   });
 });

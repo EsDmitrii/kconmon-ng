@@ -8,6 +8,19 @@ import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
 import { ExplorePage, exploreWindow, toCompareOption } from "./explore";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
+
+/* The page waits for the subject and needs promql:query (pages/explore.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
 
 /** Explore's A/B compare panel: ONE extra chart at the top of the page that puts a second leg on A's axes. */
 vi.mock("@/components/echart", () => ({
@@ -109,6 +122,21 @@ afterEach(() => {
   /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
      left behind would flip every later case in this one. */
   localStorage.removeItem(LOCALE_STORAGE_KEY);
+  auth.granted = ["promql:query"];
+});
+
+/* A role without promql:query got five 403s, one red line per card; the page now says what is
+   missing once and sends nothing. */
+describe("ExplorePage without promql:query", () => {
+  it("shows the permission card and fires no query", async () => {
+    auth.granted = ["topology:read"];
+    const { bodies } = stubFetch();
+    renderPage();
+    expect(await screen.findByText("Requires the promql:query permission")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Compare" })).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bodies).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -698,5 +726,30 @@ describe("Compare — the shift belongs to self-compare mode", () => {
        shifted leg. A B still carrying the shift ends 24h before this. */
     const newestEnd = bodies.map((b) => b.end).sort().at(-1);
     expect(endOf(CHART_B)).toBe(newestEnd);
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("ExplorePage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    stubFetch();
+    renderPage();
+    await screen.findAllByTestId("echart");
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    stubFetch();
+    renderPage();
+    await screen.findAllByTestId("echart");
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

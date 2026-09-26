@@ -325,7 +325,7 @@ describe("the Open incidents rail in Russian", () => {
     stubIncidents({ database: false });
     renderRu(<RelatedIncidents scope={NODE_SCOPE} />);
     expect(await screen.findByText(investigateEntryDict.ru["noDatabase"])).toBeInTheDocument();
-    expect(investigateEntryDict.ru["noDatabase"]).toContain("console.database.mode");
+    expect(investigateEntryDict.ru["noDatabase"]).toContain("database.dsnFile (Helm: database.existingSecret)");
   });
 
   it("translates the empty state and the row badge, keeping the incident's own title", async () => {
@@ -401,7 +401,7 @@ describe("the words these five borrowed", () => {
     expect(userMenuDict.en["roles.none"]).toBe("no roles bound");
     expect(recentChangesDict.en["db.note"]).toBe("History requires a database — showing live events only.");
     expect(investigateEntryDict.en["noDatabase"]).toBe(
-      "Incidents are stored — set console.database.mode. Nothing was requested.",
+      "Incidents are stored — set database.dsnFile (Helm: database.existingSecret). Nothing was requested.",
     );
     expect(stubPageDict.en["title"]).toBe("Not built yet — on the roadmap");
   });

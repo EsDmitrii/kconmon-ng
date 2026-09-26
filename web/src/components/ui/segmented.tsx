@@ -73,10 +73,9 @@ export function Segmented<T extends string>({
       /* shrink-0: the track is one control and wraps AS A WHOLE inside its
          parent's flex-wrap row.
 
-         max-w-full + flex-wrap is what keeps that true at 375px (QA scope 3,
-         finding #11): five scope options measure 356px against a 303px card, and
-         shrink-0 on its own meant the track simply drew past the card's edge and
-         off the viewport. Wrapping rather than scrolling because the thumb
+         max-w-full + flex-wrap is what keeps that true on a phone: five scope
+         options measure 356px against a 303px card, and shrink-0 on its own
+         would draw the track past the card's edge and off the viewport. Wrapping rather than scrolling because the thumb
          already measures offsetTop and offsetHeight — a wrapped track is a shape
          this control draws honestly, and a scroller would hide options behind a
          gesture nobody knows is there. */

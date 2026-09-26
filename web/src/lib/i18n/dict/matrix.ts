@@ -34,7 +34,8 @@ const en = {
     "A cell shows the pair's failure percentage and its p95 RTT; UDP and ICMP cells also carry packet loss. " +
     "The protocol choice travels in the URL, so a matrix view is shareable as it stands. " +
     "Ctrl and the wheel zoom the grid, the wheel alone scrolls it, and a cell opens that pair's page. " +
-    "Under a sparse topology plan, pairs no agent is assigned to probe render as dashed 'not probed' cells — expected silence, not an outage.",
+    "Under a sparse topology plan, pairs no agent is assigned to probe render as dashed 'not probed' cells — expected silence, not an outage. " +
+    "On PMTU a cell shows the largest datagram that crossed the pair in bytes: full size, reduced (of the probe size), black hole or recovering.",
 
   "protocol.aria": "Protocol",
   "plane": "plane: pod",
@@ -68,6 +69,7 @@ const en = {
 
   /* ── the grid ───────────────────────────────────────────────────────────── */
   "grid.caption": "Node-to-node failure ratio matrix, {protocol}",
+  "grid.caption.pmtu": "Node-to-node path MTU matrix",
   "grid.prefix": "Node names drop the shared prefix {prefix}",
   "grid.corner": "src \\ dst",
   "cell.self": "{node}: self",
@@ -78,6 +80,7 @@ const en = {
   "cell.mtuBlackhole": "black hole",
   "cell.mtuReduced": "of {probe}",
   "cell.mtuFull": "full size",
+  "cell.mtuRecovering": "recovering",
 
   "tooltip.unmeasured": "No probe data in Prometheus for this pair.",
   /* The sparse-plan cell (M10). Says what CAN still be done — Investigate probes on demand
@@ -99,6 +102,9 @@ const en = {
   "legend.ok": "Healthy · fail < 1%",
   "legend.warn": "Degraded · 1–10%",
   "legend.bad": "Failing · ≥ 10%",
+  "legend.ok.pmtu": "Full size",
+  "legend.warn.pmtu": "Reduced or recovering",
+  "legend.bad.pmtu": "Black hole",
   "legend.unknown": "No data",
   /* Rendered ONLY while a sparse plan is in force: in full mode the state cannot occur, and a
      legend row for an impossible state would send readers hunting for it. */
@@ -109,9 +115,10 @@ const en = {
      into the other (QA scope 2, finding #12). */
   "legend.note":
     "colour = worst of fail % and packet loss · a cell with no fail samples shows its p95 and stays green on the absence of a bad signal, not on a measured zero",
-  /* The PMTU grid draws sizes, not latencies: the note says what its figure and its amber mean. */
+  /* The PMTU grid draws sizes, not latencies: the note says what its figure and its amber mean. The
+     two windows are matrix-promql.ts RECENT_WINDOW and RATE_WINDOW; change them together. */
   "legend.note.pmtu":
-    "figure = the largest datagram that crossed, in bytes · amber = reduced, the path is smaller than the probe and says so · red = black hole, full-size datagrams vanish without an ICMP error",
+    "figure = the largest datagram that crossed, in bytes · amber = reduced, the path is smaller than the probe and says so · red = black hole, full-size datagrams vanish without an ICMP error · amber at full size = recovering, the probes of the last 3 minutes crossed clean after failures earlier in the 5-minute window",
 
   /* ── the row and column headers ─────────────────────────────────────────── */
   "header.node": "Open the card for {node}",
@@ -166,7 +173,8 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
     "В ячейке — доля сбоев пары и её p95 RTT; у ячеек UDP и ICMP ещё и потери пакетов. " +
     "Выбор протокола лежит в URL, так что вид матрицы можно передать ссылкой как есть. " +
     "Ctrl с колесом масштабируют сетку, колесо само по себе её прокручивает, а ячейка открывает страницу своей пары. " +
-    "При разреженном плане топологии пары, которые никто не зондирует по плану, рисуются пунктирными ячейками «не зондируется» — это ожидаемая тишина, а не сбой.",
+    "При разреженном плане топологии пары, которые никто не зондирует по плану, рисуются пунктирными ячейками «не зондируется» — это ожидаемая тишина, а не сбой. " +
+    "На PMTU ячейка показывает наибольшую прошедшую датаграмму в байтах: полный размер, уменьшенный путь (из размера пробы), чёрная дыра или после сбоя.",
 
   "protocol.aria": "Протокол",
   "plane": "плоскость: pod",
@@ -190,6 +198,7 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "zoom.hint.touch": "Щипок меняет масштаб, перетаскивание прокручивает сетку.",
 
   "grid.caption": "Матрица доли сбоев между узлами, {protocol}",
+  "grid.caption.pmtu": "Матрица MTU пути между узлами",
   "grid.prefix": "В именах узлов опущен общий префикс {prefix}",
   "grid.corner": "откуда \\ куда",
   "cell.self": "{node}: сам к себе",
@@ -214,6 +223,7 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "cell.mtuBlackhole": "чёрная дыра",
   "cell.mtuReduced": "из {probe}",
   "cell.mtuFull": "полный размер",
+  "cell.mtuRecovering": "после сбоя",
 
   "tooltip.unmeasured": "Для этой пары в Prometheus нет данных зондов.",
   "tooltip.notProbed":
@@ -231,12 +241,15 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "legend.ok": "Норма · сбой < 1%",
   "legend.warn": "Деградация · 1–10%",
   "legend.bad": "Сбой · ≥ 10%",
+  "legend.ok.pmtu": "Полный размер",
+  "legend.warn.pmtu": "Путь сужен или после сбоя",
+  "legend.bad.pmtu": "Чёрная дыра",
   "legend.unknown": "Нет данных",
   "legend.notProbed": "Не зондируется · исключено планом топологии",
   "legend.note":
     "цвет = худшее из доли сбоев и потерь пакетов · ячейка без выборок сбоев показывает свой p95 и остаётся зелёной потому, что плохого сигнала нет, а не потому, что измерен ноль",
   "legend.note.pmtu":
-    "число = наибольшая прошедшая датаграмма в байтах · янтарный = путь меньше пробы и сообщает об этом · красный = чёрная дыра, полноразмерные датаграммы пропадают без ICMP-ошибки",
+    "число = наибольшая прошедшая датаграмма в байтах · янтарный = путь меньше пробы и сообщает об этом · красный = чёрная дыра, полноразмерные датаграммы пропадают без ICMP-ошибки · янтарный с полным размером = после сбоя: пробы последних 3 минут прошли чисто, а сбои остались раньше в 5-минутном окне",
 
   "header.node": "Открыть карточку узла {node}",
 

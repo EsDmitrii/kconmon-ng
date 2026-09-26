@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { packZones } from "./zone-layout";
+import { LANDSCAPE_PANE_ASPECT, PORTRAIT_PANE_ASPECT, packZones } from "./zone-layout";
 
 /* Sizes here mirror what pages/topology.tsx feeds in: a 1-node zone is 300×128,
  * a 2-node zone 580×128, a 4-node zone 580×192, a 16-node zone 1140×320. */
@@ -63,6 +63,34 @@ describe("packZones — rows once a strip would overflow", () => {
       { x: 0, y: 272 },
       { x: 380, y: 272 },
       { x: 0, y: 480 },
+    ]);
+  });
+});
+
+describe("packZones — a portrait pane stacks", () => {
+  /* On a 390×844 phone the pane is about 366×620. Packed two across for a 2:1 desktop pane, three
+     zones fitted at scale 0.26 with node names 5px tall and most of the canvas empty. */
+  it("stacks three zones in one column for a phone's pane", () => {
+    expect(packZones([z(580, 192), z(580, 192), z(300, 128)], PORTRAIT_PANE_ASPECT)).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 272 },
+      { x: 0, y: 544 },
+    ]);
+  });
+
+  it("stacks two zones rather than laying them side by side", () => {
+    expect(packZones([z(300, 128), z(580, 128)], PORTRAIT_PANE_ASPECT)).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 208 },
+    ]);
+  });
+
+  it("keeps the desktop packing when no aspect is given", () => {
+    const sizes = Array.from({ length: 6 }, () => z(300, 128));
+    expect(packZones(sizes)).toEqual(packZones(sizes, LANDSCAPE_PANE_ASPECT));
+    expect(packZones([z(300, 128), z(580, 128)], LANDSCAPE_PANE_ASPECT)).toEqual([
+      { x: 0, y: 0 },
+      { x: 380, y: 0 },
     ]);
   });
 });

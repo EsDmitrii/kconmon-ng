@@ -44,6 +44,12 @@ export interface TimelineEntry {
    * (QA scope 3, finding #8).
    */
   readOnly?: boolean;
+  /**
+   * True when an audited request that was no read still changed no configuration: it was refused or
+   * failed, or it was a sign-in, sign-out or password change. rankCauses skips it like a read; the
+   * timeline draws it as a row of its own, since a refusal is worth seeing.
+   */
+  notACause?: boolean;
 }
 
 /**
@@ -257,11 +263,11 @@ export function rankCauses(
   const ranked: RankedCause[] = [];
   for (const entry of entries) {
     /* A READ is never a cause (QA scope 3, finding #8). The audit log records
-       every authorization DECISION, so the console's own GETs — and the two
-       PromQL POSTs the Investigate page itself fires to draw its charts —
+       every authorization DECISION, so the console's own GETs — and the
+       read-only POSTs (PromQL, draft previews) the console itself fires —
        arrived here as weight-2 "config changes" and out-ranked the real ones.
        The rows keep their place in the timeline; they just stop being suspects. */
-    if (entry.readOnly === true) continue;
+    if (entry.readOnly === true || entry.notACause === true) continue;
     const weight = CAUSE_WEIGHTS[entry.kind] ?? 0;
     if (weight <= 0) continue;
     const deltaSeconds = (onsetMs - entry.at.getTime()) / 1000;

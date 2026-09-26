@@ -293,7 +293,7 @@ describe("hostile ad-hoc addresses", () => {
     ["a bare IPv6", "ICMP", "2001:db8::1"],
     ["a fully-qualified name", "MTR", "example.test."],
     ["the highest legal port", "TCP", "10.0.0.1:65535"],
-    ["the lowest legal port", "UDP", "10.0.0.1:1"],
+    ["the lowest legal port", "TCP", "10.0.0.1:1"],
   ];
 
   it("lets a dialable address through, whatever it looks like", async () => {
@@ -314,7 +314,7 @@ describe("hostile ad-hoc addresses", () => {
     await pickDestination(/Ad-hoc/);
     await typeAddress("example.test");
     expect(submit()).toBeEnabled();
-    // udp has no default port, so the same string names a port nothing listens on.
+    // udp needs a kconmon agent at the far end, so no external address will do.
     fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
     expect(submit()).toBeDisabled();
     expect(screen.getByRole("alert")).toBeInTheDocument();
@@ -327,33 +327,9 @@ describe("hostile ad-hoc addresses", () => {
     expectNoGarbageOnScreen();
   });
 
-  /**
-   * SKIPPED — the refusal that is missing is not this page's.
-   *
-   * Every value below leaves Start run ENABLED and gets posted, because
-   * lib/utils.ts's isValidAdhocAddress (shared with the definition form on
-   * /targets, and not this surface's to change) accepts them:
-   *
-   *   ":"                — `colon > 0` is false, so nothing splits, and the
-   *                        bare ":" then passes the IPv6 branch's structural
-   *                        test `host.includes(":") && /^[0-9A-Fa-f:.%]+$/`.
-   *                        "::::" and "%%" ride in the same way.
-   *   "10.0.0.1:0x50"    — the port is read with Number(), which speaks hex,
-   *   "10.0.0.1:1e3"       exponents, leading "+" and leading whitespace. Go's
-   *   "10.0.0.1:+80"       strconv.Atoi (store.validateAdhocAddress, which this
-   *   "10.0.0.1: 80"       function's own doc says it mirrors) speaks none of
-   *                        them, so the server refuses what the console
-   *                        accepted and the operator collects a 400 instead of
-   *                        an inline sentence.
-   *
-   * Neither is a security hole — the server is the arbiter and refuses them —
-   * but both break the mirror's stated contract ("nothing stricter than that",
-   * which should also mean nothing looser). The fix is in src/lib/utils.ts:
-   * require at least two hex groups before accepting an IPv6-shaped host, and
-   * parse the port with a digits-only test rather than Number(). Un-skip here
-   * once it lands.
-   */
-  it.skip("refuses an address the server's own parser would refuse", async () => {
+  /* The server's parser refuses these (Go's strconv.Atoi reads no hex, exponent, sign or space); the
+     field refuses them first. */
+  it("refuses an address the server's own parser would refuse", async () => {
     for (const value of [":", "::::", "10.0.0.1:0x50", "10.0.0.1:1e3", "10.0.0.1:+80", "10.0.0.1: 80"]) {
       cleanup();
       renderPage({ nodes: ["a", "b"] });
@@ -564,7 +540,8 @@ describe("the run history, filtered while the reader is deep in it", () => {
   it("prints the server's own sentence when the history read fails", async () => {
     renderPage({ onRuns: () => problem(500, "unavailable", "the run store is not reachable") });
     expect(await screen.findByText("the run store is not reachable")).toBeInTheDocument();
-    expect(screen.getByText("No runs yet")).toBeInTheDocument();
+    // A read that failed has not said the history is empty, so no "No runs yet" slate under it.
+    expect(screen.queryByText("No runs yet")).not.toBeInTheDocument();
     expectNoGarbageOnScreen();
   });
 

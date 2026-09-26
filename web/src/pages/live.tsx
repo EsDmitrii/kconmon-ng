@@ -12,11 +12,12 @@ import { Segmented } from "@/components/ui/segmented";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCapabilities, useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useFillHeight } from "@/hooks/use-fill-height";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { useAnnotations } from "@/components/annotations";
 import { localeTag, stampFull, useLocale, useT } from "@/lib/i18n";
 import { SEVERITY_KEYS, TYPE_KEYS, liveDict } from "@/lib/i18n/dict/live";
-import { ApiError, getEvents } from "@/lib/api";
+import { getEvents, queryErrorMessage } from "@/lib/api";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
 import { useTimeContext } from "@/lib/timemachine";
 import {
@@ -220,14 +221,14 @@ function isKnownSeverity(value: string): value is LiveEventSeverity {
    15:12 on yesterday's row reads as this afternoon's, which is the one reading a change feed must
    not invite. */
 
-/* The label is read at every width and SEEN from md up: below md the row stacks and the badge is
-   the dot alone, with the word still there for a screen reader. */
+/* The word shows at every width: below md the badge shares the first line with the clock alone,
+   and a dot by itself would leave warn and error to colour. */
 function SeverityBadge({ severity }: { severity: string }) {
   const t = useT(liveDict);
   const known = isKnownSeverity(severity);
   return (
     <Badge variant={known ? SEVERITY_VARIANT[severity] : "unknown"} dot>
-      <span className="sr-only md:not-sr-only">{known ? t(SEVERITY_KEYS[severity]) : severity}</span>
+      <span>{known ? t(SEVERITY_KEYS[severity]) : severity}</span>
     </Badge>
   );
 }
@@ -285,7 +286,7 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
       <span className={STAMP_CLASSES}>{fmtEventStamp(annotation.startAt, localeTag(locale))}</span>
       <span className={BADGE_CELL_CLASSES}>
         <Badge variant="neutral" dot>
-          <span className="sr-only md:not-sr-only">{t("note.badge")}</span>
+          <span>{t("note.badge")}</span>
         </Badge>
       </span>
       {/* order-last below md: the text is the second line, so the span marker (when there is one)
@@ -369,7 +370,7 @@ export function LivePage() {
   const tRef = useRef(t);
   tRef.current = t;
   const { realtime, resolved } = useCapabilities();
-  const { available: historyAvailable, resolved: historyResolved } = useDatabaseAvailable();
+  const { available: historyAvailable, resolved: historyResolved, error: historyConfigError } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const engaged = at !== null;
   const atKey = at ? at.toISOString() : "";
@@ -380,8 +381,9 @@ export function LivePage() {
   const [buffered, setBuffered] = useState(0);
   const [filters, setFilters] = useState<LiveFilters>(EMPTY_FILTERS);
 
-  /* A failed load (the 503 case) also lands on "", not on the retry button. */
-  const [history, setHistory] = useState<{ nextCursor: string; loading: boolean; notice: string | null }>({
+  /* nextCursor is "" at the end of the feed, and undefined while page one is still owed because it
+     failed: "Load older" then asks for page one again rather than calling the feed exhausted. */
+  const [history, setHistory] = useState<{ nextCursor: string | undefined; loading: boolean; notice: string | null }>({
     nextCursor: "",
     loading: false,
     notice: null,
@@ -432,9 +434,10 @@ export function LivePage() {
         setHistory({ nextCursor: page.nextCursor, loading: false, notice: null });
       } catch (err) {
         if (!current()) return;
-        const notice =
-          err instanceof ApiError ? (err.problem.detail ?? err.problem.title) : tRef.current("history.fallback");
-        setHistory({ nextCursor: "", loading: false, notice });
+        const notice = queryErrorMessage(err, tRef.current("history.fallback"));
+        /* A failed page keeps its cursor, page one's too, so the button retries it rather than
+           claiming the feed is exhausted. */
+        setHistory({ nextCursor: cursor, loading: false, notice });
       }
     },
     [filters.type, queriedScope, at],
@@ -444,11 +447,19 @@ export function LivePage() {
   useEffect(() => {
     if (!historyResolved) return;
     if (!historyAvailable) {
-      setHistory({ nextCursor: "", loading: false, notice: null });
+      setHistory({
+        nextCursor: "",
+        loading: false,
+        notice: historyConfigError
+          ? tRef.current("config.failed", {
+              error: queryErrorMessage(historyConfigError, tRef.current("config.failed.generic")),
+            })
+          : null,
+      });
       return;
     }
     void loadHistory(undefined);
-  }, [historyAvailable, historyResolved, loadHistory]);
+  }, [historyAvailable, historyResolved, historyConfigError, loadHistory]);
 
   /* Arrivals land in a ref and are merged once per animation frame. A busy
      cluster emits an event per check observation, and a setState per event
@@ -599,6 +610,8 @@ export function LivePage() {
   const rowHeightRef = useRef(rowHeight);
   rowHeightRef.current = rowHeight;
 
+  const feedHeight = useFillHeight(scrollRef, rows.length > 0);
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
@@ -653,7 +666,7 @@ export function LivePage() {
   /* At the cap the ring is full, and pushEvents drops everything past
      LIVE_RING_CAP on the way in — so "Load older" would spend a round trip to
      change nothing. A control that does nothing must say so rather than look
-     available (QA scope 5, finding #22). */
+     available. */
   const atCap = events.length >= LIVE_RING_CAP;
 
   const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
@@ -669,8 +682,7 @@ export function LivePage() {
       description={
         at
           ? /* Inside a translated sentence, so the stamp takes that sentence's
-               language and the house clock — lib/i18n's stampFull (QA scope 2,
-               finding #8). */
+               language and the house clock — lib/i18n's stampFull. */
             t("description.engaged", { at: stampFull(at, locale) })
           : t("description.live", { cap: LIVE_RING_CAP })
       }
@@ -728,17 +740,12 @@ export function LivePage() {
               says it once for the whole console.
               Paused is the same shape of lie in the other direction: arrivals
               are being held, so a green "Live" over a frozen list claims
-              exactly what the operator just switched off. The Paused chip in
-              the filter bar is the state (QA round 1, finding #12).
-              But EMPTYING the slot while paused threw away the other half of
-              the answer: whether the feed being resumed into is still there.
-              A socket that dropped during a long pause is exactly what an
-              operator needs to know BEFORE pressing Resume, so the badge stays
-              — saying paused, and saying what the transport is doing under it.
-              The slot keeps its width from sm up, so nothing to its left
-              moves when the badge changes; on a phone the toolbar wraps
-              anyway and the badge simply follows Pause. */}
-          <span data-testid="live-transport-slot" className="inline-flex sm:min-w-[7.5rem] sm:justify-end">
+              exactly what the operator just switched off. The badge then says
+              paused, and what the transport is doing under it: a socket that
+              dropped during a long pause is what an operator needs to know
+              before pressing Resume. The Resume button carries the buffered
+              count, so this is the only Paused chip on the page. */}
+          <span data-testid="live-transport-slot" className="inline-flex">
             {engaged ? null : paused ? (
               <Badge variant={realtime && connected ? "neutral" : "warn"} dot>
                 {t(realtime && connected ? "paused.socket.live" : "paused.socket.down")}
@@ -777,12 +784,24 @@ export function LivePage() {
         <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
           <p className="text-sm font-medium">{t("history.title")}</p>
           <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{history.notice}</p>
+          {history.nextCursor === undefined ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-3"
+              disabled={history.loading}
+              onClick={() => void loadHistory(undefined)}
+            >
+              {t("history.retry")}
+            </Button>
+          ) : null}
         </Card>
       ) : null}
 
       {/* The working surface, unboxed: the shell's "tool" variant runs the feed
           to the edges, so the card that used to frame it is gone and the filter
-          bar reads as the slim toolbar it is (M4-5). The block bleeds out by
+          bar reads as the slim toolbar it is. The block bleeds out by
           the shell's own padding (-mx-3 sm:-mx-4) and every bar and row puts
           it back (px-3 sm:px-4), so the rules and the hover run edge to edge
           while the text lines up with the toolbar above. */}
@@ -835,13 +854,10 @@ export function LivePage() {
             </Button>
           ) : null}
 
-          {paused ? <Badge variant="warn" dot>{t("paused.badge", { count: buffered })}</Badge> : null}
-
           {missed > 0 ? (
-            /* The explanation used to live ONLY in a title attribute — invisible
-               to touch, and to anyone who does not think to hover a warning
-               triangle. It is the only account of why the feed has holes in it,
-               so it gets a control that opens it in the page (finding 19). */
+            /* Not a title attribute, which is invisible to touch and to anyone who does not
+               hover a warning triangle: this is the only account of why the feed has holes
+               in it, so it gets a control that opens it in the page. */
             <span role="status" className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <TriangleAlert aria-hidden="true" className="size-3.5 text-health-warn" />
               {t(missed === 1 ? "missed.one" : "missed.many", { count: missed })}
@@ -913,11 +929,9 @@ export function LivePage() {
           />
         ) : null}
 
-        {/* Viewport-relative: the feed is the page, so it runs to the bottom of
-            the window instead of stopping at 60vh with the rest of the screen
-            empty. 17rem is the chrome above it (banner, title row, toolbar,
-            filter bar, column headers); the floor keeps a short window from
-            squeezing the feed to nothing. */}
+        {/* The feed is the page, so it runs to the bottom of the window
+            (useFillHeight). The class is the first paint's estimate: 17rem for
+            the chrome above it, with a floor so a short window still has a feed. */}
         {rows.length > 0 ? (
           <div
             ref={scrollRef}
@@ -929,6 +943,7 @@ export function LivePage() {
             aria-live="off"
             aria-label={t("feed.aria")}
             tabIndex={0}
+            style={feedHeight === undefined ? undefined : { height: feedHeight }}
             className={cn("h-[calc(100dvh-17rem)] min-h-[20rem] overflow-auto", scrollRegionClass)}
           >
             <ul

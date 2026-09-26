@@ -261,3 +261,56 @@ describe("MatrixPage — the unscraped note is gated by the plane on show", () =
     expect(screen.queryAllByLabelText(/does not run TCP probes$/)).toHaveLength(0);
   });
 });
+
+/* A plane switched off fleet-wide: every agent re-advertises without it, Prometheus stops
+   carrying its series and the matrix comes back with no nodes. The known cause wins over the
+   generic "no probe data yet". */
+describe("MatrixPage — a plane no agent runs", () => {
+  const offTopology = {
+    nodes: [
+      { name: "a", zone: "z1", ready: true },
+      { name: "b", zone: "z1", ready: true },
+    ],
+    agents: [
+      { id: "ag-a", nodeName: "a", podIP: "10.0.0.1", zone: "z1", capabilities: ["plane:tcp"] },
+      { id: "ag-b", nodeName: "b", podIP: "10.0.0.2", zone: "z1", capabilities: ["plane:tcp", "plane:udp"] },
+    ],
+    timestamp: "2026-01-01T00:00:00Z",
+  };
+  const emptyMatrix = { protocol: "icmp", plane: "pod", nodes: [], cells: [], timestamp: "2026-01-01T00:00:00Z" };
+
+  afterEach(() => window.history.pushState({}, "", "/"));
+
+  it("draws the fleet's rows as 'does not run' instead of 'No probe data yet'", async () => {
+    window.history.pushState({}, "", "/matrix?protocol=icmp");
+    stubFetchRoutes(offTopology, emptyMatrix);
+    renderPage();
+    expect(await screen.findByLabelText("a → b: the source does not run ICMP probes")).toBeInTheDocument();
+    expect(screen.getByLabelText("b → a: the source does not run ICMP probes")).toBeInTheDocument();
+    expect(screen.getByTestId("legend-unsupported")).toBeInTheDocument();
+    expect(screen.queryByText(/No probe data/)).not.toBeInTheDocument();
+  });
+
+  /* What the API now answers for a plane switched off fleet-wide: the fleet as nodes, no cells. */
+  it("says the fleet does not run the protocol when the API names the fleet with no cells", async () => {
+    window.history.pushState({}, "", "/matrix?protocol=icmp");
+    stubFetchRoutes(offTopology, { ...emptyMatrix, nodes: ["a", "b"] });
+    renderPage();
+    expect(await screen.findByLabelText("a → b: the source does not run ICMP probes")).toBeInTheDocument();
+    expect(screen.getByLabelText("b → a: the source does not run ICMP probes")).toBeInTheDocument();
+    expect(screen.getByTestId("legend-unsupported")).toBeInTheDocument();
+    expect(screen.queryAllByLabelText(/: no data$/)).toHaveLength(0);
+    expect(screen.queryByText(/No probe data/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the empty state while one agent still runs the plane or advertises no planes", async () => {
+    window.history.pushState({}, "", "/matrix?protocol=icmp");
+    stubFetchRoutes(
+      { ...offTopology, agents: [...offTopology.agents, { id: "ag-c", nodeName: "c", podIP: "10.0.0.3", zone: "z1" }] },
+      emptyMatrix,
+    );
+    renderPage();
+    expect(await screen.findByText("No probe data in Prometheus yet")).toBeInTheDocument();
+    expect(screen.queryAllByLabelText(/does not run/)).toHaveLength(0);
+  });
+});

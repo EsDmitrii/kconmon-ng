@@ -7,6 +7,18 @@ import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { ExplorePage } from "./explore";
 
+/* The page waits for the subject and needs promql:query (pages/explore.tsx); `auth.granted`
+   is what GET /api/v1/auth/me would list. */
+const auth = vi.hoisted(() => ({ granted: ["promql:query"] as string[] }));
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    me: { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: auth.granted },
+    can: (p: string) => auth.granted.includes(p),
+    isAnonymous: false,
+    meError: null,
+  }),
+}));
+
 /**
  * explore.hostile.test.tsx — Explore with Prometheus refusing to co-operate.
  *

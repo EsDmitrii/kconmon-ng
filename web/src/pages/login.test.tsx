@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { LoginPage } from "./login";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 function configBody(mode: string) {
   return { auth: { mode, role: "", loginPath: mode === "local" ? "/api/v1/auth/login" : mode === "oidc" ? "/api/v1/auth/oidc/start" : "" }, anonymousBanner: mode === "anonymous", controller: { configured: true }, prometheus: { configured: true }, database: { configured: false } };
@@ -88,6 +89,20 @@ describe("LoginPage", () => {
     );
   });
 
+  it("asks for both fields before sending anything, instead of showing the API's JSON contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage("local");
+
+    expect(screen.getByLabelText(/username/i)).toBeRequired();
+    expect(screen.getByLabelText(/password/i)).toBeRequired();
+    fireEvent.submit(screen.getByRole("button", { name: /sign in/i }).closest("form")!);
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(/username/i)));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("a failed submit shows an inline error and does not navigate", async () => {
     const navigateSpy = vi.fn();
     setNavigateForTest(navigateSpy);
@@ -108,5 +123,27 @@ describe("LoginPage", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/invalid credentials/i);
     expect(navigateSpy).not.toHaveBeenCalled();
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("LoginPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage("local");
+    await screen.findByLabelText(/username/i);
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage("local");
+    await screen.findByLabelText(/username/i);
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

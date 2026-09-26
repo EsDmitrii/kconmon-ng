@@ -166,6 +166,15 @@ export function stampInstant(d: Date, locale: Locale): string {
   });
 }
 
+/* ── numbers ────────────────────────────────────────────────────────────── */
+
+/** fixedDecimal is toFixed with the interface language's decimal mark: "98.0" in English, «98,0» in
+ *  Russian. The digits are toFixed's own, so a figure never gains grouping or rounds differently. */
+export function fixedDecimal(value: number, digits: number, locale: Locale): string {
+  const figure = value.toFixed(digits);
+  return locale === "ru" ? figure.replace(".", ",") : figure;
+}
+
 /* ── dictionaries ───────────────────────────────────────────────────────── */
 
 /** Vars for {placeholder} substitution. Numbers are accepted and stringified

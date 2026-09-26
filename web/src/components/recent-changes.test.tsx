@@ -134,6 +134,53 @@ describe("RecentChanges", () => {
     expect(fetchMock.mock.calls.some((c) => String(c[0]).startsWith("/api/v1/events"))).toBe(false);
   });
 
+  it("with a failed /config says the configuration could not be read, not that a database is missing", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes("/api/v1/config")) {
+        return Promise.resolve(
+          json(
+            { type: "about:blank", title: "Bad Gateway", status: 502, detail: "ingress upstream gone" },
+            { status: 502, headers: { "Content-Type": "application/problem+json" } },
+          ),
+        );
+      }
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <RecentChanges scope="node-a" />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/ingress upstream gone/)).toBeInTheDocument();
+    expect(screen.queryByText(/history requires a database/i)).toBeNull();
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).startsWith("/api/v1/events"))).toBe(false);
+  });
+
+  it("says history is unavailable when the refusal carries no words of its own", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(true)));
+        if (href.startsWith("/api/v1/events")) {
+          return Promise.resolve(
+            json({ type: "about:blank", status: 500 }, { status: 500, headers: { "Content-Type": "application/problem+json" } }),
+          );
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <RecentChanges scope="node-a" />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Event history is unavailable")).toBeInTheDocument();
+  });
+
   it("renders history rows returned from the REST scrollback", async () => {
     renderRail("node-a", { events: [event({ id: "9-9000", summary: "history row" })] });
     expect(await screen.findByText("history row")).toBeInTheDocument();

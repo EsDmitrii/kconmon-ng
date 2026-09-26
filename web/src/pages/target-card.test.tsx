@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
 import type { CheckDefinition, RunDetail, Schedule, Target } from "@/lib/types";
 import {
@@ -15,6 +16,7 @@ import {
   targetHealthQuery,
   targetIdFromPath,
 } from "./target-card";
+import { emulatePhone, lightThemeHazards, phoneOverflowHazards, resetTheme, restoreViewport, startInLight } from "@/lib/phone-and-light";
 
 // EChart is mocked, not rendered: echarts.init reaches for a 2d canvas context jsdom does not
 // implement (no `canvas` package in devDependencies).
@@ -126,6 +128,8 @@ interface RenderOpts {
   permissions?: string[];
   database?: boolean;
   prometheus?: boolean;
+  /** Replaces the 200 GET /api/v1/config would answer with. */
+  configResponse?: Response;
   targetResponse?: Response;
   definitions?: CheckDefinition[];
   schedules?: Record<string, Schedule[]>;
@@ -134,6 +138,10 @@ interface RenderOpts {
   rangeResult?: unknown[];
   healthResult?: unknown[];
   incidents?: unknown[];
+  /** GET /api/v1/checks answered page by page (cursor = page index); overrides `definitions`. */
+  checkPages?: CheckDefinition[][];
+  /** Mounts a <LocaleProvider> with this stored choice; absent, the page reads English. */
+  locale?: Locale;
 }
 
 function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
@@ -141,6 +149,7 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
     permissions = ["targets:read", "checks:read"],
     database = true,
     prometheus = true,
+    configResponse,
     targetResponse,
     definitions = [],
     schedules = {},
@@ -149,7 +158,10 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
     rangeResult = [],
     healthResult = [],
     incidents = [],
+    checkPages,
+    locale,
   } = opts;
+  if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   window.history.pushState({}, "", pathname);
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const href = String(url);
@@ -157,12 +169,17 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
     if (href.includes("/api/v1/version")) {
       return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
     }
-    if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody({ database, prometheus })));
+    if (href.includes("/api/v1/config")) return Promise.resolve(configResponse ?? json(configBody({ database, prometheus })));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/targets/")) {
       return Promise.resolve(targetResponse ?? json(target));
+    }
+    if (href.startsWith("/api/v1/checks") && checkPages) {
+      const page = Number(new URL(href, "http://localhost").searchParams.get("cursor") ?? "0");
+      const next = page + 1 < checkPages.length ? String(page + 1) : "";
+      return Promise.resolve(json({ definitions: checkPages[page], nextCursor: next }));
     }
     if (href.startsWith("/api/v1/checks")) return Promise.resolve(json({ definitions, nextCursor: "" }));
     if (href.startsWith("/api/v1/schedules")) {
@@ -189,7 +206,13 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
   const utils = render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
-        <TargetCardPage />
+        {locale ? (
+          <LocaleProvider>
+            <TargetCardPage />
+          </LocaleProvider>
+        ) : (
+          <TargetCardPage />
+        )}
       </ThemeProvider>
     </QueryClientProvider>,
   );
@@ -210,6 +233,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetNavigateForTest();
   window.history.pushState({}, "", "/");
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 describe("targetIdFromPath", () => {
@@ -320,6 +344,19 @@ describe("TargetCardPage", () => {
     renderPage(`/targets/${TARGET_ID}`, { targetResponse: problem(404, "not found", "no such target") });
     expect(await screen.findByText("This target does not exist")).toBeInTheDocument();
     expect(screen.queryByRole("radiogroup", { name: "Tab" })).not.toBeInTheDocument();
+    // The sidebar names the page Scheduled checks; the way back uses the same words.
+    expect(screen.getByRole("link", { name: "Back to Scheduled checks" })).toHaveAttribute("href", "/targets");
+  });
+
+  it("says the configuration could not be read instead of asking for a database, and fires no target request", async () => {
+    const { fetchMock } = renderPage(`/targets/${TARGET_ID}`, {
+      configResponse: problem(502, "Bad Gateway", "ingress upstream gone"),
+    });
+    expect(
+      await screen.findByText("Could not read the console configuration, so this target was not requested: ingress upstream gone"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/stored in the database/i)).not.toBeInTheDocument();
+    expect(called(fetchMock, "/api/v1/targets")).toBe(false);
   });
 
   it("says the database is required and fires no target or event request when it is disabled", async () => {
@@ -360,6 +397,14 @@ describe("TargetCardPage", () => {
     expect(await screen.findByText(/every 1m/)).toBeInTheDocument();
     const checksCall = fetchMock.mock.calls.find((c) => String(c[0]).startsWith("/api/v1/checks"));
     expect(new URL(String(checksCall?.[0]), "http://localhost").searchParams.get("targetId")).toBe(TARGET_ID);
+  });
+
+  it("lists definitions past the first server page", async () => {
+    renderPage(`/targets/${TARGET_ID}`, {
+      checkPages: [[definition], [{ ...definition, id: "d-2", name: "edge-gw second page" }]],
+    });
+    expect(await screen.findByText("edge-gw tcp")).toBeInTheDocument();
+    expect(await screen.findByText("edge-gw second page")).toBeInTheDocument();
   });
 
   it("says so when no definition points at this target", async () => {
@@ -509,6 +554,12 @@ describe("no percentage means no sentence (#7)", () => {
     renderPage(`/targets/${TARGET_ID}`, { healthResult: [{ metric: {}, value: [1, "1"] }] });
     expect(await screen.findByText("100.0% healthy")).toBeInTheDocument();
   });
+
+  it("writes the figure with a decimal comma in Russian", async () => {
+    renderPage(`/targets/${TARGET_ID}`, { healthResult: [{ metric: {}, value: [1, "1"] }], locale: "ru" });
+    expect(await screen.findByText("100,0% здоровья")).toBeInTheDocument();
+    expect(screen.queryByText(/100\.0%/)).toBeNull();
+  });
 });
 
 /* #5, this card's half: the same treatment the Schedules tab's own rows get. */
@@ -545,5 +596,42 @@ describe("a failing schedule says so on the target card (#5)", () => {
     renderPage(`/targets/${TARGET_ID}`, { definitions: [def], schedules: { "d-1": [schedule] } });
     expect(await screen.findByText("gw-tcp")).toBeInTheDocument();
     expect(screen.queryByTestId("schedule-failure")).toBeNull();
+  });
+
+  it("prints no next fire time for a disabled schedule or a paused one", async () => {
+    renderPage(`/targets/${TARGET_ID}`, {
+      definitions: [def, { ...def, id: "d-2", name: "gw-tcp-off", enabled: false }],
+      schedules: { "d-1": [{ ...schedule, enabled: false }], "d-2": [{ ...schedule, id: "s-2", definitionId: "d-2" }] },
+    });
+    const paused = (await screen.findByText("paused: definition disabled")).closest("li") as HTMLElement;
+    expect(within(paused).getByText(/^next /)).toHaveTextContent("next —");
+    const disabled = within(screen.getByText("gw-tcp").closest("li") as HTMLElement)
+      .getAllByText("disabled")
+      .map((el) => el.closest("li") as HTMLElement)
+      .find((li) => li.tagName === "LI" && within(li).queryByText(/^next /)) as HTMLElement;
+    expect(within(disabled).getByText(/^next /)).toHaveTextContent("next —");
+  });
+});
+
+/* ── WB13: the page on a 375px phone and in the light theme ──────────────── */
+describe("TargetCardPage — on a phone and in the light theme", () => {
+  afterEach(() => {
+    restoreViewport();
+    resetTheme();
+  });
+
+  it("keeps everything wider than a 375px phone inside a scroller of its own", async () => {
+    emulatePhone();
+    renderPage();
+    await screen.findByRole("heading", { name: "edge-gw" });
+    expect(phoneOverflowHazards(document.body)).toEqual([]);
+  });
+
+  it("draws every colour from a token the light theme restyles", async () => {
+    startInLight();
+    renderPage();
+    await screen.findByRole("heading", { name: "edge-gw" });
+    expect(document.documentElement).toHaveClass("light");
+    expect(lightThemeHazards(document.body)).toEqual([]);
   });
 });

@@ -211,8 +211,10 @@ export interface MatrixCell {
   lossRatio?: number;
   /** pmtu only: the largest datagram that crossed the pair, bytes. */
   mtuBytes?: number;
-  /** pmtu only: the size the source probes at; mtuBytes below it with no failures is a reduced path. */
+  /** pmtu only: the size the source probes this destination at; mtuBytes below it with no failures is a reduced path. */
   probeMtuBytes?: number;
+  /** pmtu only: the fail ratio over the recent window; omitted when no probe landed in it. */
+  recentFailRatio?: number;
 }
 export interface Matrix {
   protocol: string;

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight, SearchX } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
@@ -12,8 +12,8 @@ import { useAuth } from "@/hooks/use-auth";
 import { useQuery } from "@tanstack/react-query";
 import { TraceDetail } from "@/components/mtr-hop-table";
 import { isTerminalRunStatus, type RunPairRow, useRun } from "@/hooks/use-run";
-import { ApiError, cancelRun, getMTRSnapshots } from "@/lib/api";
-import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { ApiError, cancelRun, listAllMTRSnapshots } from "@/lib/api";
+import { fixedDecimal, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, runDetailDict, type RunDetailKey } from "@/lib/i18n/dict/run-detail";
 import {
   aggregateSamples,
@@ -26,7 +26,7 @@ import {
   observedCadence,
   pairProgress,
   runCadence,
-  snapshotForSample,
+  coveringSnapshots,
   runDurationNs,
   type ObservedCadence,
   type PairProgress,
@@ -82,6 +82,23 @@ const PAIR_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
   timeout: "bad",
 };
 
+/* The store's run statuses and pair states, translated; a word this build has never heard renders verbatim. */
+const STATUS_KEYS: Record<string, RunDetailKey> = {
+  pending: "status.pending",
+  running: "status.running",
+  succeeded: "status.succeeded",
+  partial: "status.partial",
+  failed: "status.failed",
+  cancelled: "status.cancelled",
+  timeout: "status.timeout",
+  dispatched: "status.dispatched",
+};
+
+function statusLabel(t: Translate<RunDetailKey>, status: string): string {
+  const key = Object.hasOwn(STATUS_KEYS, status) ? STATUS_KEYS[status] : undefined;
+  return key ? t(key) : status;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const t = useT(runDetailDict);
   /* "partial" is the one word in the store's enum that does not explain itself: the runner's
@@ -90,7 +107,7 @@ function StatusBadge({ status }: { status: string }) {
   const title = status === "partial" ? t("status.partial.title") : undefined;
   return (
     <Badge variant={STATUS_VARIANT[status] ?? "unknown"} dot title={title}>
-      {status}
+      {statusLabel(t, status)}
     </Badge>
   );
 }
@@ -114,8 +131,8 @@ export function sharedPairError(pairs: RunPairRow[]): string | undefined {
  *  hop table keep one unit rule (µs under 0.1ms, then milliseconds). Whole milliseconds used to
  *  print "0ms" for every same-cluster TCP probe — a real 0.46ms measurement rendered as no time
  *  at all — and one decimal still printed "0.0ms" for a 38µs one. */
-function fmtDuration(ns?: number): string {
-  return fmtNsCompact(ns);
+function fmtDuration(ns: number | undefined, locale: Locale): string {
+  return fmtNsCompact(ns, locale);
 }
 
 /** MISSING is every cell on this page's answer to a field the run did not
@@ -140,8 +157,8 @@ function fmtTime(ts: string | undefined, locale: Locale): string {
 /** fmtPercent renders a 0..1 ratio. One decimal, because a 400-sample run can
  *  legitimately sit at 0.2% and rounding that to "0%" would erase the only
  *  failure the operator started the run to catch. */
-export function fmtPercent(ratio: number): string {
-  return `${(ratio * 100).toFixed(1)}%`;
+export function fmtPercent(ratio: number, locale: Locale = "en"): string {
+  return `${fixedDecimal(ratio * 100, 1, locale)}%`;
 }
 
 /* ── the frame's two ends ──────────────────────────────────────────────────
@@ -254,7 +271,7 @@ function SampleTimeline({
                 </span>
               </span>
               <span className="nums shrink-0 text-muted-foreground">
-                {t("timeline.rowStats", { sent: agg.sent, failed: agg.failed, p95: fmtNsCompact(agg.p95Ns) })}
+                {t("timeline.rowStats", { sent: agg.sent, failed: agg.failed, p95: fmtNsCompact(agg.p95Ns, locale) })}
               </span>
             </div>
             <FrameEnds framed={framed}>
@@ -287,7 +304,7 @@ function SampleTimeline({
                   );
                 }
                 const tickTitle = s.success
-                  ? t("timeline.tick", { seq: s.sampleSeq, duration: fmtNsCompact(s.durationNs) })
+                  ? t("timeline.tick", { seq: s.sampleSeq, duration: fmtNsCompact(s.durationNs, locale) })
                   : t("timeline.tickFailed", { seq: s.sampleSeq, outcome: s.error ?? t("timeline.tick.failed") });
                 /* A failure is SHORTER as well as redder. Hue alone was the whole difference, and
                    under deuteranopia the two tokens land at 1.16:1 luminance — in the light theme at
@@ -503,21 +520,21 @@ function IntervalSummary({
         <div>
           <dt className="text-xs text-muted-foreground">{t("summary.failed")}</dt>
           <dd className={cn("nums mt-0.5", agg.failed > 0 ? "text-health-bad" : undefined)}>
-            {agg.failed} ({fmtPercent(agg.failRatio)})
+            {agg.failed} ({fmtPercent(agg.failRatio, locale)})
           </dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">{t("summary.min")}</dt>
-          <dd className="nums mt-0.5">{fmtNsCompact(agg.minNs)}</dd>
+          <dd className="nums mt-0.5">{fmtNsCompact(agg.minNs, locale)}</dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">{t("summary.avg")}</dt>
-          <dd className="nums mt-0.5">{fmtNsCompact(agg.avgNs)}</dd>
+          <dd className="nums mt-0.5">{fmtNsCompact(agg.avgNs, locale)}</dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">{t("summary.p95max")}</dt>
           <dd className="nums mt-0.5">
-            {fmtNsCompact(agg.p95Ns)} / {fmtNsCompact(agg.maxNs)}
+            {fmtNsCompact(agg.p95Ns, locale)} / {fmtNsCompact(agg.maxNs, locale)}
           </dd>
         </div>
       </dl>
@@ -544,38 +561,70 @@ function PairTrace({
   destination,
   /** The probe itself, when the reader clicked one tick rather than a pair row. */
   probe,
+  /** A pair row's latest probe: when it was recorded, and whether it failed. */
+  pairRecordedAt,
+  pairFailed = false,
 }: {
   source: string;
   destination: string;
   probe?: PairSamples["samples"][number];
+  pairRecordedAt?: string;
+  pairFailed?: boolean;
 }) {
   const t = useT(runDetailDict);
   const { locale } = useLocale();
-  const recordedAt = probe?.recordedAt;
-  /* The clicked probe's instant is IN THE KEY, so opening a tick recorded after this panel was
-     first opened re-asks rather than being told, from a cached list, that no route covers it. A
-     running MTR run produces a probe every few seconds and the route it walked is projected right
-     behind it; a list fetched once at open goes stale within one cadence. */
+  const recordedAt = probe ? probe.recordedAt : pairRecordedAt;
+  const failed = probe ? !probe.success : pairFailed;
+  /* The list is the pair's, so a running run's next probe, every few seconds, neither blanks the
+     table being read nor walks the list again. */
   const query = useQuery({
-    queryKey: ["mtr", "snapshots", source, destination, recordedAt ?? ""],
-    queryFn: () => getMTRSnapshots({ source, destination, limit: 20 }),
+    queryKey: ["mtr", "snapshots", source, destination],
+    queryFn: () => listAllMTRSnapshots(source, destination),
   });
+  const { isSuccess, isFetching, refetch } = query;
+  const snapshots = query.data?.items ?? [];
 
-  const snapshots = query.data?.snapshots ?? [];
-  /* Scoped to the clicked probe when there is one, else the pair's latest
-     route. snapshotForSample returns nothing rather than the nearest path: a
-     route under a tick that did not walk it is worse than no route.
+  /* A list whose every route was last seen before the probe predates it: the route that probe walked
+     is projected right behind it. That list is asked again, once per probe. Meanwhile a pair row
+     keeps the answer it gave the probe before, since nothing on it names the probe, and a clicked
+     tick, which does name one, waits. */
+  const behind =
+    isSuccess &&
+    !failed &&
+    recordedAt !== undefined &&
+    !snapshots.some((s) => Date.parse(s.lastSeen) >= Date.parse(recordedAt));
+  const [askedFor, setAskedFor] = useState<string>();
+  useEffect(() => {
+    if (!behind || askedFor === recordedAt) return;
+    setAskedFor(recordedAt);
+    void refetch();
+  }, [behind, askedFor, recordedAt, refetch]);
+  const reasking = behind && (isFetching || askedFor !== recordedAt);
+  const [answeredFor, setAnsweredFor] = useState<string>();
+  if (isSuccess && !reasking && answeredFor !== recordedAt) setAnsweredFor(recordedAt);
+  const holding = reasking && !probe && answeredFor !== undefined;
+  const at = holding ? answeredFor : recordedAt;
+  const loading = query.isPending || (reasking && !holding);
+  /* Scoped to the clicked probe, or to a pair row's latest probe; only a row no result has
+     reached yet falls back to the pair's latest route. coveringSnapshots returns nothing rather
+     than the nearest path: a route under a probe that did not walk it is worse than no route. When
+     several routes cover the instant (the pair alternated between them), none is named either.
 
      A FAILED probe never walked one at all — it timed out, or never left the dispatcher — so it
      gets no route regardless of what the clock would match. Captioning a stored hop table with
      "the route this probe walked" over a probe that walked nothing is the confident lie this whole
      lookup exists to avoid. */
-  const chosen =
-    probe && !probe.success
-      ? undefined
-      : recordedAt
-        ? snapshots.find((s) => s.id === snapshotForSample(snapshots, recordedAt)?.id)
-        : snapshots[0];
+  const covers = failed || !at ? [] : coveringSnapshots(snapshots, at);
+  const chosen = loading || failed ? undefined : !at ? snapshots[0] : covers.length === 1 ? covers[0] : undefined;
+
+  /* A pair row with nothing recorded for the pair at all keeps saying exactly that. */
+  const noRoute = failed
+    ? t(probe ? "trace.probeFailed" : "trace.pairFailed")
+    : !at || (!probe && snapshots.length === 0)
+      ? t("trace.none")
+      : covers.length > 1
+        ? t(probe ? "trace.severalForProbe" : "trace.severalForPair")
+        : t(probe ? "trace.noneForProbe" : "trace.noneForPair");
 
   /* The deep link the Explorer answers — pages/mtr.tsx reads ?source= and
      ?destination=, opens that card AND selects the pair so its path history is
@@ -591,13 +640,13 @@ function PairTrace({
           <span className="font-medium">{t("trace.probe", { seq: probe.sampleSeq })}</span>
           <span className="mono-data text-muted-foreground">{fmtTime(probe.recordedAt, locale)}</span>
           {probe.success ? (
-            <span className="mono-data text-muted-foreground">{fmtNsCompact(probe.durationNs)}</span>
+            <span className="mono-data text-muted-foreground">{fmtNsCompact(probe.durationNs, locale)}</span>
           ) : (
             <span className="text-health-bad">{probe.error ?? t("timeline.tick.failed")}</span>
           )}
         </div>
       ) : null}
-      {query.isPending ? (
+      {loading ? (
         <div role="status" aria-live="polite">
           <span className="sr-only">{t("trace.loading")}</span>
           <Skeleton className="h-24 w-full" />
@@ -608,9 +657,9 @@ function PairTrace({
           {t("trace.error")}
         </p>
       ) : null}
-      {query.isSuccess && !chosen ? (
+      {isSuccess && !loading && !chosen ? (
         <p className="text-xs leading-relaxed text-muted-foreground">
-          {probe && !probe.success ? t("trace.probeFailed") : recordedAt ? t("trace.noneForProbe") : t("trace.none")}
+          {noRoute}
         </p>
       ) : null}
       {chosen ? (
@@ -647,6 +696,7 @@ const PMTU_VERDICT_KEY = {
  */
 function PairDetail({ pair }: { pair: RunPairRow }) {
   const t = useT(runDetailDict);
+  const { locale } = useLocale();
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 px-4 py-3 text-xs">
       <dt className="text-muted-foreground">{t("detail.source")}</dt>
@@ -654,9 +704,9 @@ function PairDetail({ pair }: { pair: RunPairRow }) {
       <dt className="text-muted-foreground">{t("detail.destination")}</dt>
       <dd className="mono-data break-all">{pair.destination}</dd>
       <dt className="text-muted-foreground">{t("detail.duration")}</dt>
-      <dd className="mono-data">{fmtDuration(pair.durationNs)}</dd>
+      <dd className="mono-data">{fmtDuration(pair.durationNs, locale)}</dd>
       <dt className="text-muted-foreground">{t("detail.state")}</dt>
-      <dd>{pair.state}</dd>
+      <dd>{statusLabel(t, pair.state)}</dd>
       {pair.pmtu ? (
         <>
           <dt className="text-muted-foreground">{t("detail.pmtu.verdict")}</dt>
@@ -695,6 +745,7 @@ function pairRank(p: RunPairRow): number {
 
 function PairTable({ pairs: arrived, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolean; runId: string }) {
   const t = useT(runDetailDict);
+  const { locale } = useLocale();
   const pairs = useMemo(() => [...arrived].sort((a, b) => pairRank(a) - pairRank(b)), [arrived]);
   /* An all-to-all run is n² rows — ninety for ten nodes — and the table used to
      be every one of them under an endless scroll.
@@ -797,10 +848,10 @@ function PairTable({ pairs: arrived, isMTR, runId }: { pairs: RunPairRow[]; isMT
               </Td>
               <Td className="pr-4 align-top">
                 <Badge variant={PAIR_VARIANT[p.state] ?? "unknown"} dot>
-                  {p.state}
+                  {statusLabel(t, p.state)}
                 </Badge>
               </Td>
-              <Td numeric className="hidden pr-4 align-top sm:table-cell">{fmtDuration(p.durationNs)}</Td>
+              <Td numeric className="hidden pr-4 align-top sm:table-cell">{fmtDuration(p.durationNs, locale)}</Td>
               {/* Two lines of the agent's sentence, the whole of it in the title and in the expanded
                   row: a run whose every pair failed the same way used to be a table of three-line
                   paragraphs, and the pair column was the part that got squeezed. */}
@@ -822,7 +873,12 @@ function PairTable({ pairs: arrived, isMTR, runId }: { pairs: RunPairRow[]; isMT
                   {/* An MTR's pair row opens onto its ROUTE; anything else opens
                       onto the sample's own facts, which the cells truncate. */}
                   {isMTR ? (
-                    <PairTrace source={p.source} destination={p.destination} />
+                    <PairTrace
+                      source={p.source}
+                      destination={p.destination}
+                      pairRecordedAt={p.recordedAt}
+                      pairFailed={p.success === false}
+                    />
                   ) : (
                     <PairDetail pair={p} />
                   )}
@@ -907,7 +963,7 @@ export function RunDetailPage() {
   const t = useT(runDetailDict);
   const { locale } = useLocale();
   const runId = runIdFromPath(window.location.pathname);
-  const { run, pairs, isLoading, notFound, error, live, refetch } = useRun(runId);
+  const { run, pairs, isLoading, notFound, error, live, connecting, refetch } = useRun(runId);
   const { can } = useAuth();
   /*
    * The Time Machine's framing for THIS page; the permalink itself stays reachable while engaged —
@@ -990,15 +1046,14 @@ export function RunDetailPage() {
       description={
         at
           ? /* Inside a translated sentence, so the stamp takes that sentence's
-               language and the house clock — lib/i18n's stampFull (QA scope 2,
-               finding #8). */
+               language and the house clock — lib/i18n's stampFull. */
             t("description.at", { id: decodeRunId(run.id), at: stampFull(at, locale) })
           : decodeRunId(run.id)
       }
       actions={
         <>
           <StatusBadge status={run.status} />
-          {/* Terminal FIRST, then the socket (QA round 4, finding #1). A
+          {/* Terminal FIRST, then the socket. A
               finished run's data is final: it is neither live nor delayed, and
               "Delayed data" on a run that succeeded twenty minutes ago was a
               badge describing a transport nobody is waiting on — it sent
@@ -1006,7 +1061,8 @@ export function RunDetailPage() {
               The badge only means something while there is still something to
               arrive, so a non-terminal run with the socket down still says
               "Delayed data". */}
-          {terminal ? null : <RealtimeBadge realtime={live} />}
+          {/* Nor is a socket still being dialled "delayed": the badge waits for its first answer. */}
+          {terminal || connecting ? null : <RealtimeBadge realtime={live} />}
           {can("runs:create") && !terminal ? (
             <CancelRunButton runId={run.id} onCancelled={refetch} />
           ) : null}
@@ -1028,8 +1084,8 @@ export function RunDetailPage() {
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">{t("field.pairs")}</dt>
-            {/* ok/total, worded like the history row on /diagnostics (QA round
-                4, finding #14): the bare "2/2" was arrived/total and read as
+            {/* ok/total, worded like the history row on /diagnostics: the bare
+                "2/2" was arrived/total and read as
                 passed/total, so a run whose every pair FAILED announced itself
                 as complete success in the one number a reader scans first. */}
             <dd className="nums mt-0.5">

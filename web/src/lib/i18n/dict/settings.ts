@@ -21,7 +21,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *     Operator bytes and server bytes; neither is prose.
  *   - `lastStatus` on an endpoint row. The delivery ladder wrote that string
  *     ("ok", "failed: 502"); this page picks its colour and prints it.
- *   - Config keys and route paths inside a sentence: console.database.mode,
+ *   - Config keys and route paths inside a sentence: database.dsnFile,
  *     console.retention.*, console.webhooks.encryptionKey, GET /api/v1/config.
  *   - Every problem+json detail, and every per-item `reason` in an import
  *     result. The server named the item and said why in one sentence.
@@ -140,6 +140,9 @@ const en = {
   "tokens.form.create": "New token",
   "tokens.form.name": "Name",
   "tokens.form.nameHelp": "What this token is for. It is what the list and the audit log show instead of the secret.",
+  "tokens.role":
+    "A token acts with the console's default role (console.auth.defaultRole), not yours. With no default role set, " +
+    "every route that needs a permission answers it 403.",
   "tokens.form.expires": "Expires",
   /* datetime-local, so the operator types a LOCAL wall clock; the request
      carries the instant it names. */
@@ -208,6 +211,9 @@ const en = {
     "Create the endpoint here first, then import to apply the bundle's url, events and enabled flag.",
   "bundle.export": "Export configuration",
   "bundle.exportFailed": "Failed to export the configuration",
+  "bundle.exportOmitted":
+    "Exported without these sections: {sections}. This account cannot read them, and importing the file leaves " +
+    "them as they are.",
   "bundle.field": "Configuration bundle",
   "bundle.choose": "Choose bundle…",
   "bundle.noFile": "No file chosen",
@@ -227,6 +233,7 @@ const en = {
   "bundle.col.collection": "Collection",
   "bundle.col.created": "Created",
   "bundle.col.updated": "Updated",
+  "bundle.col.unchanged": "Unchanged",
   "bundle.col.skipped": "Skipped",
   "bundle.errors": "Errors",
   "bundle.warnings": "Warnings",
@@ -238,6 +245,7 @@ const en = {
   "collection.maintenanceWindows": "Maintenance windows",
   "collection.rbacRoles": "Custom roles",
   "collection.rbacBindings": "Role bindings",
+  "collection.rbac": "Access control",
 
   /* ── About ─────────────────────────────────────────────────────────────── */
   "about.heading": "About this console",
@@ -378,6 +386,9 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "tokens.form.create": "Новый токен",
   "tokens.form.name": "Имя",
   "tokens.form.nameHelp": "Для чего этот токен. Именно имя видно в списке и в журнале аудита, а не секрет.",
+  "tokens.role":
+    "Токен действует с ролью консоли по умолчанию (console.auth.defaultRole), а не с вашей. Если она не задана, " +
+    "любой маршрут, которому нужно разрешение, ответит токену 403.",
   "tokens.form.expires": "Истекает",
   "tokens.form.expiresHelp": "Необязательно. Если оставить пустым, токен живёт до отзыва.",
   "tokens.form.expiresNotSet": "Без срока",
@@ -433,6 +444,8 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "точку здесь, потом импортируйте — импорт применит url, события и флаг включения.",
   "bundle.export": "Экспортировать конфигурацию",
   "bundle.exportFailed": "Не удалось экспортировать конфигурацию",
+  "bundle.exportOmitted":
+    "Выгружено без разделов: {sections}. Этой учётной записи они недоступны, а импорт файла оставит их как есть.",
   "bundle.field": "Пакет конфигурации",
   "bundle.choose": "Выбрать пакет…",
   "bundle.noFile": "Файл не выбран",
@@ -452,6 +465,7 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "bundle.col.collection": "Коллекция",
   "bundle.col.created": "Создано",
   "bundle.col.updated": "Обновлено",
+  "bundle.col.unchanged": "Без изменений",
   "bundle.col.skipped": "Пропущено",
   "bundle.errors": "Ошибки",
   "bundle.warnings": "Предупреждения",
@@ -463,6 +477,7 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "collection.maintenanceWindows": "Окна работ",
   "collection.rbacRoles": "Пользовательские роли",
   "collection.rbacBindings": "Привязки ролей",
+  "collection.rbac": "Управление доступом",
 
   "about.heading": "Об этой консоли",
   "about.authMode": "Режим аутентификации",

@@ -54,10 +54,9 @@ export function TraceList({ snapshotID, traceCount }: { snapshotID: string; trac
     );
   }
 
-  /* Only when there is NOTHING on screen. A failed "Load older" used to replace fifty traces the
-     reader was already reading with one line of apology — the pages were still in the cache and
-     simply stopped being rendered, with no way back but closing the modal. A page that failed is a
-     note beside the button, not the loss of the page that succeeded. */
+  /* Only when there is NOTHING on screen. A failed "Load older" must not replace fifty traces the
+     reader is already reading with one line of apology: a page that failed is a note beside the
+     button, not the loss of the page that succeeded. */
   if (query.isError && traces.length === 0) {
     return (
       <p role="alert" className="mt-4 text-xs text-health-bad">
@@ -223,10 +222,8 @@ function TraceRow({
 /**
  * fmtMs is the hop table's own formatter, not a second opinion about the same number.
  *
- * This used to stop at one decimal of a millisecond, so a same-node first hop — tens of
- * microseconds — printed "0.0ms" here while the hop table directly above printed "22us" for the
- * identical reading. Two components on one screen giving two answers about one measurement is worse
- * than either answer being imprecise.
+ * A same-node first hop answers in tens of microseconds; two components on one screen giving two
+ * answers about that one measurement ("0.0ms" and "22us") is worse than either being imprecise.
  */
 const fmtMs = fmtRttNs;
 

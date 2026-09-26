@@ -112,10 +112,10 @@ function floorToMinute(d: Date): Date {
   return out;
 }
 
-/* Both stamps go through lib/i18n's shared helpers (QA scope 3, findings #7,
-   #17 and #18): the interface language decides the WORDS in a date, an options
-   bag renders words, and this row sits inches from a timeline that draws the
-   same instant. A timestamp that will not parse falls back to its own bytes. */
+/* Both stamps go through lib/i18n's shared helpers: the interface language
+   decides the WORDS in a date, an options bag renders words, and this row sits
+   inches from a timeline that draws the same instant. A timestamp that will not
+   parse falls back to its own bytes. */
 
 /** fmtStamp is the full local stamp — the row's `title`. */
 function fmtStamp(iso: string, locale: Locale): string {
@@ -167,15 +167,14 @@ function CreateAnnotationForm({
 }) {
   const t = useT(annotationsDict);
   /* NOW, unless now sits outside the frozen window this bar is listing — in
-     which case the window's own end, so the note lands where it will be read
-     (QA scope 3, finding #5). An instant mark has no span to reserve. */
+     which case the window's own end, so the note lands where it will be read.
+     An instant mark has no span to reserve. */
   const [start, setStart] = useState(() => floorToMinute(defaultStartIn(new Date(), frozenWindow)));
   /* null, not a Date: absence is the whole meaning of an INSTANT mark, and a
      picker seeded with "now" would make every note a span by default. */
   const [end, setEnd] = useState<Date | null>(null);
   const [text, setText] = useState("");
-  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
-     begin() is a REF write, so three clicks in one task produce one request.
+  /* The in-flight guard, not just a disabled look: begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end: endSubmit } = useSubmitGuard();
   const [error, setError] = useState<string>();
@@ -227,8 +226,7 @@ function CreateAnnotationForm({
 
   return (
     <Card asChild className="p-4">
-      {/* role="form", not role="dialog" (QA round 3, finding #15). This is a
-          DISCLOSURE: the page behind it stays live and interactive, focus is
+      {/* role="form", not role="dialog". This is a DISCLOSURE: the page behind it stays live and interactive, focus is
           not trapped, and Escape does not dismiss it — none of which is what a
           dialog role promises a screen-reader user. Escape-to-discard is
           deliberately absent rather than missing: the form holds a typed draft
@@ -242,9 +240,9 @@ function CreateAnnotationForm({
           <span className="font-medium text-foreground">{scopeLabel(scope, t)}</span> {t("form.scope.after")}
         </p>
         {/* flex-wrap, not `sm:grid-cols-2`: `sm:` is a VIEWPORT breakpoint, so
-            on a desktop the two columns were forced even inside the node
-            card's 20rem rail, where each got ~150px and the control clipped
-            (finding #12). Wrapping is driven by the actual width available.
+            on a desktop two columns would be forced even inside the node card's
+            20rem rail, where each gets ~150px and the control clips. Wrapping
+            is driven by the actual width available.
             Same shape maintenance.tsx's form already uses. */}
         <div className="flex flex-wrap items-start gap-3">
           <Field label={t("form.start")}>
@@ -351,19 +349,18 @@ function AnnotationRow({
       title={showScope ? undefined : scopeLabel(annotation.scope, t)}
     >
       {/* Narrow, truncating and allowed to shrink — the note is what this row
-          is for, and the stamp was taking a quarter of a 20rem rail for a year
-          and a seconds field nobody reads here (finding #11). */}
+          is for, and a full stamp would spend a quarter of a 20rem rail on a
+          year and a seconds field nobody reads here. */}
       <span className="nums w-28 shrink-0 truncate text-muted-foreground" title={fmtStamp(annotation.startAt, locale)}>
         {fmtStampCompact(annotation.startAt, locale)}
       </span>
       {/* Two layouts, one element, keyed on the LIST's width (the <ul> is the
           @container). Under 28rem the note is its own line, first, clamped to
           two, and the stamp, scope and Delete form the line under it; at 28rem
-          and up it is the single truncating line between them. A 24rem rail
-          used to leave the note 38px ("Zo…"), and a phone truncated it at
-          "Stand bro…"; the full text stays on title in both. No basis-auto at
-          @md: flex-1 already resets the basis to 0, and a content-width basis
-          in a wrapping row shoved the chip and Delete onto a second line. */}
+          and up it is the single truncating line between them; the full text
+          stays on title in both. No basis-auto at @md: flex-1 already resets
+          the basis to 0, and a content-width basis in a wrapping row would shove
+          the chip and Delete onto a second line. */}
       <span
         data-testid="annotation-text"
         className="order-first min-w-0 basis-full line-clamp-2 break-words whitespace-normal @md:order-none @md:flex-1 @md:line-clamp-none @md:truncate"
@@ -371,9 +368,9 @@ function AnnotationRow({
       >
         {annotation.text}
       </span>
-      {/* The scope column truncates too (QA round 3, finding #11): a pair scope
-          ("node-a→node-b") is wider than the stamp, and inside the Investigate
-          page's 24rem column it squeezed the note out. A scope the reader
+      {/* The scope column truncates too: a pair scope ("node-a→node-b") is
+          wider than the stamp, and inside the Investigate page's 24rem column
+          it would squeeze the note out. A scope the reader
           already chose is the cheapest thing on the row to shorten, and the
           whole value stays one hover away. */}
       {showScope ? (
@@ -486,12 +483,11 @@ export function AnnotationBar({
 
   /*
    * "Created — outside this window" is a statement about ONE scope and ONE
-   * window, and it used to outlive both: reframing the investigation, deleting
-   * the row it described or navigating to another incident all left it standing
-   * until a hard reload (QA scope 3, finding #4). Reset during render on the
-   * identity it is about — React's own "resetting state when a prop changes"
-   * pattern, the same one components/investigation-timeline.tsx uses for its
-   * page number.
+   * window, and must not outlive either: reframing the investigation, deleting
+   * the row it described or navigating to another incident all clear it. Reset
+   * during render on the identity it is about — React's own "resetting state
+   * when a prop changes" pattern, the same one components/investigation-timeline.tsx
+   * uses for its page number.
    */
   const noteScope = `${scope}|${frozenWindow ? `${frozenWindow.from.getTime()}-${frozenWindow.to.getTime()}` : "live"}`;
   const [seenScope, setSeenScope] = useState(noteScope);

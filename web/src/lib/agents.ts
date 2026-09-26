@@ -17,7 +17,7 @@ export const EXTERNAL_LABEL = "kconmon-ng.io/external";
 /** Prefix of the capabilities naming a probe plane; mirrors model.CapabilityPlanePrefix. */
 export const PLANE_CAPABILITY_PREFIX = "plane:";
 
-/** A probe plane as the agent spells it after "plane:" — the same six names as a check type. */
+/** A probe plane as the agent spells it after "plane:" — the same names as a check type. */
 export type Plane = CheckType;
 export const PLANES: readonly Plane[] = CHECK_TYPES;
 

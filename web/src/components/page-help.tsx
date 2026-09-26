@@ -4,8 +4,8 @@ import { Modal } from "@/components/ui/modal";
 import { useT } from "@/lib/i18n";
 import { sharedDict } from "@/lib/i18n/dict/shared";
 
-/** Where "Learn more" points. ONE constant so the docs site can move (a custom
- *  domain is M7-6) by editing one line rather than twelve. */
+/** Where "Learn more" points. ONE constant so the docs site can move (to a custom
+ *  domain, say) by editing one line rather than twelve. */
 export const DOCS_BASE_URL = "https://esdmitrii.github.io/kconmon-ng/";
 
 /** The docs page for a console route. `slug` must name a real file under the
@@ -17,7 +17,7 @@ export function docsConsoleUrl(slug: string): string {
 
 /**
  * PageHelp — the "?" after a page title, opening a few sentences of orientation
- * and a "Learn more" link to that page's chapter on the docs site (M7-5).
+ * and a "Learn more" link to that page's chapter on the docs site.
  *
  * The body arrives ALREADY TRANSLATED: each page words its own `help.body` in
  * its own dictionary (lib/i18n's rule — the dictionary is passed, not named,

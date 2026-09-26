@@ -120,9 +120,10 @@ renders verbatim in both languages:
 - **Protocol and tool names**: MTR, TCP, UDP, ICMP, DNS, HTTP, PromQL,
   Prometheus, Kubernetes.
 - **The product name**: `kconmon-ng`.
-- **Dates, times and numbers.** Every stamp is already `toLocaleString()` — the
-  *viewer's* locale, which stays correct whichever language the chrome is in.
-  Do not add formatting options, do not switch on locale, do not touch them.
+- **Dates, times and numbers.** The VALUES are never translated, but their
+  spelling follows the interface language: stamps go through `stampFull` and
+  friends, a decimal through `fixedDecimal` («98,0»), a latency through
+  `lib/run-samples`' `fmtNsCompact(ns, locale)` («0,3 мс»).
 
 Your own labels *around* that data are yours: "Node", "Last seen", "Failed
 checks", the empty states, the button verbs, the help paragraphs, every
@@ -372,9 +373,9 @@ to copy the next time a surface is not just prose.
 ## Known gaps
 
 The honest residue: what an operator still reads in English with the console set
-to Russian. Every SURFACE has been taken now — none of the four below is a page
-or a component of ours with a sentence left in it. Three stay for a reason the
-entry gives; the fourth is a third-party dependency.
+to Russian. Every SURFACE has been taken now: none of the three below is a page
+or a component of ours with a sentence left in it, and each stays for the reason
+its entry gives.
 
 - **The two ECharts SERIES names** — `lib/annotations.ts`'s
   `ANNOTATION_SERIES_NAME` and `MAINTENANCE_SERIES_NAME` ("Maintenance"). They
@@ -383,9 +384,6 @@ entry gives; the fourth is a third-party dependency.
   translating one of two would be worse than translating none. (There were
   three: `CURSOR_SERIES_NAME` went with the markLine it named, when the time
   cursor became one shared DOM line per page — see `lib/chart-cursor.tsx`.)
-- **`@xyflow/react`'s built-in `<Controls>`** on `/topology` — zoom in, zoom
-  out, fit view, toggle interactivity. Third-party aria-labels; the component
-  takes overrides, so this is a small, self-contained job.
 - **The browser's own controls** — the native `<input type="date">` and
   `type="time"` inside the DateTimePicker's manual fields, and every native
   `<select>` popup. Those follow the BROWSER's locale, not this switch, and

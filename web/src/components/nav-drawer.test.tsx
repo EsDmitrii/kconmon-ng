@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
+import { stubViewport } from "@/lib/viewport-stub";
 import { NavDrawer } from "./nav-drawer";
 
 /**
@@ -52,7 +53,7 @@ function renderDrawer() {
   );
 }
 
-const trigger = () => screen.getByRole("button", { name: /navigation/i });
+const trigger = () => screen.getByRole("button", { name: "Open navigation" });
 
 beforeEach(() => {
   vi.stubGlobal("scrollTo", () => {});
@@ -114,6 +115,31 @@ describe("NavDrawer", () => {
     expect(document.activeElement).toBe(items[0]);
   });
 
+  /* The open panel covers the trigger, and the scrim is aria-hidden: without a control of its own a
+     touch screen reader had no way out but picking a link. */
+  it("carries its own labelled close control inside the dialog", async () => {
+    renderDrawer();
+    await waitFor(() => expect(trigger()).toBeInTheDocument());
+    fireEvent.click(trigger());
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close navigation" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger());
+  });
+
+  it("keeps a hidden control out of the Tab cycle, so Tab cannot land on nothing", async () => {
+    renderDrawer();
+    await waitFor(() => expect(trigger()).toBeInTheDocument());
+    fireEvent.click(trigger());
+    const dialog = await screen.findByRole("dialog");
+    const items = [...dialog.querySelectorAll<HTMLElement>("a[href], button:not([disabled])")];
+    const hidden = items[items.length - 1];
+    Object.defineProperty(hidden, "checkVisibility", { configurable: true, value: () => false });
+
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(items[items.length - 2]);
+  });
+
   it("closes itself on a navigation, rather than covering the page it just loaded", async () => {
     renderDrawer();
     await waitFor(() => expect(trigger()).toBeInTheDocument());
@@ -122,6 +148,45 @@ describe("NavDrawer", () => {
     fireEvent.click(screen.getByRole("link", { name: "Topology" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(trigger());
+  });
+
+  /* Widened past md while open, the drawer is display:none but its capture-phase Escape listener
+     stayed, and swallowed the next Escape meant for a dialog opened on top of the page. */
+  it("closes when the viewport crosses md, so a hidden drawer takes no Escape", async () => {
+    const viewport = stubViewport(700);
+    renderDrawer();
+    await waitFor(() => expect(trigger()).toBeInTheDocument());
+    fireEvent.click(trigger());
+    await screen.findByRole("dialog");
+
+    viewport.resize(800);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const reached = vi.fn();
+    document.body.addEventListener("keydown", reached);
+    try {
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(reached).toHaveBeenCalledTimes(1);
+    } finally {
+      document.body.removeEventListener("keydown", reached);
+    }
+  });
+
+  /* Tailwind's md is 48rem, and a rem in a media query is the browser's default font size. With
+     "Large" text (20px) md is 960px, so an 800px window still shows this trigger and no column. */
+  it("opens between 768px and md when the browser font is larger, and closes only at md", async () => {
+    const viewport = stubViewport(800, 20);
+    renderDrawer();
+    await waitFor(() => expect(trigger()).toBeInTheDocument());
+    fireEvent.click(trigger());
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(trigger()).toHaveAttribute("aria-expanded", "true");
+
+    viewport.resize(900);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    viewport.resize(960);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("names itself in the interface language", async () => {
