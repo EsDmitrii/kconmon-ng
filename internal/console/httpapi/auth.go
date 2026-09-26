@@ -547,9 +547,15 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, signedIn, auditOutcomeAllowed, emptyDetail)
 	// returnTo was validated before AuthorizeURL sealed it into the state, which came back through
-	// the browser: re-check so no state can ever become an open redirect.
-	//nolint:gosec // G710: SafeReturnTo admits only a same-origin relative path
-	http.Redirect(w, r, authn.SafeReturnTo(returnTo, oidcDefaultReturnTo), http.StatusFound)
+	// the browser: re-check so no state can ever become an open redirect. The leading-slash test is
+	// spelled out at the redirect so static analysis sees the guard, not only IsSafeReturnTo.
+	if returnTo != "" && returnTo[0] == '/' && (len(returnTo) == 1 || (returnTo[1] != '/' && returnTo[1] != '\\')) &&
+		authn.IsSafeReturnTo(returnTo) {
+		//nolint:gosec // G710: the condition above admits only a same-origin relative path
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, oidcDefaultReturnTo, http.StatusFound)
 }
 
 // sessionSubject is the identity a session the OIDC flow just minted belongs to, read back for the
