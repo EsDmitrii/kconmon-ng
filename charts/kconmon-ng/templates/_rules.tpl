@@ -5,6 +5,10 @@
 {{- printf "%g" (round (mulf . 100) 3) -}}
 {{- end -}}
 
+{{- define "kconmon-ng.prometheusRule.runbook" -}}
+https://esdmitrii.github.io/kconmon-ng/reference/alerts/#{{ lower . }}
+{{- end -}}
+
 {{/* A rule block over its defaults, as JSON for fromJson. `helm upgrade --reuse-values` renders the
      templates over the OLD release's values, where a block added since is absent, so a block new in
      a release carries its values.yaml defaults here too. Per key and not sprig merge: merge
@@ -27,20 +31,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       UDP loss {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}}
       at {{`{{ $value | humanizePercentage }}`}}
     description: >-
-      UDP packet loss from {{`{{ $labels.source_node }}`}} (zone
-      {{`{{ $labels.source_zone }}`}}) to {{`{{ $labels.destination_node }}`}} (zone
-      {{`{{ $labels.destination_zone }}`}}) has held at
-      {{`{{ $value | humanizePercentage }}`}} for {{ .for }}, over the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold.
-      Drill this exact pair on the kconmon-ng console Investigate page, or
-      open the "kconmon-ng / Node Detail" Grafana dashboard with
-      node={{`{{ $labels.source_node }}`}} to see whether the same node is losing
-      packets to its other peers or only to this one.
+      Check whether {{`{{ $labels.source_node }}`}} loses packets to its other peers too or only to
+      this one.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "UDPLossHigh" }}
 {{- end }}
 {{- end }}
 {{- with $pr.tcpChecksFailing }}
@@ -57,21 +56,16 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       TCP checks failing {{`{{ $labels.source_node }}`}} ->
       {{`{{ $labels.destination_node }}`}} at {{`{{ $value | humanizePercentage }}`}} of
       probes
     description: >-
-      {{`{{ $value | humanizePercentage }}`}} of TCP probes from
-      {{`{{ $labels.source_node }}`}} (zone {{`{{ $labels.source_zone }}`}}) to
-      {{`{{ $labels.destination_node }}`}} (zone {{`{{ $labels.destination_zone }}`}})
-      failed over the last 5m, above the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% failure-ratio threshold. Open
-      the pair on the kconmon-ng console Investigate page, or the worst-pairs
-      table on the "kconmon-ng / Overview" Grafana dashboard to see whether
-      UDP and ICMP fail on the same link (a path problem) or TCP fails
-      alone (a listener or policy problem).
+      If UDP and ICMP fail on the same pair, suspect the path; if only TCP fails, a listener or
+      network policy.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "TCPChecksFailing" }}
 {{- end }}
 {{- end }}
 {{- with include "kconmon-ng.prometheusRule.block" (dict "block" $pr.pathMtuBlackHole "defaults" (dict "enabled" true "threshold" 0.5 "sustainedThreshold" 0.1 "for" "5m" "severity" "warning")) | fromJson }}
@@ -121,22 +115,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
-      Path MTU black hole {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}},
-      only {{`{{ $value }}`}}-byte datagrams cross
+      Path MTU black hole {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}}:
+      only packets up to {{`{{ $value }}`}} bytes get through
     description: >-
-      Full-size datagrams from {{`{{ $labels.source_node }}`}} (zone
-      {{`{{ $labels.source_zone }}`}}) to {{`{{ $labels.destination_node }}`}} (zone
-      {{`{{ $labels.destination_zone }}`}}) are lost with no ICMP frag-needed while
-      {{`{{ $value }}`}}-byte ones cross, in more than
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% of path MTU probes over the last
-      10m{{ if lt $st 1.0 }}, or in more than {{ include "kconmon-ng.prometheusRule.pct" $st }}% over the last
-      30m, at least two of them, with one in the last 10m, which is what a black hole on one of
-      several ECMP paths looks like{{ end }}. Small packets and TCP handshakes still work, so the other pair
-      alerts stay quiet while large transfers stall. Compare the interface MTU on both nodes with the
-      encapsulation overhead of the CNI (VXLAN and Geneve take 50 bytes, WireGuard 60 to
-      80) and check whether ICMP type 3 code 4 is filtered on the path.
+      Larger packets are dropped without ICMP frag-needed, so big transfers stall while pings pass.
+      Compare the MTU of the interfaces on {{`{{ $labels.source_node }}`}} with the CNI overhead.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "PathMTUBlackHole" }}
 {{/* The same verdict from the zone family, for scrapes that drop every per-pair series
      (agent.metrics.detail=zone-only, or a hand-written relabel). `unless` keeps it quiet wherever
      per-pair pmtu series exist, so it never doubles PathMTUBlackHole. */}}
@@ -168,23 +155,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       Path MTU black hole zone {{`{{ $labels.source_zone }}`}} -> zone
       {{`{{ $labels.destination_zone }}`}} in {{`{{ $value | humanizePercentage }}`}} of probes
     description: >-
-      {{`{{ $value | humanizePercentage }}`}} of path MTU probes from zone
-      {{`{{ $labels.source_zone }}`}} to zone {{`{{ $labels.destination_zone }}`}} lost their
-      full-size datagram with no ICMP frag-needed: more than
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% over the last 10m{{ if lt $st 1.0 }}, or more than
-      {{ include "kconmon-ng.prometheusRule.pct" $st }}% over the last 30m, at least two of them,
-      with one in the last 10m, which is one black-holed path among several ECMP next hops{{ end }}. This zone-level rule fires
-      only while Prometheus holds no per-pair path MTU series for the zone pair, as under
-      agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node pairs. The
-      ratio is probe-weighted across every pair between the zones, so one black-holed pair
-      among many is diluted here. Compare the interface MTU on the nodes of both zones with
-      the encapsulation overhead of the CNI and check whether ICMP type 3 code 4 is filtered
-      between them; the kconmon-ng console Matrix or Investigate page shows the node pairs.
+      Large packets between the zones are dropped without ICMP frag-needed. The console Matrix shows
+      which node pairs.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "ZonePathMTUBlackHole" }}
     investigateUrl: >-
       /investigate?kind=zone-pair&scope={{`{{ $labels.source_zone }}`}}->{{`{{ $labels.destination_zone }}`}}
 {{- end }}
@@ -217,20 +196,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       Node {{`{{ $labels.destination_node }}`}} unreachable from
       {{`{{ $value | humanizePercentage }}`}} of its peers
     description: >-
-      TCP probes to {{`{{ $labels.destination_node }}`}} (zone
-      {{`{{ $labels.destination_zone }}`}}) fail for {{`{{ $value | humanizePercentage }}`}}
-      of the peers that probe it, above the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold, for {{ .for }}. The node
-      is still registered, so its agent runs while its peers cannot reach it: look at the node
-      itself (kubelet, the CNI agent, the host firewall) before the pairs. A node that stops
-      altogether leaves the mesh within the agent TTL and pages as KconmonAgentsMissing
-      instead. The inhibit_rules example in the metrics guide mutes the pair alerts this one
-      explains.
+      Its agent still runs, but peers cannot reach it over TCP. Check the node itself first: the
+      CNI agent, the host firewall, kubelet.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "NodeUnreachable" }}
 {{- end }}
 {{- end }}
 {{- with include "kconmon-ng.prometheusRule.block" (dict "block" $pr.nodeIsolated "defaults" (dict "enabled" true "threshold" 0.5 "minPeers" 2 "for" "5m" "severity" "critical")) | fromJson }}
@@ -258,16 +232,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       Node {{`{{ $labels.source_node }}`}} cannot reach
       {{`{{ $value | humanizePercentage }}`}} of its peers
     description: >-
-      TCP probes from {{`{{ $labels.source_node }}`}} (zone {{`{{ $labels.source_zone }}`}})
-      fail to {{`{{ $value | humanizePercentage }}`}} of the peers it probes, above the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold, for {{ .for }}. The node's
-      own egress is broken: its network policy, routes or CNI agent, not the peers. The
-      inhibit_rules example in the metrics guide mutes the pair alerts this one explains.
+      The node's own egress is broken: check its CNI agent, routes and network policy, not the
+      peers.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "NodeIsolated" }}
 {{- end }}
 {{- end }}
 {{- with $pr.pairWentSilent }}
@@ -307,27 +280,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
-      No probe results at all from {{`{{ $labels.source_node }}`}} ->
-      {{`{{ $labels.destination_node }}`}} for over {{ .for }}
+      No probe results {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}}
+      for over {{ .for }}
     description: >-
-      {{`{{ $labels.source_node }}`}} was probing
-      {{`{{ $labels.destination_node }}`}} within the last hour and has reported
-      nothing for 5m plus the {{ .for }} this rule waits, so no failure ratio can be
-      computed for this link and the other rules in this group have gone quiet about it
-      rather than healthy. Either the source agent stopped running or
-      stopped being scraped, or the pair left the topology. Check the agent
-      pod on {{`{{ $labels.source_node }}`}} and its scrape target first, then
-      the controller's peer list -- a node that was drained or removed
-      produces this too, and the alert clears on its own an hour after the
-      last result. A pair the sparse topology plan dropped does NOT fire:
-      the rule only matches pairs the source agent still marks in its
-      probe_intended series, and falls back to the plain two-window
-      comparison for agents that do not export that family yet. Zone
-      labels are absent by design: this rule compares
-      label sets across two time windows and pairs are matched on node
-      names only.
+      The other rules say nothing about this pair now. Check the agent pod on
+      {{`{{ $labels.source_node }}`}} and its scrape target; a removed node clears within an hour.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "PairWentSilent" }}
 {{- end }}
 {{- end }}
 {{- with $pr.dnsChecksFailing }}
@@ -344,20 +305,14 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       DNS failing on {{`{{ $labels.source_node }}`}} for {{`{{ $labels.host }}`}} via
       {{`{{ $labels.resolver }}`}} at {{`{{ $value | humanizePercentage }}`}}
     description: >-
-      {{`{{ $value | humanizePercentage }}`}} of lookups of {{`{{ $labels.host }}`}}
-      through resolver {{`{{ $labels.resolver }}`}} from {{`{{ $labels.source_node }}`}}
-      (zone {{`{{ $labels.source_zone }}`}}) failed over the last 5m, above the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}%
-      threshold. This is resolver-side, not a peer link, so check
-      CoreDNS/kube-dns and the node's resolv.conf before the network. The
-      kconmon-ng console Investigate page scoped to
-      {{`{{ $labels.source_node }}`}} shows whether its peer probes degraded at
-      the same moment.
+      A resolver problem, not a peer link: check CoreDNS and the node's resolv.conf first.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "DNSChecksFailing" }}
 {{- end }}
 {{- end }}
 {{- with $pr.externalChecksFailing }}
@@ -374,18 +329,15 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       External target {{`{{ $labels.target }}`}} failing from
       {{`{{ $labels.source_node }}`}} at {{`{{ $value | humanizePercentage }}`}}
     description: >-
-      {{`{{ $value | humanizePercentage }}`}} of probes to external target
-      {{`{{ $labels.target }}`}} (kind {{`{{ $labels.target_kind }}`}}) from
-      {{`{{ $labels.source_node }}`}} (zone {{`{{ $labels.source_zone }}`}}) failed over
-      the last 5m, above the {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold. A probe the allowlist refused
-      never reaches this counter, so if the target looks untested rather
-      than failing, read the external_denied_total counter for its reason
-      (cidr, resolve or disabled) before suspecting the network.
+      Probes to the {{`{{ $labels.target_kind }}`}} target fail. A probe the allowlist refused is
+      counted in external_denied_total instead.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "ExternalChecksFailing" }}
 {{- end }}
 {{- end }}
 {{- with $pr.zoneChecksFailing }}
@@ -413,23 +365,16 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       Zone checks failing {{`{{ $labels.source_zone }}`}} ->
       {{`{{ $labels.destination_zone }}`}} at {{`{{ $value | humanizePercentage }}`}} of
       probes
     description: >-
-      {{`{{ $value | humanizePercentage }}`}} of all TCP, UDP and ICMP probes from zone
-      {{`{{ $labels.source_zone }}`}} to zone {{`{{ $labels.destination_zone }}`}} failed
-      over the last 5m, above the
-      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold. This is the
-      zone-level aggregate, so it keeps firing under the agent.metrics.detail
-      scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
-      Heatmap" Grafana dashboard to see which protocol carries the failures
-      and whether the whole fabric between the zones or only one direction is
-      affected, then the kconmon-ng console Matrix or Investigate page to find
-      the node pairs pulling the ratio up — in zone-only mode the per-pair
-      evidence lives in the console, not in Prometheus.
+      The Zone Heatmap dashboard shows which protocol and direction fail; the console Matrix shows
+      the node pairs.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "ZoneChecksFailing" }}
     {{- /* Console-RELATIVE on purpose: the chart cannot know the console's external URL (ingress
          is optional), and every console parses "->" into its canonical pair arrow. Prepend your
          console origin in the notification template. */}}
@@ -464,22 +409,14 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       Packet loss {{`{{ $labels.source_zone }}`}} -> {{`{{ $labels.destination_zone }}`}}
       at {{`{{ $value | humanizePercentage }}`}}
     description: >-
-      UDP and ICMP probes from zone {{`{{ $labels.source_zone }}`}} to zone
-      {{`{{ $labels.destination_zone }}`}} have lost
-      {{`{{ $value | humanizePercentage }}`}} of their packets over the last 5m,
-      above the {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold.
-      The ratio is packet-weighted across every pair between the zones, so one
-      broken link weighs about 1/N of it with N node pairs between the zones:
-      between small zones a single link crosses the threshold on its own, and
-      UDPLossHigh names it. Open the "kconmon-ng / Zone Heatmap" Grafana
-      dashboard to see whether the loss is one direction or both, then the
-      kconmon-ng console Matrix or Investigate page scoped to these zones for
-      the pair-level picture.
+      UDP and ICMP loss across all pairs between the zones; UDPLossHigh names a single broken pair.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "ZoneLossHigh" }}
     {{- /* Same contract as ZoneChecksFailing's investigateUrl: console-relative, "->" normalised
          by the console itself. */}}
     investigateUrl: >-
@@ -501,21 +438,14 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
-      {{`{{ $value }}`}} kconmon-ng agent(s) missing on the leading controller
-      {{`{{ $labels.instance }}`}}
+      {{`{{ $value }}`}} kconmon-ng agent(s) missing
     description: >-
-      The leading controller on {{`{{ $labels.instance }}`}} expects one agent per
-      schedulable node, and {{`{{ $value }}`}} of them have not registered for
-      {{ .for }}. The usual causes are a DaemonSet that cannot schedule (taints or
-      resources), crash-looping agent pods, or agent-to-controller gRPC
-      being blocked. Every pair involving a missing node simply stops being
-      probed, so the other rules in this group go quiet rather than firing.
-      The kconmon-ng console topology view lists the nodes it does know.
-      Agents that joined through the external gateway are not counted
-      against the node total, so one of them cannot hide a missing
-      in-cluster agent.
+      Nodes without an agent are not probed at all. Check the agent DaemonSet: scheduling, crash
+      loops, gRPC to the controller.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "KconmonAgentsMissing" }}
 {{- end }}
 {{- end }}
 {{- with $pr.kconmonControllerDown }}
@@ -525,15 +455,13 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: No kconmon-ng controller has reported itself leader for {{ .for }}
     description: >-
-      Every controller replica is reporting leader=0, or Prometheus is
-      scraping none of them. Peer lists stop being distributed, so agents
-      keep probing a frozen topology and every other rule in this group
-      quietly stops describing reality. Check the controller Deployment, its
-      lease in the release namespace, and the controller scrape target in
-      Prometheus.
+      Agents keep probing a frozen topology. Check the controller Deployment, its lease and its
+      scrape target.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "KconmonControllerDown" }}
 {{- end }}
 {{- end }}
 {{- with $pr.externalAgentDown }}
@@ -554,19 +482,14 @@
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
+    namespace: {{ $.Release.Namespace }}
   annotations:
     summary: >-
       External kconmon-ng agent {{`{{ $labels.node }}`}} is not answering scrapes
     description: >-
-      Prometheus discovered {{`{{ $labels.node }}`}} at {{`{{ $labels.instance }}`}}
-      (zone {{`{{ $labels.zone }}`}}) through the controller's SD endpoint and has
-      not scraped it successfully for {{ .for }}. The agent still registers with
-      the gateway, otherwise the target would have left the list, so the usual
-      cause is the host firewall or the monitoring namespace's egress policy
-      blocking the metrics port; on most CNIs Prometheus egress is NATed to a
-      node IP, so the host must admit the node CIDR rather than the Prometheus
-      pod IP. The kconmon-ng console keeps showing the node while it registers,
-      so its probe results tell whether the host itself is healthy.
+      It still registers with the gateway, so the host is up: usually its firewall blocks the
+      metrics port from the cluster's node CIDR.
+    runbook_url: {{ include "kconmon-ng.prometheusRule.runbook" "KconmonExternalAgentDown" }}
 {{- end }}
 {{- end }}
 {{- end -}}

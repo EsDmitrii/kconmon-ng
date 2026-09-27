@@ -108,19 +108,14 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: Zone checks failing a -> b at 100% of probes
               description: >-
-                100% of all TCP, UDP and ICMP probes from zone a to zone b failed
-                over the last 5m, above the 5% threshold. This is the
-                zone-level aggregate, so it keeps firing under the agent.metrics.detail
-                scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
-                Heatmap" Grafana dashboard to see which protocol carries the failures
-                and whether the whole fabric between the zones or only one direction is
-                affected, then the kconmon-ng console Matrix or Investigate page to find
-                the node pairs pulling the ratio up — in zone-only mode the per-pair
-                evidence lives in the console, not in Prometheus.
+                The Zone Heatmap dashboard shows which protocol and direction fail; the console Matrix
+                shows the node pairs.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonechecksfailing
+              summary: Zone checks failing a -> b at 100% of probes
       - eval_time: 15m
         alertname: ZoneLossHigh
         exp_alerts:
@@ -128,19 +123,12 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: Packet loss a -> b at 100%
-              description: >-
-                UDP and ICMP probes from zone a to zone b have lost 100% of their
-                packets over the last 5m, above the 10% threshold. The ratio is
-                packet-weighted across every pair between the zones, so one broken link
-                weighs about 1/N of it with N node pairs between the zones: between small
-                zones a single link crosses the threshold on its own, and UDPLossHigh
-                names it. Open the "kconmon-ng / Zone Heatmap" Grafana dashboard to see
-                whether the loss is one direction or both, then the kconmon-ng console
-                Matrix or Investigate page scoped to these zones for the pair-level
-                picture.
+              description: UDP and ICMP loss across all pairs between the zones; UDPLossHigh names a single broken pair.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonelosshigh
+              summary: Packet loss a -> b at 100%
 
   # ── one pair of six UDP-blackholed: the zone ratios are not diluted enough to stay quiet ──
   # The demo stand's first break, zone a (3 agents) -> zone c (2 nodes): 50/360 = 13.9% of the
@@ -200,19 +188,14 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: c
+              namespace: default
             exp_annotations:
-              summary: Zone checks failing a -> c at 5.556% of probes
               description: >-
-                5.556% of all TCP, UDP and ICMP probes from zone a to zone c failed
-                over the last 5m, above the 5% threshold. This is the
-                zone-level aggregate, so it keeps firing under the agent.metrics.detail
-                scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
-                Heatmap" Grafana dashboard to see which protocol carries the failures
-                and whether the whole fabric between the zones or only one direction is
-                affected, then the kconmon-ng console Matrix or Investigate page to find
-                the node pairs pulling the ratio up — in zone-only mode the per-pair
-                evidence lives in the console, not in Prometheus.
+                The Zone Heatmap dashboard shows which protocol and direction fail; the console Matrix
+                shows the node pairs.
               investigateUrl: /investigate?kind=zone-pair&scope=a->c
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonechecksfailing
+              summary: Zone checks failing a -> c at 5.556% of probes
       - eval_time: 15m
         alertname: ZoneLossHigh
         exp_alerts:
@@ -220,19 +203,12 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: c
+              namespace: default
             exp_annotations:
-              summary: Packet loss a -> c at 13.89%
-              description: >-
-                UDP and ICMP probes from zone a to zone c have lost 13.89% of their
-                packets over the last 5m, above the 10% threshold. The ratio is
-                packet-weighted across every pair between the zones, so one broken link
-                weighs about 1/N of it with N node pairs between the zones: between small
-                zones a single link crosses the threshold on its own, and UDPLossHigh
-                names it. Open the "kconmon-ng / Zone Heatmap" Grafana dashboard to see
-                whether the loss is one direction or both, then the kconmon-ng console
-                Matrix or Investigate page scoped to these zones for the pair-level
-                picture.
+              description: UDP and ICMP loss across all pairs between the zones; UDPLossHigh names a single broken pair.
               investigateUrl: /investigate?kind=zone-pair&scope=a->c
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonelosshigh
+              summary: Packet loss a -> c at 13.89%
 
   # ── one pair of twenty UDP-blackholed: diluted below both defaults ──
   # 5 x 4 nodes: 50/1200 = 4.2% lost and 10/600 = 1.7% failed, so one link stays with UDPLossHigh.
@@ -340,17 +316,13 @@ tests:
               instance: c1
               job: kconmon-ng-controller
               pod: ctrl-0
+              namespace: default
             exp_annotations:
-              summary: 1 kconmon-ng agent(s) missing on the leading controller c1
               description: >-
-                The leading controller on c1 expects one agent per schedulable node, and 1 of
-                them have not registered for 10m. The usual causes are a DaemonSet that cannot
-                schedule (taints or resources), crash-looping agent pods, or agent-to-controller
-                gRPC being blocked. Every pair involving a missing node simply stops being probed,
-                so the other rules in this group go quiet rather than firing. The kconmon-ng
-                console topology view lists the nodes it does know. Agents that joined through
-                the external gateway are not counted against the node total, so one of them
-                cannot hide a missing in-cluster agent.
+                Nodes without an agent are not probed at all. Check the agent DaemonSet: scheduling,
+                crash loops, gRPC to the controller.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#kconmonagentsmissing
+              summary: 1 kconmon-ng agent(s) missing
 
   # ── a controller image without the external-agents gauge must still fire ──
   # Same rule, no kconmon_ng_controller_external_agents series at all (a pre-2.4.0 controller):
@@ -372,17 +344,13 @@ tests:
               instance: c1
               job: kconmon-ng-controller
               pod: ctrl-0
+              namespace: default
             exp_annotations:
-              summary: 1 kconmon-ng agent(s) missing on the leading controller c1
               description: >-
-                The leading controller on c1 expects one agent per schedulable node, and 1 of
-                them have not registered for 10m. The usual causes are a DaemonSet that cannot
-                schedule (taints or resources), crash-looping agent pods, or agent-to-controller
-                gRPC being blocked. Every pair involving a missing node simply stops being probed,
-                so the other rules in this group go quiet rather than firing. The kconmon-ng
-                console topology view lists the nodes it does know. Agents that joined through
-                the external gateway are not counted against the node total, so one of them
-                cannot hide a missing in-cluster agent.
+                Nodes without an agent are not probed at all. Check the agent DaemonSet: scheduling,
+                crash loops, gRPC to the controller.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#kconmonagentsmissing
+              summary: 1 kconmon-ng agent(s) missing
 
   # ── an external agent the SD endpoint lists but Prometheus cannot scrape ──
   # The labels are exactly what the controller's SD body attaches plus Prometheus' own job and
@@ -404,17 +372,13 @@ tests:
               zone: external
               external: "true"
               agent_id: edge-host-01-edge-host-01
+              namespace: default
             exp_annotations:
-              summary: External kconmon-ng agent edge-host-01 is not answering scrapes
               description: >-
-                Prometheus discovered edge-host-01 at 10.20.30.40:9091 (zone external) through
-                the controller's SD endpoint and has not scraped it successfully for 5m. The
-                agent still registers with the gateway, otherwise the target would have left the
-                list, so the usual cause is the host firewall or the monitoring namespace's egress
-                policy blocking the metrics port; on most CNIs Prometheus egress is NATed to a
-                node IP, so the host must admit the node CIDR rather than the Prometheus pod IP.
-                The kconmon-ng console keeps showing the node while it registers, so its probe
-                results tell whether the host itself is healthy.
+                It still registers with the gateway, so the host is up: usually its firewall blocks
+                the metrics port from the cluster's node CIDR.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#kconmonexternalagentdown
+              summary: External kconmon-ng agent edge-host-01 is not answering scrapes
 
   # ── the same, under scrapeConfig.externalAgents.jobName=bare.hosts (render-and-test.sh) ──
   # The custom job lacks "agent-external"; the dot is matched literally, so bareXhosts stays quiet.
@@ -438,17 +402,13 @@ tests:
               zone: external
               external: "true"
               agent_id: edge-host-02-edge-host-02
+              namespace: default
             exp_annotations:
-              summary: External kconmon-ng agent edge-host-02 is not answering scrapes
               description: >-
-                Prometheus discovered edge-host-02 at 10.20.30.41:9091 (zone external) through
-                the controller's SD endpoint and has not scraped it successfully for 5m. The
-                agent still registers with the gateway, otherwise the target would have left the
-                list, so the usual cause is the host firewall or the monitoring namespace's egress
-                policy blocking the metrics port; on most CNIs Prometheus egress is NATed to a
-                node IP, so the host must admit the node CIDR rather than the Prometheus pod IP.
-                The kconmon-ng console keeps showing the node while it registers, so its probe
-                results tell whether the host itself is healthy.
+                It still registers with the gateway, so the host is up: usually its firewall blocks
+                the metrics port from the cluster's node CIDR.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#kconmonexternalagentdown
+              summary: External kconmon-ng agent edge-host-02 is not answering scrapes
 
   # ── MTU black hole n1 -> n2: full-size probes fail, 1400 bytes cross, TCP is fine ──
   - interval: 30s
@@ -482,18 +442,13 @@ tests:
               destination_node: n2
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: Path MTU black hole n1 -> n2, only 1400-byte datagrams cross
               description: >-
-                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no ICMP
-                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
-                over the last 10m, or in more than 10% over the last 30m, at least two of them,
-                with one in the last 10m, which is what a black hole on one of several ECMP
-                paths looks like. Small packets and TCP handshakes still work, so the other
-                pair alerts stay quiet while large transfers stall. Compare the interface MTU
-                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
-                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
-                on the path.
+                Larger packets are dropped without ICMP frag-needed, so big transfers stall while
+                pings pass. Compare the MTU of the interfaces on n1 with the CNI overhead.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pathmtublackhole
+              summary: 'Path MTU black hole n1 -> n2: only packets up to 1400 bytes get through'
       - eval_time: 15m
         alertname: TCPChecksFailing
         exp_alerts: []
@@ -519,21 +474,14 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: Path MTU black hole zone a -> zone b in 100% of probes
               description: >-
-                100% of path MTU probes from zone a to zone b lost their full-size datagram
-                with no ICMP frag-needed: more than 50% over the last 10m, or more than 10%
-                over the last 30m, at least two of them, with one in the last 10m, which is one
-                black-holed path among several ECMP next hops. This zone-level rule fires only
-                while Prometheus holds no per-pair path MTU series for the zone pair, as under
-                agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node
-                pairs. The ratio is probe-weighted across every pair between the zones, so one
-                black-holed pair among many is diluted here. Compare the interface MTU on the
-                nodes of both zones with the encapsulation overhead of the CNI and check
-                whether ICMP type 3 code 4 is filtered between them; the kconmon-ng console
-                Matrix or Investigate page shows the node pairs.
+                Large packets between the zones are dropped without ICMP frag-needed. The console
+                Matrix shows which node pairs.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonepathmtublackhole
+              summary: Path MTU black hole zone a -> zone b in 100% of probes
       - eval_time: 15m
         alertname: PathMTUBlackHole
         exp_alerts: []
@@ -589,18 +537,13 @@ tests:
               destination_node: n3
               source_zone: a
               destination_zone: c
+              namespace: default
             exp_annotations:
-              summary: Path MTU black hole n1 -> n3, only 1400-byte datagrams cross
               description: >-
-                Full-size datagrams from n1 (zone a) to n3 (zone c) are lost with no ICMP
-                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
-                over the last 10m, or in more than 10% over the last 30m, at least two of them,
-                with one in the last 10m, which is what a black hole on one of several ECMP
-                paths looks like. Small packets and TCP handshakes still work, so the other
-                pair alerts stay quiet while large transfers stall. Compare the interface MTU
-                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
-                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
-                on the path.
+                Larger packets are dropped without ICMP frag-needed, so big transfers stall while
+                pings pass. Compare the MTU of the interfaces on n1 with the CNI overhead.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pathmtublackhole
+              summary: 'Path MTU black hole n1 -> n3: only packets up to 1400 bytes get through'
 
   # ── ECMP split, 3 paths: one probe in three hashes onto the black-holed next hop (1 probe/min) ──
   # ── the fail ratio sits at 1/3 and the gauge flips back to 1500 whenever the last probe crossed ──
@@ -633,18 +576,13 @@ tests:
               destination_node: n2
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations: &ecmp_annotations
-              summary: Path MTU black hole n1 -> n2, only 1400-byte datagrams cross
               description: >-
-                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no ICMP
-                frag-needed while 1400-byte ones cross, in more than 50% of path MTU probes
-                over the last 10m, or in more than 10% over the last 30m, at least two of them,
-                with one in the last 10m, which is what a black hole on one of several ECMP
-                paths looks like. Small packets and TCP handshakes still work, so the other
-                pair alerts stay quiet while large transfers stall. Compare the interface MTU
-                on both nodes with the encapsulation overhead of the CNI (VXLAN and Geneve take
-                50 bytes, WireGuard 60 to 80) and check whether ICMP type 3 code 4 is filtered
-                on the path.
+                Larger packets are dropped without ICMP frag-needed, so big transfers stall while
+                pings pass. Compare the MTU of the interfaces on n1 with the CNI overhead.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pathmtublackhole
+              summary: 'Path MTU black hole n1 -> n2: only packets up to 1400 bytes get through'
       - eval_time: 58m
         alertname: PathMTUBlackHole
         exp_alerts:
@@ -799,21 +737,14 @@ tests:
               severity: warning
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: Path MTU black hole zone a -> zone b in 31.03% of probes
               description: >-
-                31.03% of path MTU probes from zone a to zone b lost their full-size datagram
-                with no ICMP frag-needed: more than 50% over the last 10m, or more than 10%
-                over the last 30m, at least two of them, with one in the last 10m, which is one
-                black-holed path among several ECMP next hops. This zone-level rule fires only
-                while Prometheus holds no per-pair path MTU series for the zone pair, as under
-                agent.metrics.detail=zone-only; otherwise PathMTUBlackHole names the node
-                pairs. The ratio is probe-weighted across every pair between the zones, so one
-                black-holed pair among many is diluted here. Compare the interface MTU on the
-                nodes of both zones with the encapsulation overhead of the CNI and check
-                whether ICMP type 3 code 4 is filtered between them; the kconmon-ng console
-                Matrix or Investigate page shows the node pairs.
+                Large packets between the zones are dropped without ICMP frag-needed. The console
+                Matrix shows which node pairs.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#zonepathmtublackhole
+              summary: Path MTU black hole zone a -> zone b in 31.03% of probes
 
   # ── five nodes, n3 registered but unreachable: n1, n2, n4, n5 all fail TCP to it and its own ──
   # ── series are not scraped either; exactly one NodeUnreachable, no NodeIsolated ──
@@ -871,16 +802,13 @@ tests:
               severity: critical
               destination_node: n3
               destination_zone: z
+              namespace: default
             exp_annotations:
-              summary: Node n3 unreachable from 100% of its peers
               description: >-
-                TCP probes to n3 (zone z) fail for 100% of the peers that probe it,
-                above the 50% threshold, for 5m. The node is still registered, so its agent
-                runs while its peers cannot reach it: look at the node itself (kubelet, the
-                CNI agent, the host firewall) before the pairs. A node that stops altogether
-                leaves the mesh within the agent TTL and pages as KconmonAgentsMissing
-                instead. The inhibit_rules example in the metrics guide mutes the pair
-                alerts this one explains.
+                Its agent still runs, but peers cannot reach it over TCP. Check the node itself first:
+                the CNI agent, the host firewall, kubelet.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#nodeunreachable
+              summary: Node n3 unreachable from 100% of its peers
       - eval_time: 15m
         alertname: NodeIsolated
         exp_alerts: []
@@ -908,13 +836,13 @@ tests:
               severity: critical
               source_node: n1
               source_zone: z
+              namespace: default
             exp_annotations:
-              summary: Node n1 cannot reach 100% of its peers
               description: >-
-                TCP probes from n1 (zone z) fail to 100% of the peers it probes, above the
-                50% threshold, for 5m. The node's own egress is broken: its network policy,
-                routes or CNI agent, not the peers. The inhibit_rules example in the metrics
-                guide mutes the pair alerts this one explains.
+                The node's own egress is broken: check its CNI agent, routes and network policy, not
+                the peers.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#nodeisolated
+              summary: Node n1 cannot reach 100% of its peers
       - eval_time: 15m
         alertname: NodeUnreachable
         exp_alerts: []
@@ -977,40 +905,24 @@ tests:
               severity: warning
               source_node: n1
               destination_node: n2
+              namespace: default
             exp_annotations:
-              summary: No probe results at all from n1 -> n2 for over 10m
               description: >-
-                n1 was probing n2 within the last hour and has reported nothing for 5m plus the
-                10m this rule waits, so no failure ratio can be computed for this link and the
-                other rules in this group have gone quiet about it rather than healthy. Either
-                the source agent stopped running or stopped being scraped, or the pair left the
-                topology. Check the agent pod on n1 and its scrape target first, then the
-                controller's peer list -- a node that was drained or removed produces this too,
-                and the alert clears on its own an hour after the last result. A pair the
-                sparse topology plan dropped does NOT fire: the rule only matches pairs the
-                source agent still marks in its probe_intended series, and falls back to the
-                plain two-window comparison for agents that do not export that family yet. Zone
-                labels are absent by design: this rule compares label sets across two time
-                windows and pairs are matched on node names only.
+                The other rules say nothing about this pair now. Check the agent pod on n1 and its
+                scrape target; a removed node clears within an hour.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pairwentsilent
+              summary: No probe results n1 -> n2 for over 10m
           - exp_labels:
               severity: warning
               source_node: old
               destination_node: n2
+              namespace: default
             exp_annotations:
-              summary: No probe results at all from old -> n2 for over 10m
               description: >-
-                old was probing n2 within the last hour and has reported nothing for 5m plus the
-                10m this rule waits, so no failure ratio can be computed for this link and the
-                other rules in this group have gone quiet about it rather than healthy. Either
-                the source agent stopped running or stopped being scraped, or the pair left the
-                topology. Check the agent pod on old and its scrape target first, then the
-                controller's peer list -- a node that was drained or removed produces this too,
-                and the alert clears on its own an hour after the last result. A pair the
-                sparse topology plan dropped does NOT fire: the rule only matches pairs the
-                source agent still marks in its probe_intended series, and falls back to the
-                plain two-window comparison for agents that do not export that family yet. Zone
-                labels are absent by design: this rule compares label sets across two time
-                windows and pairs are matched on node names only.
+                The other rules say nothing about this pair now. Check the agent pod on old and its
+                scrape target; a removed node clears within an hour.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pairwentsilent
+              summary: No probe results old -> n2 for over 10m
 
   # ── n1 -> n2 loses 80% of UDP and fails 10% of TCP, a resolver and an external target fail ──
   - interval: 30s
@@ -1040,14 +952,11 @@ tests:
               destination_node: n2
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
+              description: Check whether n1 loses packets to its other peers too or only to this one.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#udplosshigh
               summary: UDP loss n1 -> n2 at 80%
-              description: >-
-                UDP packet loss from n1 (zone a) to n2 (zone b) has held at 80% for 5m, over
-                the 50% threshold. Drill this exact pair on the kconmon-ng console Investigate
-                page, or open the "kconmon-ng / Node Detail" Grafana dashboard with node=n1 to
-                see whether the same node is losing packets to its other peers or only to this
-                one.
       - eval_time: 15m
         alertname: TCPChecksFailing
         exp_alerts:
@@ -1057,14 +966,13 @@ tests:
               destination_node: n2
               source_zone: a
               destination_zone: b
+              namespace: default
             exp_annotations:
-              summary: TCP checks failing n1 -> n2 at 10% of probes
               description: >-
-                10% of TCP probes from n1 (zone a) to n2 (zone b) failed over the last 5m,
-                above the 5% failure-ratio threshold. Open the pair on the kconmon-ng console
-                Investigate page, or the worst-pairs table on the "kconmon-ng / Overview"
-                Grafana dashboard to see whether UDP and ICMP fail on the same link (a path
-                problem) or TCP fails alone (a listener or policy problem).
+                If UDP and ICMP fail on the same pair, suspect the path; if only TCP fails, a listener
+                or network policy.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#tcpchecksfailing
+              summary: TCP checks failing n1 -> n2 at 10% of probes
       - eval_time: 15m
         alertname: DNSChecksFailing
         exp_alerts:
@@ -1074,14 +982,11 @@ tests:
               source_zone: a
               host: db.internal
               resolver: 10.96.0.10
+              namespace: default
             exp_annotations:
+              description: 'A resolver problem, not a peer link: check CoreDNS and the node''s resolv.conf first.'
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#dnschecksfailing
               summary: DNS failing on n1 for db.internal via 10.96.0.10 at 100%
-              description: >-
-                100% of lookups of db.internal through resolver 10.96.0.10 from n1 (zone a)
-                failed over the last 5m, above the 5% threshold. This is resolver-side, not a
-                peer link, so check CoreDNS/kube-dns and the node's resolv.conf before the
-                network. The kconmon-ng console Investigate page scoped to n1 shows whether
-                its peer probes degraded at the same moment.
       - eval_time: 15m
         alertname: ExternalChecksFailing
         exp_alerts:
@@ -1092,14 +997,13 @@ tests:
               target: 203.0.113.10:443
               target_kind: ip
               check_type: tcp
+              namespace: default
             exp_annotations:
-              summary: External target 203.0.113.10:443 failing from n1 at 100%
               description: >-
-                100% of probes to external target 203.0.113.10:443 (kind ip) from n1 (zone a)
-                failed over the last 5m, above the 10% threshold. A probe the allowlist
-                refused never reaches this counter, so if the target looks untested rather
-                than failing, read the external_denied_total counter for its reason (cidr,
-                resolve or disabled) before suspecting the network.
+                Probes to the ip target fail. A probe the allowlist refused is counted in
+                external_denied_total instead.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#externalchecksfailing
+              summary: External target 203.0.113.10:443 failing from n1 at 100%
 
   # ── both controller replicas report leader=0: nobody distributes peer lists ──
   - interval: 30s
@@ -1114,11 +1018,10 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              namespace: default
             exp_annotations:
-              summary: No kconmon-ng controller has reported itself leader for 5m
               description: >-
-                Every controller replica is reporting leader=0, or Prometheus is scraping none
-                of them. Peer lists stop being distributed, so agents keep probing a frozen
-                topology and every other rule in this group quietly stops describing reality.
-                Check the controller Deployment, its lease in the release namespace, and the
-                controller scrape target in Prometheus.
+                Agents keep probing a frozen topology. Check the controller Deployment, its lease and
+                its scrape target.
+              runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#kconmoncontrollerdown
+              summary: No kconmon-ng controller has reported itself leader for 5m

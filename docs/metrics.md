@@ -519,7 +519,9 @@ Deployed when `prometheusRule.enabled: true`. The rules live in the chart
 are appended verbatim under `prometheusRule.additionalRules`. Metric names in
 `expr` are printed from `config.metricsPrefix` directly. The chart README's
 "Alerting rules" section documents every knob and the reasoning behind each
-rule.
+rule. Every built-in alert carries a `runbook_url` to its section in
+[Alert runbooks](reference/alerts.md) and a `namespace` label with the release
+namespace.
 
 The Grafana dashboards in `dashboards/` get the same substitution: the chart
 rewrites `kconmon_ng_` to `<config.metricsPrefix>_` in every panel as it

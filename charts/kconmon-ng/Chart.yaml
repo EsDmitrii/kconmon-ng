@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.5.0
-appVersion: "2.5.0"
+version: 2.5.1
+appVersion: "2.5.1"
 keywords:
   - kubernetes
   - connectivity
@@ -33,147 +33,17 @@ annotations:
       url: https://esdmitrii.github.io/kconmon-ng/reference/release-notes/
   # artifacthub.io/changes is per version: list this release's changes only.
   artifacthub.io/changes: |
+    - kind: changed
+      description: >-
+        Built-in alert descriptions shortened to what to check first; zones are no longer printed on
+        node-pair alerts
     - kind: added
       description: >-
-        Path MTU probe, on by default: full-size DF datagrams to each peer's echo port, sized from the route
-        MTU and bisected on loss, so a pair reads ok, reduced or blackhole; up to four new series per pair
+        runbook_url on every built-in alert, pointing at its section of the new Alert runbooks page
     - kind: added
       description: >-
-        PathMTUBlackHole and ZonePathMTUBlackHole rules (prometheusRule.pathMtuBlackHole, warning), with a
-        sustainedThreshold arm for a black hole on one of several ECMP paths
-    - kind: added
-      description: >-
-        NodeUnreachable and NodeIsolated rules (prometheusRule.nodeUnreachable, .nodeIsolated), critical
-    - kind: added
-      description: >-
-        Path MTU on the Overview and Node Detail dashboards, the console matrix, Overview, node and pair
-        pages, Run checks, and kubectl kconmon check --type pmtu
-    - kind: added
-      description: >-
-        Console local user management in auth.mode=local under the new admin-equivalent users:manage
-        permission, and a self-service password change
-    - kind: added
-      description: >-
-        networkPolicy.dnsEgress for NodeLocal DNSCache, and console.networkPolicy.prometheusTargetPort for a
-        Prometheus Service that maps its port
-    - kind: added
-      description: >-
-        networkPolicy.ciliumKubeAPIEgress (auto): CiliumNetworkPolicies <fullname>-kube-apiserver and
-        <fullname>-node-ingress, without which the controller stayed NotReady on Cilium
-    - kind: added
-      description: >-
-        networkPolicy.clusterCIDRs carves pod and Service CIDRs out of the default 0.0.0.0/0 egress rules
-    - kind: added
-      description: >-
-        console.clientAddress.trustedProxyCIDRs names the proxies whose X-Forwarded-For gives the client
-        address; set it behind an Ingress
-    - kind: added
-      description: >-
-        agent.tls.enabled: TLS verified against the system trust pool for an external agent
-    - kind: changed
-      description: >-
-        The NetworkPolicy is split into <fullname>-agent and <fullname>-controller; the controller admits
-        agents on grpcPort only
-    - kind: changed
-      description: >-
-        Console maintenance windows hold the console's own alert webhooks, windows declared before the
-        upgrade included
-    - kind: changed
-      description: >-
-        Config hot reload applies logLevel and checkers on agents, and logLevel, topology,
-        controller.agentTtl and the external allowlist on the controller; other keys need a restart
-    - kind: changed
-      description: >-
-        config.checkers.dns.timeout defaults to 2s, and DNS probes against an explicit resolver ask the
-        absolute name
-    - kind: changed
-      description: >-
-        A departed peer's per-pair series are deleted ten minutes after it leaves the peer list
-    - kind: changed
-      description: >-
-        The console gets GOMEMLIMIT from its memory limit, and checksum/secret no longer covers the
-        local-auth bootstrap password
-    - kind: changed
-      description: >-
-        The GeoLite2 sidecar moves to geoipupdate v8.0.0; console.mtr.enrichment.geoip.image.tag=v7.1.1
-        keeps the old behaviour
-    - kind: changed
-      description: >-
-        The chart schema refuses at install the values the agent, controller and console refuse at startup
-    - kind: changed
-      description: >-
-        Upgrade from 2.4.x with --reset-then-reuse-values: --reuse-values keeps every old default
-    - kind: changed
-      description: >-
-        The controller and the console refuse check types, schedules and planes an agent cannot run toward
-        the destination, and malformed console input answers 400 or 422 instead of 502
-    - kind: changed
-      description: >-
-        Console node page covers both directions, diagnostic runs list failed pairs first, and pages load
-        on demand (935 kB to 198 kB gzipped)
-    - kind: changed
-      description: >-
-        :latest, the chart and the GitHub release follow a tag only after e2e passes; Go 1.27.1,
-        distroless static-debian13, no OpenTelemetry SDK
+        namespace label on every built-in alert, set to the release namespace
     - kind: fixed
       description: >-
-        Config hot reload stopped after the first atomic replacement of the config file
-    - kind: fixed
-      description: >-
-        An agent probed at a secondary IP or VIP read as 100% UDP loss, and a dead DNS resolver read green
-        for names in /etc/hosts
-    - kind: fixed
-      description: >-
-        After a controller failover pairs went unprobed for about a minute; a rolling restart now fails
-        over in about 2s
-    - kind: fixed
-      description: >-
-        Console storage blips and IdP outages no longer sign users out
-    - kind: fixed
-      description: >-
-        The console works with a custom metricsPrefix, Redis and Valkey before 7.0, Redis 5 and a
-        prometheus.queryTimeout above 30s
-    - kind: fixed
-      description: >-
-        Console alert sync no longer deletes, overwrites or freezes the managed PrometheusRule
-    - kind: fixed
-      description: >-
-        Stale series of departed peers, targets and zones; Overview missing pairs red for loss; 409 on
-        PostgreSQL 18 target delete
-    - kind: fixed
-      description: >-
-        helm test starts its Pod, an unquoted numeric geoip accountId renders as digits, and
-        PairWentSilent names its real wait
-    - kind: fixed
-      description: >-
-        Dashboards: Agents missing subtracts external agents, panels work with UDP off, and long release
-        names no longer collide
-    - kind: security
-      description: >-
-        The NetworkPolicy no longer lets agent pods and externalPeerCidrs reach the controller's
-        unauthenticated ports
-    - kind: security
-      description: >-
-        The console's alerting Role is scoped to console.alerting.bundleName, the controller's to its own
-        Lease
-    - kind: security
-      description: >-
-        One spoofed datagram can no longer start an endless UDP echo loop between agents
-    - kind: security
-      description: >-
-        Webhook deliveries no longer follow redirects or log the webhook URL
-    - kind: security
-      description: >-
-        The external gateway serves registration only and bounds unauthenticated connections; controller
-        request bodies are capped
-    - kind: security
-      description: >-
-        Passwords in HTTP check URLs are masked in labels, logs and errors
-    - kind: security
-      description: >-
-        Console sign-in: bounded argon2id, X-Forwarded-For from trusted proxies only, per-address OIDC
-        limits, audit rows a flood cannot push out
-    - kind: security
-      description: >-
-        Console access: run:{id} topics need runs:read, /ws sockets are capped (console.websocket.*),
-        export sections need their read permission
+        The console's notice for console.alerting.enabled=false no longer reads as if all alerting were
+        off: the chart's rules keep alerting through Prometheus

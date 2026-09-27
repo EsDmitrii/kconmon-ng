@@ -11,7 +11,7 @@ import { AlertingPage } from "@/pages/alerting";
  */
 
 const DETAIL =
-  "prometheus rule sync is not running on this console: the alert rules themselves are unaffected and stay readable";
+  "console-managed alert rules are off on this console: rules saved here are kept but not applied";
 
 const problem = (status: number, title: string, detail: string) =>
   new Response(JSON.stringify({ type: "about:blank", title, status, detail }), {
