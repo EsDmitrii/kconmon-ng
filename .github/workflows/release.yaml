@@ -146,6 +146,8 @@ jobs:
           args: release --clean --release-notes /tmp/current-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A stable tag usually shares its commit with the last rc, and goreleaser would pick the rc.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
       # Read back once, right after the pushes: e2e pulls and publish tags exactly these digests, so
       # a later push to :<version> cannot change what was tested.
