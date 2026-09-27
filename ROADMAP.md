@@ -1,17 +1,7 @@
 # Roadmap
 
-Direction, not dates. The issue tracker has the detail.
-
-## 2.5.0
-
-- Path MTU probe: full-size datagrams with DF set, bisection on loss, the `PathMTUBlackHole` and
-  `ZonePathMTUBlackHole` alerts and a PMTU protocol in the console matrix.
-- Node-level alerts (`NodeUnreachable`, `NodeIsolated`) so that, with Alertmanager inhibit rules, a
-  node its peers cannot reach pages once, not once per pair.
-- Maintenance windows hold console alert webhooks.
-- Local user management in the console.
-- Fault-injection end-to-end tests: a broken pair must trigger a reactive MTR, a black hole must be
-  named.
+Direction, not dates. The issue tracker has the detail, and [RELEASE_NOTES.md](RELEASE_NOTES.md)
+what has shipped.
 
 ## 2.6.0
 
