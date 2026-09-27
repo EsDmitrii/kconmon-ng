@@ -37,10 +37,11 @@ const alertRulesUnavailableDetail = "alert rules are persisted configuration wit
 	databaseKnob + " to enable /api/v1/alert-rules"
 
 // alertingDisabledDetail is served whenever s.ruleSync is nil, and it is a 409 rather than a 503.
-const alertingDisabledDetail = "prometheus rule sync is not running on this console: the alert rules " +
-	"themselves are unaffected and stay readable and editable, but nothing is applying them to the " +
-	"cluster -- set alerting.enabled in the console config (Helm: console.alerting.enabled) on a console running " +
-	"in-cluster with the PrometheusRule CRD present"
+const alertingDisabledDetail = "console-managed alert rules are off on this console: rules saved here are " +
+	"kept but not applied to the cluster. The chart's built-in alert rules (Helm: prometheusRule.enabled) are " +
+	"separate and keep alerting through Prometheus. To apply the rules built here, set alerting.enabled in " +
+	"the console config (Helm: console.alerting.enabled) on a console running in-cluster with the " +
+	"PrometheusRule CRD present"
 
 // promUnconfiguredDetail is the sentence the PREVIEW route reports inside a
 // 200 body rather than as a problem. See handleAlertRulesPreview.

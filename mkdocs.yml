@@ -136,6 +136,7 @@ nav:
       - HTTP API: api.md
       - Console API: reference/console-api.md
       - Metrics and alerting: metrics.md
+      - Alert runbooks: reference/alerts.md
       - External agents: external-agents.md
       - Release notes: reference/release-notes.md
   - FAQ: faq.md

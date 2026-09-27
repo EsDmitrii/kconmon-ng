@@ -1,3 +1,42 @@
+## kconmon-ng v2.5.1
+
+### Changed
+
+- **Shorter alert texts.** Every built-in alert's `description` is now one or
+  two sentences on what to check first, down from up to a thousand
+  characters, so a notification template that prints one per firing alert no
+  longer turns four pairs into a wall of text. The explanations moved to the
+  new [Alert runbooks](https://esdmitrii.github.io/kconmon-ng/reference/alerts/)
+  page. Node-pair alerts no longer print zones, which read as `(zone )` on
+  clusters without zone labels, and `PathMTUBlackHole`'s summary now reads
+  "only packets up to N bytes get through".
+
+### Added
+
+- **`runbook_url`** on every built-in alert, pointing at its section of the
+  Alert runbooks page.
+- **`namespace` label** on every built-in alert, set to the release namespace.
+  The aggregated rules had none, so notification templates showed
+  `Namespace: unknown`, and an Alertmanager inhibit rule with
+  `equal: [namespace]` treated them as matching every other alert without a
+  namespace.
+
+### Fixed
+
+- The console's notice when `console.alerting.enabled` is off read as if
+  alerting as a whole were off. It now says that only the rules built in the
+  console are not applied, and that the chart's built-in rules keep alerting
+  through Prometheus.
+
+### Upgrade notes
+
+1. Alertmanager routes and inhibit rules that match on `namespace` now see
+   kconmon-ng's alerts in the release namespace; check routes that send a
+   namespace to an application team.
+2. Templates, silences or tests that match the old `summary` or
+   `description` text need the new wording. Expressions, thresholds and the
+   other labels are unchanged.
+
 ## kconmon-ng v2.5.0
 
 > 2.5.0 adds a path MTU probe for the failure small probes cannot see: a pair
