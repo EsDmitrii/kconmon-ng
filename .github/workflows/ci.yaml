@@ -493,7 +493,7 @@ jobs:
       - name: Install promtool
         run: |
           base=https://github.com/prometheus/prometheus/releases/download
-          curl -fsSL -o "$RUNNER_TEMP/prometheus.tar.gz" "$base/v3.14.0/prometheus-3.14.0.linux-amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/prometheus.tar.gz" "$base/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz"
           echo "f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d  $RUNNER_TEMP/prometheus.tar.gz" \
             | sha256sum -c -
           tar xzf "$RUNNER_TEMP/prometheus.tar.gz" --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'
