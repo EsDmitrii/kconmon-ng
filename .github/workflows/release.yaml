@@ -267,7 +267,7 @@ jobs:
       # No version: input. The action installs only the CLI releases it ships checksums for, so a
       # pin newer than the action fails the release; the CLI follows the action's own default.
       - name: Set up ORAS
-        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
 
       - name: Publish Artifact Hub repository metadata
         env:
