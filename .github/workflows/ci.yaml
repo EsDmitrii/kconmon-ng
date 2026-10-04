@@ -297,7 +297,7 @@ jobs:
       - name: Install buf
         run: |
           base=https://github.com/bufbuild/buf/releases/download
-          curl -fsSL -o "$RUNNER_TEMP/buf.tar.gz" "$base/v1.71.0/buf-Linux-x86_64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/buf.tar.gz" "$base/v1.73.0/buf-Linux-x86_64.tar.gz"
           echo "1b941e33c62614944c35396bf0e7a197ec6e94e09ac1ce719667dd1bbb372ff5  $RUNNER_TEMP/buf.tar.gz" \
             | sha256sum -c -
           tar xzf "$RUNNER_TEMP/buf.tar.gz" --strip-components=2 -C /usr/local/bin buf/bin/buf
