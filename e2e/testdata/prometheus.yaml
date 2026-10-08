@@ -97,7 +97,7 @@ spec:
       containers:
         - name: prometheus
           # Same release as the promtool pin in ci.yaml.
-          image: prom/prometheus:v3.14.0
+          image: prom/prometheus:v3.15.0
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
