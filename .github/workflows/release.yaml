@@ -65,9 +65,9 @@ jobs:
       # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
       # Pinned like cosign.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          syft-version: v1.52.0
+          syft-version: v1.54.1
 
       - name: Compute version
         id: ver
@@ -139,10 +139,10 @@ jobs:
           cosign sign --yes "ghcr.io/esdmitrii/kconmon-ng-console@${{ steps.console-image.outputs.digest }}"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           # Exact, not ~>v2: a minor once changed blob-signing output.
-          version: v2.18.2
+          version: v2.18.3
           args: release --clean --release-notes /tmp/current-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -267,7 +267,7 @@ jobs:
       # No version: input. The action installs only the CLI releases it ships checksums for, so a
       # pin newer than the action fails the release; the CLI follows the action's own default.
       - name: Set up ORAS
-        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
 
       - name: Publish Artifact Hub repository metadata
         env:
