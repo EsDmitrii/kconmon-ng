@@ -201,7 +201,7 @@ Selected key metrics:
 - `kconmon_ng_pmtu_bytes` and `kconmon_ng_pmtu_probe_bytes`: per pair, the size that crossed on the last path MTU probe and the size the source probes that peer at; the first below the second is a reduced path or a black hole
 - `kconmon_ng_dns_results_total` — total DNS resolution results (labelled by `result`)
 - `kconmon_ng_controller_registered_agents` — agents currently registered with the controller, external ones included
-- `kconmon_ng_controller_expected_agents` — schedulable nodes expected to run an agent
+- `kconmon_ng_controller_expected_agents` — nodes expected to run an agent: schedulable ones, and cordoned ones while their agent is registered
 - `kconmon_ng_controller_external_agents` — registered agents running outside the cluster (2.4.0+); what `KconmonAgentsMissing` subtracts
 
 ### Scraping external agents
@@ -331,18 +331,18 @@ repeating one generic sentence per firing series:
 
 | Rule | Annotation identifies |
 | --- | --- |
-| `UDPLossHigh` | source → destination node, both zones, loss % |
-| `TCPChecksFailing` | source → destination node, both zones, failed % |
-| `PathMTUBlackHole` | source → destination node, both zones, the smallest size that crossed in 10m |
+| `UDPLossHigh` | source → destination node, loss % |
+| `TCPChecksFailing` | source → destination node, failed % |
+| `PathMTUBlackHole` | source → destination node, the smallest size that crossed in 10m |
 | `ZonePathMTUBlackHole` | source → destination zone, share of probes that lost the full size; `investigateUrl` deep link |
-| `NodeUnreachable` | destination node + zone, share of its peers that fail to reach it |
-| `NodeIsolated` | source node + zone, share of its peers it fails to reach |
+| `NodeUnreachable` | destination node, share of its peers that fail to reach it |
+| `NodeIsolated` | source node, share of its peers it fails to reach |
 | `PairWentSilent` | source → destination node |
-| `DNSChecksFailing` | source node + zone, queried `host`, `resolver`, failed % |
-| `ExternalChecksFailing` | source node + zone, `target`, `target_kind`, failed % |
+| `DNSChecksFailing` | source node, queried `host`, `resolver`, failed % |
+| `ExternalChecksFailing` | source node, `target`, `target_kind`, failed % |
 | `ZoneChecksFailing` | source → destination zone, failed %; `investigateUrl` deep link |
 | `ZoneLossHigh` | source → destination zone, loss %; `investigateUrl` deep link |
-| `KconmonAgentsMissing` | controller `instance` and how many agents are missing |
+| `KconmonAgentsMissing` | how many agents are missing |
 | `KconmonControllerDown` | nothing to identify; `absent()` has no series labels |
 
 The series already carry the peer label set (`source_node`,
@@ -445,14 +445,14 @@ case it was written for.
 
 `KconmonAgentsMissing` and `KconmonControllerDown` watch kconmon-ng itself,
 so a monitor that goes quiet pages you instead of looking healthy. Both need
-`controller.leaderElection=true`: the node informer and the leader metric only
-run on the leader. `KconmonAgentsMissing` is written as a subtraction rather
+`controller.leaderElection=true`: without it there is no node informer and no
+leader metric, and the rules read only the leader's counts. `KconmonAgentsMissing` is written as a subtraction rather
 than `registered < expected` so that `$value` is the *number of missing
 agents*; with `<` the alert value would be the registered count, the one
 number an operator can already see everywhere. Since 2.4.0 it subtracts
 `<prefix>_controller_external_agents` from the registered count first:
 `registered_agents` counts bare hosts that came in through the gateway and
-`expected_agents` (schedulable nodes) never did, so one external agent used
+`expected_agents` (cluster nodes) never did, so one external agent used
 to hide one missing node. The `or registered * 0` fallback keeps the rule
 firing on a controller image that predates the gauge. The third self-watch,
 `KconmonExternalAgentDown`, covers the hosts outside the cluster and ships off
@@ -501,7 +501,7 @@ Each is one connection string:
 | --- | --- | --- |
 | PostgreSQL | `database.existingSecret` → a Secret holding a `postgres://` DSN | in-memory console: no history, no incidents, no local/oidc auth |
 | Redis-compatible bus | `redis.existingSecret` → a Secret holding a `redis://` DSN | in-process bus, and `console.replicas` must be 1 |
-| Prometheus | `console.prometheus.url` | the matrix, Explore and PromQL pages answer 503 |
+| Prometheus | `console.prometheus.url` | the matrix, Metrics and PromQL pages answer 503 |
 
 So any provider works: CloudNativePG, Percona, Zalando, RDS, Cloud SQL, a plain
 StatefulSet; Valkey, Redis, a sentinel-fronted pair, ElastiCache. The DSN carries
@@ -905,8 +905,8 @@ across the move.
   ports-less ICMP/MTR rule, the scrape rule and every agent egress rule.
   `<fullname>-controller` admits agents and `networkPolicy.nodeCidrs` on
   `config.grpcPort` only, the console on `config.httpPort` (and `grpcPort`
-  with events), the `helm test` pod on `httpPort` and the scraper on
-  `metricsPort`; its only egress is DNS, and the apiserver rule lives in
+  with events), and the `helm test` pod and the scraper on `metricsPort`;
+  its only egress is DNS, and the apiserver rule lives in
   `<fullname>-controller-apiserver`. Until 2.5.0 one shared policy selected
   the agents and the controller alike, so the agents' peer rules and egress
   applied to the controller too.

@@ -310,6 +310,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
   window.history.pushState({}, "", "/");
   /* vitest.setup.ts backs localStorage with ONE Map for this whole file, so a
      language chosen by the switcher cases below would otherwise translate
@@ -633,6 +634,9 @@ describe("tokens section", () => {
     });
 
     it("sends the picked local wall clock as the instant it names", async () => {
+      // The picked day must stay in the future, or the form refuses it once the calendar passes it.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date(2026, 7, 8, 12, 0, 0));
       const { calls } = renderPage();
       fireEvent.click(await screen.findByRole("button", { name: "New token" }));
       fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci-pipeline" } });

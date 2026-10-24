@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { PathChangesTimeline, lossFamilyFor, pairLossQuery } from "./mtr-changes-timeline";
 import type { PathSnapshot } from "@/lib/types";
@@ -372,6 +372,17 @@ describe("PathChangesTimeline — the window and the markers", () => {
     snapshot({ id: "steady", pathHash: "aaaaaaaaaaaa0000", firstSeen: "2026-08-01T00:00:00Z", lastSeen: "2026-08-09T00:00:00Z" }),
     snapshot({ id: "detour", pathHash: "bbbbbbbbbbbb1111", firstSeen: "2026-08-05T00:00:00Z", lastSeen: "2026-08-05T01:00:00Z" }),
   ];
+
+  /* The window closes at now, so an unpinned clock lets the fixture age: on 2026-10-20 the
+     detour drifted under 5% of the track and the spread assertion started failing. */
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-10T00:00:00Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("opens the AXIS at the EARLIEST first_seen, not at the last row's", async () => {
     renderTimeline({ snapshots: byLastSeen });

@@ -91,6 +91,8 @@ The header also shows a **plane: pod** chip. It states which network plane these
 
 Live, the grid arrives two ways. On a replica receiving the controller event stream, whole matrices are pushed over the WebSocket as snapshot frames on the topic `matrix:<protocol>:pod`; every frame carries the complete grid, so a reconnect needs no replay. Without the stream, the page polls `GET /api/v1/matrix` every 15 seconds; either way each update replaces the grid wholesale, and the server computes it from Prometheus. Concurrent callers share one computation per protocol, and the server serves it for up to 5 seconds; a Prometheus failure is not cached. With the [Time Machine](time-machine.md) engaged, the page skips that endpoint and evaluates the same PromQL directly at the viewed instant.
 
+Each of those queries returns one series per pair, so the answer grows as N×(N−1), and a Prometheus answer larger than `console.prometheus.maxResponseBytes` (8 MiB by default) is refused. Since 2.5.2 the live grid's error then says so and names the key ("prometheus answered with more data than the console reads back; raise console.prometheus.maxResponseBytes") instead of "prometheus did not answer"; under the Time Machine the same cap answers as the [PromQL guardrail](promql.md#guardrails), a 422 "result too large". On a large cluster, raise the limit when the matrix reports it.
+
 ## When series are missing
 
 The cardinality valve that arrived in 2.3.0 (`agent.metrics.detail` in `charts/kconmon-ng/values.yaml`) is a scrape-time relabeling, and this grid reads Prometheus, so the valve decides what a cell can show:

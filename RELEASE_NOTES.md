@@ -1,3 +1,101 @@
+## kconmon-ng v2.5.2
+
+### Security
+
+- **Go 1.27.3** (was 1.27.1) for every binary and image, and
+  `golang.org/x/net` 0.60.0. Together they fix HTTP/2 and HTTP/1 server and
+  client flaws in `net/http` (an HPACK encoder race that crashes the server,
+  memory exhaustion through trailers, CPU burned on repeated window changes,
+  connection desynchronisation after `CONNECT`), unbounded `Range` and MIME
+  header parsing, malformed ECH extensions in `crypto/tls` and two
+  `html/template` escaping bugs. govulncheck traced them to the controller's
+  gRPC server, the external-agent gateway, the console's HTTP server and the
+  agent's HTTP client. The `golang` builder image in both Dockerfiles is now
+  pinned to the patch release instead of following `1.27-alpine`.
+- `go-chi/chi` 5.4.0, `vite` 8.3.3 and the docs build's `certifi`. None of
+  the three advisories reaches kconmon-ng (chi's `middleware` package is not
+  imported, vite only builds the UI, certifi only builds the docs); they are
+  updated so the dependency set carries no open advisory.
+
+### Fixed
+
+- **`KconmonAgentsMissing` could hide a missing agent.** The controller's
+  `expected_agents` counted schedulable nodes only, but the agent DaemonSet
+  runs on cordoned nodes too, so one cordoned node with a live agent offset
+  one missing agent anywhere else. A cordoned node now counts while its agent
+  is registered. One that is drained and powered off for maintenance drops
+  out of the count with its agent and still does not fire.
+- **TCP latency took timeouts.** A probe whose connect succeeded but whose
+  `/readyz` request then failed put the time it took to give up into the
+  total-duration histograms (`tcp_total_duration_seconds`,
+  `zone_tcp_total_seconds`), dragging the latency quantiles up during exactly
+  the outages they should describe. Only successful probes are observed
+  there now; the connect histograms are unchanged.
+- **The matrix blamed Prometheus for its own size cap.** When the fleet-wide
+  query answered with more than `console.prometheus.maxResponseBytes`, the
+  matrix said "prometheus did not answer". It now names the limit to raise.
+- **Console alert rules could take a built-in alert's name.** A console rule
+  named `PathMTUBlackHole` or `KconmonAgentsMissing` deployed next to the
+  chart's rule of the same name, and receivers showed two different alerts as
+  one. Creating or renaming a rule into one of the chart's alert names is now
+  refused; a rule that already has such a name keeps it and can still be
+  edited or renamed away.
+- The path MTU probe sized itself to 0 bytes when one egress device of a
+  multipath route reported no MTU. Such a device is now skipped.
+- After a failover every agent re-subscribed to the controller's streams at
+  the same instant; the wait is now jittered like re-registration.
+- An agent whose pairs all fail logged one warning per peer per round. Each
+  failing pair now warns once, then once a minute with the count of failures
+  since.
+- The console now closes a database connection whose advisory-lock release
+  failed instead of returning it to the pool still holding the lock, and logs
+  a failed restore of the alert bundle during quarantine instead of dropping
+  the error.
+- The controller warns when an agent registers under an id another address
+  holds: two external hosts sharing a hostname evicted each other silently.
+- Three UI tests and the timeline test that failed CI from 20.10 depended on
+  the current date; they run on a pinned clock now.
+
+### Changed
+
+- **`helm test`** checks the controller's `/healthz` on `config.metricsPort`
+  instead of `config.httpPort`, and the controller's NetworkPolicy admits the
+  test pod's label on the metrics port only. Any pod in the namespace can
+  wear that label, and the HTTP port serves the unauthenticated control API.
+- **`PairWentSilent`'s summary** counts the 5m rate window: "for about 15m"
+  with the default `for: 10m`, where it said "for over 10m".
+- **NOTES** list `networkPolicy.enabled=false` among the things to decide,
+  and call the Explore page by its current name, Metrics.
+
+### Docs
+
+- The 15-minute install says the path MTU probe is on by default and links
+  the `PathMTUBlackHole` runbook, runs `helm test` in its verify step and
+  lists every port the chart opens (`config.grpcPort` is the agents' UDP echo
+  as well as the controller's gRPC).
+- Cilium MTU is described as the underlay MTU minus the encapsulation
+  overhead (1450 on kind, 1400 on a Hetzner Cloud network) instead of fixed
+  numbers.
+- The FAQ compares kconmon-ng with Cilium's node health, Gardener's
+  network-problem-detector, blackbox_exporter and Kuberhealthy.
+- Corrections: the event feed carries no node readiness changes; ICMP loss
+  per probe is all or nothing (one echo per probe); with no controller leader
+  the per-pair and zone rules keep evaluating and only `KconmonAgentsMissing`
+  goes quiet;
+  the chart README's alert annotation table no longer lists zones the 2.5.1
+  texts dropped.
+
+### Upgrade notes
+
+1. `KconmonAgentsMissing` may start firing after the upgrade. That is a
+   schedulable node without an agent that a cordoned node was hiding: compare
+   `kubectl get nodes` with the agent pods in `kubectl get pods -o wide`.
+2. TCP latency panels and rules built on the total-duration histograms read
+   lower during outages than before; the failures still show in
+   `tcp_results_total{result="fail"}`.
+3. Templates, silences or tests that match `PairWentSilent`'s old summary
+   need the new wording.
+
 ## kconmon-ng v2.5.1
 
 ### Changed

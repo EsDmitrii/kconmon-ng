@@ -700,6 +700,11 @@ describe("#8 the bar notes a create that lands outside a FROZEN window", () => {
 describe("the frozen window decides where the form OPENS (finding #5)", () => {
   const FROZEN = { from: new Date("2026-08-08T00:00:00Z"), to: new Date("2026-08-08T01:00:00Z") };
 
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-08-01T12:00:00Z"));
+  });
+
   function renderWith(frozenWindow?: { from: Date; to: Date }) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return render(

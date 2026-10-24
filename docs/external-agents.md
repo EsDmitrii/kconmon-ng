@@ -629,7 +629,7 @@ else: an agent's own labels never reach Prometheus.
   different port then shows `up == 0` with that log line as the clue: upgrade
   the package, or move the host to the fleet port.
 - **`KconmonAgentsMissing` no longer counts external agents.** Registered
-  agents include them and expected agents (schedulable nodes) never did, so
+  agents include them and expected agents (cluster nodes) never did, so
   one external agent used to mask one missing cluster node. Since 2.4.0 the
   controller exports `<prefix>_controller_external_agents` and the rule
   subtracts it.

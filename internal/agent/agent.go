@@ -901,10 +901,11 @@ func resubscribeLoop(ctx context.Context, stream string, watch func(context.Cont
 			backoff = standbyRetryWait
 		}
 		slog.Warn(stream+" watch disconnected, re-subscribing", "error", err, "backoff", backoff)
+		// Jittered like reregister: after a failover every agent loses its streams at once.
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(backoff + randomDelay(backoff/4)):
 		}
 		backoff = min(backoff*2, resubscribeMaxBackoff)
 	}
@@ -1046,9 +1047,12 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 		case model.CheckTCP:
 			if d, ok := result.Details.(*TCPDetails); ok {
 				m.TCPConnectDuration.WithLabelValues(labels...).Observe(d.ConnectTime.Seconds())
-				m.TCPTotalDuration.WithLabelValues(labels...).Observe(d.TotalTime.Seconds())
 				m.ZoneTCPConnect.WithLabelValues(zoneLabels...).Observe(d.ConnectTime.Seconds())
-				m.ZoneTCPTotal.WithLabelValues(zoneLabels...).Observe(d.TotalTime.Seconds())
+				// A failed /readyz after a good connect measured how long it took to give up, not a round trip.
+				if result.Success {
+					m.TCPTotalDuration.WithLabelValues(labels...).Observe(d.TotalTime.Seconds())
+					m.ZoneTCPTotal.WithLabelValues(zoneLabels...).Observe(d.TotalTime.Seconds())
+				}
 			}
 			m.TCPResults.WithLabelValues(resultLabels...).Inc()
 			m.ZoneTCPResults.WithLabelValues(zoneResultLabels...).Inc()

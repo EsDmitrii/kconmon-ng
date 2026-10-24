@@ -58,14 +58,15 @@ spec:
     {{- end }}
     {{- end }}
     # The `helm test` Pod's health probe. The Pod carries no selectorLabels, so no policy selects it
-    # and this rule names it by its own label.
+    # and this rule names it by its own label. metricsPort, not httpPort: any pod in the namespace can
+    # wear the label, and httpPort serves the unauthenticated control API.
     - from:
         - podSelector:
             matchLabels:
               kconmon-ng.io/role: test
       ports:
         - protocol: TCP
-          port: {{ .Values.config.httpPort }}
+          port: {{ .Values.config.metricsPort }}
     {{- if .Values.networkPolicy.prometheusNamespace }}
     # Prometheus scraping, config.metricsPort only: httpPort serves the unauthenticated control API
     # (topology, diagnostics, external-check assignments) and this rule admits a whole namespace.

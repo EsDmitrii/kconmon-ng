@@ -348,7 +348,10 @@ func TestValidateJSONObjectRejectsNonObjects(t *testing.T) {
 }
 
 func TestAlertNameConflict(t *testing.T) {
-	rows := []AlertRule{{ID: "r1", Name: "pair-loss"}, {ID: "r2", Name: "zone-latency"}, {ID: "r3", Name: "Pair.Loss"}}
+	rows := []AlertRule{
+		{ID: "r1", Name: "pair-loss"}, {ID: "r2", Name: "zone-latency"}, {ID: "r3", Name: "Pair.Loss"},
+		{ID: "r4", Name: "NodeUnreachable"},
+	}
 	for _, tc := range []struct {
 		desc, id, name string
 		clash          bool
@@ -359,6 +362,10 @@ func TestAlertNameConflict(t *testing.T) {
 		{"an update renaming into another rule's alert name", "r2", "pair.loss", true},
 		{"an update keeping an alert name another row already clashes on", "r3", "PairLoss", false},
 		{"a name with no alert name is left to the render", "", "!!!", false},
+		{"a create taking a chart rule's alert name", "", "KconmonAgentsMissing", true},
+		{"a create that sanitizes into a chart rule's alert name", "", "kconmon controller down", true},
+		{"an update renaming into a chart rule's alert name", "r1", "PathMTUBlackHole", true},
+		{"an update keeping a chart rule's alert name an older version let in", "r4", "NodeUnreachable", false},
 	} {
 		err := AlertNameConflict(rows, tc.id, tc.name)
 		if tc.clash != (err != nil) {

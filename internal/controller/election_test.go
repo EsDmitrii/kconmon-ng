@@ -9,6 +9,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -198,7 +199,10 @@ func TestRunReleasesTheLeaseBeforeReturning(t *testing.T) {
 	waitForLeadership(t, c, true)
 	cancel()
 	select {
-	case <-runErr:
+	case err := <-runErr:
+		if err != nil {
+			t.Errorf("Run returned an error on shutdown: %v", err)
+		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return")
 	}
@@ -210,4 +214,59 @@ func TestRunReleasesTheLeaseBeforeReturning(t *testing.T) {
 	if h := lease.Spec.HolderIdentity; h != nil && *h != "" {
 		t.Errorf("lease holder after Run returned = %q, want released", *h)
 	}
+}
+
+// expected_agents follows the registry as well as the nodes: a cordoned node is expected while its
+// agent is registered and drops out once that agent leaves, as on a node drained and powered off
+// for maintenance.
+func TestExpectedAgentsFollowsTheAgentOfACordonedNode(t *testing.T) {
+	client := fake.NewClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}, Spec: corev1.NodeSpec{Unschedulable: true}},
+	)
+	t.Setenv("KCONMON_NG_POD_NAMESPACE", "kconmon")
+	t.Setenv("KCONMON_NG_POD_NAME", "pod-a")
+	t.Setenv("KCONMON_NG_LEASE_NAME", "kconmon-controller")
+
+	cfg := &config.Config{MetricsPrefix: "test", HTTPPort: freePort(t), GRPCPort: freePort(t), MetricsPort: freePort(t)}
+	cfg.Controller.AgentTTL = 30 * time.Second
+	cfg.Controller.LeaderElection = true
+	c := New(cfg)
+	c.newClientset = func() (kubernetes.Interface, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-runErr:
+			if err != nil {
+				t.Errorf("Run returned an error on shutdown: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+	})
+
+	waitExpected := func(want float64, what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			got := testutil.ToFloat64(c.metrics.ControllerExpectedAgents.WithLabelValues())
+			if got == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected_agents = %v, want %v: %s", got, want, what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	waitExpected(1, "only schedulable node-a before any agent registers")
+	c.registry.Register(model.AgentInfo{ID: "node-c-agent", NodeName: "node-c", PodIP: "10.0.0.3"})
+	waitExpected(2, "cordoned node-c with a registered agent")
+	c.registry.Deregister("node-c-agent")
+	waitExpected(1, "cordoned node-c after its agent left")
 }

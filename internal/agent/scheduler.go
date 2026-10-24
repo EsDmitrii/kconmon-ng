@@ -76,6 +76,10 @@ type Scheduler struct {
 	quietMu       sync.Mutex
 	quietFailures map[string]struct{}
 
+	// failLogMu guards failLogs, the per-peer warning throttles of logFailure.
+	failLogMu sync.Mutex
+	failLogs  map[failLogKey]logThrottle
+
 	// loopMu serialises Run and SetCheckers over loops, the running checker loops by check type.
 	loopMu  sync.Mutex
 	runCtx  context.Context //nolint:containedctx // the Run context, the parent of every checker loop
@@ -334,11 +338,23 @@ func (s *Scheduler) deliverLocal(result *model.CheckResult) {
 // maxQuietFailures bounds the set of pmtu errors already reported once.
 const maxQuietFailures = 64
 
+// maxFailLogs bounds failLogs; a fleet that churns past it starts every throttle over.
+const maxFailLogs = 8192
+
+// failLogKey names one stream of failures: one check type toward one peer.
+type failLogKey struct {
+	checkType model.CheckType
+	peer      string
+}
+
 // logFailure warns about a failed probe. A pmtu probe that failed before sending (no interface MTU,
 // no DF) fails identically toward every peer each round, so each such error warns once, then debugs.
+// Any other failing pair warns once, then once per echoLogInterval with the failures since; the rest
+// debug, or an outage would log one warning per peer per round.
 func (s *Scheduler) logFailure(result *model.CheckResult) {
 	level := slog.LevelWarn
-	if result.Type == model.CheckPMTU && result.Details == nil {
+	unsized := result.Type == model.CheckPMTU && result.Details == nil
+	if unsized {
 		s.quietMu.Lock()
 		if _, seen := s.quietFailures[result.Error]; seen {
 			level = slog.LevelDebug
@@ -355,7 +371,30 @@ func (s *Scheduler) logFailure(result *model.CheckResult) {
 		attrs = append(attrs, "destination", result.Destination)
 	}
 	attrs = append(attrs, "error", redactURLs(result.Error))
+	if !unsized && result.Destination != "" {
+		failed, ok := s.tickFailLog(failLogKey{result.Type, result.Destination}, time.Now())
+		if !ok {
+			level = slog.LevelDebug
+		} else if failed > 1 {
+			attrs = append(attrs, "failed", failed)
+		}
+	}
 	slog.Log(context.Background(), level, "check failed", attrs...)
+}
+
+func (s *Scheduler) tickFailLog(key failLogKey, now time.Time) (int, bool) {
+	s.failLogMu.Lock()
+	defer s.failLogMu.Unlock()
+	l, ok := s.failLogs[key]
+	if !ok && len(s.failLogs) >= maxFailLogs {
+		clear(s.failLogs)
+	}
+	if s.failLogs == nil {
+		s.failLogs = make(map[failLogKey]logThrottle)
+	}
+	failed, logIt := l.tick(now)
+	s.failLogs[key] = l
+	return failed, logIt
 }
 
 // Peers returns a copy of the peer list actually probed, which is the registered set minus this

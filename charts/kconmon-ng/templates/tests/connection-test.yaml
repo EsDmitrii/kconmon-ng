@@ -4,7 +4,7 @@ metadata:
   name: "{{ include "kconmon-ng.fullname" . }}-connection-test"
   labels:
     # No selectorLabels: no component policy selects this Pod, and the controller policy admits it
-    # on httpPort by kconmon-ng.io/role alone. The chart and managed-by labels are provenance only.
+    # on metricsPort by kconmon-ng.io/role alone. The chart and managed-by labels are provenance only.
     helm.sh/chart: {{ include "kconmon-ng.chart" . }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     app.kubernetes.io/component: test
@@ -36,7 +36,7 @@ spec:
         - |
           set -e
           CONTROLLER="{{ include "kconmon-ng.controller.fullname" . }}"
-          echo "Testing controller health at http://${CONTROLLER}:{{ .Values.config.httpPort }}/healthz"
-          HEALTH=$(curl -sf "http://${CONTROLLER}:{{ .Values.config.httpPort }}/healthz") || exit 1
+          echo "Testing controller health at http://${CONTROLLER}:{{ .Values.config.metricsPort }}/healthz"
+          HEALTH=$(curl -sf "http://${CONTROLLER}:{{ .Values.config.metricsPort }}/healthz") || exit 1
           echo "Health check passed: ${HEALTH}"
   restartPolicy: Never

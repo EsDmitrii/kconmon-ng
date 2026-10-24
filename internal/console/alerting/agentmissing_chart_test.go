@@ -3,6 +3,7 @@ package alerting
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -44,5 +45,26 @@ func TestAgentMissingRendersTheChartRuleExpression(t *testing.T) {
 		if got != want {
 			t.Errorf("agent-missing with prefix %s:\n got: %s\nwant: %s", prefix, got, want)
 		}
+	}
+}
+
+// ChartAlertNames is what the console refuses as a rule name, so it must be every alert the chart's
+// PrometheusRule ships, no more and no fewer.
+func TestChartAlertNamesMatchTheChartRules(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "charts", "kconmon-ng", "templates", "_rules.tpl"))
+	if err != nil {
+		t.Fatalf("read chart rules: %v", err)
+	}
+	var inChart []string
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if name, ok := strings.CutPrefix(line, "- alert: "); ok {
+			inChart = append(inChart, strings.TrimSpace(name))
+		}
+	}
+	got := append([]string(nil), ChartAlertNames...)
+	slices.Sort(got)
+	slices.Sort(inChart)
+	if !slices.Equal(got, inChart) {
+		t.Errorf("ChartAlertNames = %v, chart _rules.tpl has %v", got, inChart)
 	}
 }

@@ -180,6 +180,12 @@ func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusBadRequest, "unsupported protocol", "protocol must be one of tcp|udp|icmp|pmtu")
 			return
 		}
+		if errors.Is(err, promql.ErrResponseTooLarge) {
+			// The matrix asks for one series per pair, so a big fleet outgrows the cap: say which.
+			writeProblem(w, http.StatusBadGateway, "matrix computation failed",
+				"prometheus answered with more data than the console reads back; raise console.prometheus.maxResponseBytes")
+			return
+		}
 		// Same reason as handleTopology's: the error text names Prometheus' URL and its address.
 		slog.Error("matrix computation failed", "error", err) //nolint:gosec // G706: structured slog fields
 		writeProblem(w, http.StatusBadGateway, "matrix computation failed", "prometheus did not answer")

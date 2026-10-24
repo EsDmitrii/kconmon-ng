@@ -326,6 +326,43 @@ func TestPMTUProbeThatNeverSentWarnsOnce(t *testing.T) {
 	}
 }
 
+// A pair that keeps failing warns once, then once a minute with the failures since, not on every
+// probe: a zone outage made every agent log one WARN per peer per round.
+func TestRepeatedPeerFailureWarnsOncePerMinute(t *testing.T) {
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := NewScheduler(checker.Target{AgentID: "self", NodeName: "self-node"}, nil)
+	s.UpdatePeers(makePeers(3))
+	down := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{
+		Type: model.CheckTCP, Error: "TCP connect failed: i/o timeout",
+	}}
+	s.AddChecker(down, SchedulerConfig{Interval: time.Minute})
+	for range 4 {
+		s.runCheckerOnce(context.Background(), down)
+	}
+	if n := strings.Count(logs.String(), `level=WARN msg="check failed" type=tcp`); n != 3 {
+		t.Errorf("%d check-failed warnings for 3 failing peers over 4 rounds, want 3 (one per peer)", n)
+	}
+
+	s.failLogMu.Lock()
+	for k, l := range s.failLogs {
+		l.at = l.at.Add(-echoLogInterval)
+		s.failLogs[k] = l
+	}
+	s.failLogMu.Unlock()
+	logs.buf.Reset()
+	s.runCheckerOnce(context.Background(), down)
+	if n := strings.Count(logs.String(), `level=WARN msg="check failed" type=tcp`); n != 3 {
+		t.Errorf("%d warnings a minute later, want 3", n)
+	}
+	if n := strings.Count(logs.String(), "failed=4"); n != 3 {
+		t.Errorf("want each pair's warning to count the 4 failures since its last one, got logs:\n%s", logs.String())
+	}
+}
+
 // A late result for an external check that is no longer assigned must not write its series back.
 func TestExternalResultForARetiredCheckWritesNothing(t *testing.T) {
 	cfg := testNewConfig()

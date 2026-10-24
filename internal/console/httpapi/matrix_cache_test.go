@@ -193,6 +193,28 @@ func TestMatrixFailureIsNotCached(t *testing.T) {
 	}
 }
 
+// Prometheus that answered with more than maxResponseBytes did answer: the matrix says which limit
+// stopped it instead of "prometheus did not answer", which sent operators to check connectivity.
+func TestMatrixNamesTheResponseCapWhenPrometheusAnswersTooMuch(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[`))
+		_, _ = w.Write([]byte(strings.Repeat(" ", 2<<20)))
+		_, _ = w.Write([]byte(`]}}`))
+	}))
+	t.Cleanup(big.Close)
+	s := newMatrixServer(t, big.URL)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/matrix?protocol=tcp", http.NoBody)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("GET /api/v1/matrix over the response cap = %d, want 502", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "console.prometheus.maxResponseBytes") || strings.Contains(body, "did not answer") {
+		t.Errorf("problem detail %s, want it to name console.prometheus.maxResponseBytes", body)
+	}
+}
+
 // The caller that started the shared computation going away must not fail the callers waiting on it.
 func TestMatrixFirstCallerCancellingDoesNotFailTheOthers(t *testing.T) {
 	prom := newMatrixProm()

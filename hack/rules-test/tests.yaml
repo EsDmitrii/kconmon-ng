@@ -911,7 +911,7 @@ tests:
                 The other rules say nothing about this pair now. Check the agent pod on n1 and its
                 scrape target; a removed node clears within an hour.
               runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pairwentsilent
-              summary: No probe results n1 -> n2 for over 10m
+              summary: No probe results n1 -> n2 for about 15m
           - exp_labels:
               severity: warning
               source_node: old
@@ -922,7 +922,7 @@ tests:
                 The other rules say nothing about this pair now. Check the agent pod on old and its
                 scrape target; a removed node clears within an hour.
               runbook_url: https://esdmitrii.github.io/kconmon-ng/reference/alerts/#pairwentsilent
-              summary: No probe results old -> n2 for over 10m
+              summary: No probe results old -> n2 for about 15m
 
   # ── n1 -> n2 loses 80% of UDP and fails 10% of TCP, a resolver and an external target fail ──
   - interval: 30s

@@ -1,6 +1,6 @@
 # Events
 
-The controller's event feed, newest first: restarts, readiness flaps, check observations, on-demand traceroutes, in the order the controller saw them. When you need the raw record of what happened around 14:32, this is it.
+The controller's event feed, newest first: agents joining and leaving, zone changes, check observations, on-demand traceroutes, in the order the controller saw them. When you need the raw record of what happened around 14:32, this is it.
 
 <figure markdown>
 ![Live event feed during a staged break: severity and type filters, Pause, the Live badge, the scope search, Showing 303 of 303 events · capped at 2000, and rows from 06:21:30 to 06:21:31 mixing Error (mtr kc-accept-worker→kc-accept-worker5 failed with 0 hops), Info (tcp check succeeded, tcp diagnostic dispatched, mtr triggered) and Warn (tcp diagnostic timeout, among them kc-accept-worker2→kc-accept-worker)](../img/console-events-live.png){ loading=lazy }
@@ -23,7 +23,7 @@ Operator [annotations](metrics.md#annotations-and-maintenance-windows) are inter
 
 The **Type** filter offers, besides *All types*:
 
-- **Topology changed**: a node or agent joined, left, or changed readiness.
+- **Topology changed**: an agent registered, deregistered or was evicted after missing its heartbeats, or a node's zone label changed; the summary names the reason (`agent_registered`, `agent_deregistered`, `agent_evicted`, `zone_updated`). A node going Ready or NotReady is not an event here: the controller keeps node readiness for the topology view and publishes nothing when it changes.
 - **Check observed**: a scheduled or continuous check produced a result worth reporting.
 - **MTR triggered**: an on-demand traceroute was dispatched, from a run or from `kubectl kconmon mtr` (see [Routes · MTR](routes-mtr.md#reactive-vs-manual-traces)). Reactive traces do not appear here.
 - **MTR completed**: that trace finished, with its hops.
@@ -61,4 +61,5 @@ Three distinct cards, three distinct fixes:
 <!-- verified against: web/src/pages/live.tsx, web/src/lib/i18n/dict/live.ts (loadOlder.atCap, missed.title.*,
      noRealtime.*, topicError.*, history.*, counts), web/src/lib/ws.ts (per-topic seq, epoch guard, RECONNECT_MIN/MAX
      1s..15s, resume with lastSeq), charts/kconmon-ng/values.yaml L233-235 (controller.events.enabled, leader-only),
-     RELEASE_NOTES.md v2.0.3 (checksum/config fix), internal/console/httpapi/ws_authz_test.go (topic authz). -->
+     RELEASE_NOTES.md v2.0.3 (checksum/config fix), internal/console/httpapi/ws_authz_test.go (topic authz),
+     internal/controller/registry.go (the four topology_changed reasons; no readiness event). -->

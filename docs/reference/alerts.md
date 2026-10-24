@@ -144,14 +144,18 @@ packets.
 
 ## KconmonAgentsMissing
 
-The leading controller expects one agent per schedulable node, and some have
-not registered for `for`. Every pair involving a missing node stops being
+The leading controller expects one agent per schedulable node, and per
+cordoned node while that node's agent is registered, and some have not
+registered for `for`. Every pair involving a missing node stops being
 probed, so the other rules go quiet about it rather than firing.
 
 - Check the agent DaemonSet: pods that cannot schedule (taints, resources),
   crash-looping pods, gRPC from the agents to the controller being blocked.
 - Agents that joined through the external gateway are not counted against the
   node total.
+- Nodes the agent is kept off on purpose (`agent.nodeSelector`, narrowed
+  `agent.tolerations`) count as missing. Let the agent run there or disable
+  the rule.
 
 ## KconmonControllerDown
 

@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.5.1
-appVersion: "2.5.1"
+version: 2.5.2
+appVersion: "2.5.2"
 keywords:
   - kubernetes
   - connectivity
@@ -33,17 +33,30 @@ annotations:
       url: https://esdmitrii.github.io/kconmon-ng/reference/release-notes/
   # artifacthub.io/changes is per version: list this release's changes only.
   artifacthub.io/changes: |
-    - kind: changed
+    - kind: security
       description: >-
-        Built-in alert descriptions shortened to what to check first; zones are no longer printed on
-        node-pair alerts
-    - kind: added
-      description: >-
-        runbook_url on every built-in alert, pointing at its section of the new Alert runbooks page
-    - kind: added
-      description: >-
-        namespace label on every built-in alert, set to the release namespace
+        Built with Go 1.27.3 and golang.org/x/net 0.60.0: fixes for HTTP/2, net/http, crypto/tls and
+        html/template vulnerabilities reachable from the controller, the gateway and the console
     - kind: fixed
       description: >-
-        The console's notice for console.alerting.enabled=false no longer reads as if all alerting were
-        off: the chart's rules keep alerting through Prometheus
+        KconmonAgentsMissing counts a cordoned node while its agent is registered, so that agent no
+        longer hides one missing agent elsewhere
+    - kind: fixed
+      description: >-
+        TCP total-duration histograms no longer record failed readiness requests, so timeouts stay out
+        of the latency quantiles
+    - kind: fixed
+      description: >-
+        The matrix names console.prometheus.maxResponseBytes when Prometheus answers with more than it,
+        instead of saying Prometheus did not answer
+    - kind: fixed
+      description: >-
+        Console alert rules can no longer take the name of one of the chart's built-in alerts
+    - kind: changed
+      description: >-
+        helm test checks the controller on its metrics port; the NetworkPolicy no longer opens the HTTP
+        API to the test pod's label
+    - kind: changed
+      description: >-
+        PairWentSilent's summary counts the 5m rate window (about 15m with the default for); NOTES warn
+        when networkPolicy is off

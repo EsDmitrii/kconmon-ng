@@ -417,7 +417,7 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 		}, []string{}),
 		ControllerExpectedAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_expected_agents",
-			Help: "Number of schedulable nodes expected to run an agent",
+			Help: "Number of nodes expected to run an agent: schedulable nodes, and cordoned ones while their agent is registered",
 		}, []string{}),
 		ControllerPeerUpdates: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: prefix + "_controller_peer_updates_total",

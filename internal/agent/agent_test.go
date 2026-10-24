@@ -667,6 +667,28 @@ func TestResultHandlerICMPTimeoutRecordsLossNotLatency(t *testing.T) {
 	}
 }
 
+// A connect that worked followed by a /readyz that timed out measured the connect, not a round trip:
+// only the connect histogram may take it, or the timeout lands in the TCP latency quantiles.
+func TestResultHandlerTCPReadinessFailureRecordsConnectNotTotal(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	handle(model.CheckResult{
+		Type: model.CheckTCP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error:   "HTTP readiness check failed: context deadline exceeded",
+		Details: &model.TCPDetails{ConnectTime: 3 * time.Millisecond, TotalTime: 2 * time.Second},
+	})
+
+	out := exposition(t, reg)
+	if !strings.Contains(out, "kconmon_ng_tcp_connect_duration_seconds{") {
+		t.Error("the connect that succeeded was not observed")
+	}
+	for _, family := range []string{"kconmon_ng_tcp_total_duration_seconds", "kconmon_ng_zone_tcp_total_seconds"} {
+		if strings.Contains(out, family+"{") {
+			t.Errorf("a failed readiness request published its timeout in %s", family)
+		}
+	}
+}
+
 // The same guard driven through the REAL ICMPChecker against RFC 5737 TEST-NET-1, which cannot
 // answer.
 func TestResultHandlerICMPUnreachableTargetReportsTotalLoss(t *testing.T) {

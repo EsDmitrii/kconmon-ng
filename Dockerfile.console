@@ -10,7 +10,7 @@ COPY web/ ./
 # vite.config.ts sets build.outDir to ../internal/console/ui/dist, which does not exist in this stage.
 RUN mkdir -p /out /internal/console/ui/dist && npm run build -- --outDir /out --emptyOutDir
 
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 COPY go.mod go.sum ./

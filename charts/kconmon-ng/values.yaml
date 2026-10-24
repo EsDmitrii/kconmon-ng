@@ -860,7 +860,8 @@ prometheusRule:
     threshold: 0.1
     for: 5m
     severity: warning
-  # Registered agents below the schedulable-node count; needs leaderElection.
+  # Registered agents below the expected count (schedulable nodes, plus cordoned ones whose agent is
+  # registered); needs leaderElection.
   kconmonAgentsMissing:
     enabled: true
     for: 10m

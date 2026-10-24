@@ -156,12 +156,17 @@ configured route (`RTM_F_FIB_MATCH`), so an MTU the kernel learned from an
 earlier ICMP does not shrink the next probe and hide a reduced path; kernels
 older than 4.13 ignore that flag.
 
-The route is the right question because some CNIs keep the pod's `eth0` at
-1500 and put the real limit on the routes. Cilium does exactly that: 1450
-with VXLAN, 1405 with native routing plus WireGuard, 1355 with a tunnel plus
-WireGuard. Sized from the interface, the probe would send 1500-byte
-datagrams that no pod on the node ever sends and report a black hole the
-workloads never meet. Under `agent.hostNetwork` the route leads to the node's
+The route is the right question because some CNIs put the real limit on the
+routes rather than on the pod's `eth0`. Cilium does exactly that, and its
+route MTU is the underlay MTU minus the overhead Cilium reserves (50 bytes for
+VXLAN over IPv4, 95 for WireGuard in Cilium 1.20): 1450 with VXLAN on a
+1500-byte underlay, 1400 with VXLAN on a Hetzner Cloud private network, whose
+NIC is 1450. Measured on a kind cluster (1500-byte underlay) with Cilium 1.20:
+the pod's `eth0` at 1500, the route at 1450 with VXLAN, 1405 with native
+routing plus WireGuard and 1355 with a tunnel plus WireGuard. Sized from the
+interface, the probe would send datagrams larger than any pod on the node
+ever sends and report a black hole the workloads never meet. Under
+`agent.hostNetwork` the route leads to the node's
 egress NIC. Where the route cannot be read, the agent falls back to the MTU
 of the interface that owns its address and logs one warning. An explicit
 `checkers.pmtu.size` is for networks that deliberately run smaller; a value

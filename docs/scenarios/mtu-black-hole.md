@@ -16,7 +16,7 @@ ICMP "fragmentation needed" message path MTU discovery depends on.
 Every agent sends each peer, once a minute, a small datagram and a full-size
 one with the Don't Fragment bit set, to the peer's UDP echo port. The full size
 is the MTU of the route to that peer: the CNI's route MTU where it sets one
-(Cilium does, and keeps the pod's `eth0` at 1500), else the egress device's
+(Cilium does: the underlay MTU minus its encapsulation overhead), else the egress device's
 MTU; under `agent.hostNetwork` that is the node's NIC. How the search works, why
 each series covers one direction and why the probe is UDP rather than ICMP or
 TCP is in [The path MTU plane](../concepts/mesh-and-planes.md#the-path-mtu-plane).

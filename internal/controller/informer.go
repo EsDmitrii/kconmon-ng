@@ -20,7 +20,7 @@ type NodeWatcher struct {
 	stopCh             chan struct{}
 	stopOnce           sync.Once
 
-	onCountChange func(int)
+	onNodesChange func()
 	onZoneChange  func(nodeName, zone string)
 }
 
@@ -28,37 +28,38 @@ func (nw *NodeWatcher) Stop() {
 	nw.stopOnce.Do(func() { close(nw.stopCh) })
 }
 
-// OnCountChange registers a callback invoked with the current schedulable node
-// count whenever the set of nodes changes. It is called synchronously from the
-// informer event handlers.
-func (nw *NodeWatcher) OnCountChange(fn func(int)) {
+// OnNodesChange registers a callback invoked whenever a node is added, updated or removed. It is
+// called synchronously from the informer event handlers, without nw.mu held.
+func (nw *NodeWatcher) OnNodesChange(fn func()) {
 	nw.mu.Lock()
-	nw.onCountChange = fn
+	nw.onNodesChange = fn
 	nw.mu.Unlock()
 }
 
-// SchedulableNodeCount returns the number of nodes with spec.unschedulable == false.
-func (nw *NodeWatcher) SchedulableNodeCount() int {
+// ExpectedAgents counts the nodes expected to run an agent: every schedulable node, and a cordoned
+// one while hasAgent reports its agent registered. The DaemonSet keeps running on a cordoned node,
+// so that agent must not offset a missing one elsewhere; a cordoned node whose agent went away is
+// drained or powered off for maintenance and is missing nothing.
+func (nw *NodeWatcher) ExpectedAgents(hasAgent func(nodeName string) bool) int {
 	nw.mu.RLock()
 	defer nw.mu.RUnlock()
 
 	count := 0
-	for _, ok := range nw.schedulable {
-		if ok {
+	for name, ok := range nw.schedulable {
+		if ok || hasAgent(name) {
 			count++
 		}
 	}
 	return count
 }
 
-// notifyCount reports the current schedulable count to the registered callback.
-// Caller must not hold nw.mu.
-func (nw *NodeWatcher) notifyCount() {
+// notifyNodes reports a node change to the registered callback. Caller must not hold nw.mu.
+func (nw *NodeWatcher) notifyNodes() {
 	nw.mu.RLock()
-	fn := nw.onCountChange
+	fn := nw.onNodesChange
 	nw.mu.RUnlock()
 	if fn != nil {
-		fn(nw.SchedulableNodeCount())
+		fn()
 	}
 }
 
@@ -135,7 +136,7 @@ func (nw *NodeWatcher) onNodeEvent(obj any) {
 	   exists. Registry.UpdateZone already handles "" correctly. */
 	zoneChanged := (!existed && info.Zone != "") || (existed && prev.Zone != info.Zone)
 
-	nw.notifyCount()
+	nw.notifyNodes()
 	if zoneChanged {
 		nw.notifyZone(node.Name, info.Zone)
 	}
@@ -161,7 +162,7 @@ func (nw *NodeWatcher) onNodeDelete(obj any) {
 
 	slog.Info("node removed", "name", node.Name)
 
-	nw.notifyCount()
+	nw.notifyNodes()
 }
 
 func isNodeReady(node *corev1.Node) bool {
