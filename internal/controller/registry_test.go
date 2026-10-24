@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -425,6 +427,28 @@ func recordChanges(r *Registry) func() []TopologyChange {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Clone(seen)
+	}
+}
+
+// An id is node name plus pod name (the hostname off-cluster), so the same id from another address is
+// two hosts sharing an identity, each evicting the other from the mesh. Say so; re-registering from
+// the same address stays quiet.
+func TestRegisterWarnsWhenAnotherAddressTakesTheSameID(t *testing.T) {
+	var logs strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	r := NewRegistry(30 * time.Second)
+	r.Register(model.AgentInfo{ID: "edge-1-edge-1", NodeName: "edge-1", PodIP: "192.0.2.10"})
+	r.Register(model.AgentInfo{ID: "edge-1-edge-1", NodeName: "edge-1", PodIP: "192.0.2.10"})
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("re-registering from the same address warned:\n%s", logs.String())
+	}
+
+	r.Register(model.AgentInfo{ID: "edge-1-edge-1", NodeName: "edge-1", PodIP: "192.0.2.20"})
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "192.0.2.10") {
+		t.Errorf("a second address under one id did not warn with the address it replaced:\n%s", logs.String())
 	}
 }
 

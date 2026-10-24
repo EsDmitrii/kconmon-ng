@@ -268,11 +268,6 @@
       "matchDepNames": ["bufbuild/buf", "github.com/sqlc-dev/sqlc"],
       "groupName": "codegen tooling",
       "automerge": false
-    },
-    {
-      "description": "grpc 1.84.0 carries GO-2026-6443 (server panic on a request without :authority/Host, reachable from the controller's gRPC server); 1.83.x is not affected. Drop this rule once a release with the fix is out.",
-      "matchPackageNames": ["google.golang.org/grpc"],
-      "allowedVersions": "!/^v1\\.84\\.0$/"
     }
   ]
 }

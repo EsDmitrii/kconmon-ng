@@ -228,7 +228,10 @@ func TestControllerGatewayDoesNotServeEventStream(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-runErr:
+		case err := <-runErr:
+			if err != nil {
+				t.Errorf("Run returned an error on shutdown: %v", err)
+			}
 		case <-time.After(15 * time.Second):
 			t.Error("Run did not return after cancel")
 		}

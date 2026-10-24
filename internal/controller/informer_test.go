@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"sync"
 	"testing"
 
@@ -83,46 +84,44 @@ func TestOnZoneChange(t *testing.T) {
 	}
 }
 
-func TestSchedulableNodeCount(t *testing.T) {
+// A cordoned node keeps its agent (DaemonSet pods tolerate node.kubernetes.io/unschedulable), so it
+// is expected while that agent is registered: leaving it out let one cordoned node with a live agent
+// hide one missing agent elsewhere from KconmonAgentsMissing. A cordoned node whose agent is gone is
+// in maintenance (drained, powered off) and is not expected.
+func TestExpectedAgentsCountsACordonedNodeOnlyWhileItsAgentRuns(t *testing.T) {
 	nw := newTestNodeWatcher()
-
 	nw.onNodeEvent(node("node-a", false))
 	nw.onNodeEvent(node("node-b", false))
-	nw.onNodeEvent(node("node-c", true)) // cordoned, not schedulable
+	nw.onNodeEvent(node("node-c", true)) // cordoned
 
-	if got := nw.SchedulableNodeCount(); got != 2 {
-		t.Fatalf("expected 2 schedulable nodes, got %d", got)
+	has := func(nodes ...string) func(string) bool {
+		return func(n string) bool { return slices.Contains(nodes, n) }
+	}
+	if got := nw.ExpectedAgents(has("node-a", "node-c")); got != 3 {
+		t.Errorf("node-b lost its agent while cordoned node-c runs one: expected %d, want 3", got)
+	}
+	if got := nw.ExpectedAgents(has("node-a", "node-b")); got != 2 {
+		t.Errorf("cordoned node-c without its agent: expected %d, want 2", got)
 	}
 
-	// Cordon node-b -> update event with unschedulable=true
-	nw.onNodeEvent(node("node-b", true))
-	if got := nw.SchedulableNodeCount(); got != 1 {
-		t.Fatalf("expected 1 schedulable node after cordon, got %d", got)
+	nw.onNodeEvent(node("node-c", false)) // uncordoned, still without an agent
+	if got := nw.ExpectedAgents(has("node-a", "node-b")); got != 3 {
+		t.Errorf("uncordoned node-c without an agent: expected %d, want 3", got)
 	}
-
-	// Uncordon node-c -> update event with unschedulable=false
-	nw.onNodeEvent(node("node-c", false))
-	if got := nw.SchedulableNodeCount(); got != 2 {
-		t.Fatalf("expected 2 schedulable nodes after uncordon, got %d", got)
-	}
-
-	// Delete node-a
 	nw.onNodeDelete(node("node-a", false))
-	if got := nw.SchedulableNodeCount(); got != 1 {
-		t.Fatalf("expected 1 schedulable node after delete, got %d", got)
+	if got := nw.ExpectedAgents(has("node-b", "node-c")); got != 2 {
+		t.Errorf("after deleting node-a: expected %d, want 2", got)
 	}
 }
 
-func TestSchedulableNodeCountCallback(t *testing.T) {
+func TestNodesChangeCallback(t *testing.T) {
 	nw := newTestNodeWatcher()
 
 	var mu sync.Mutex
-	var lastCount int
 	var calls int
-	nw.OnCountChange(func(c int) {
+	nw.OnNodesChange(func() {
 		mu.Lock()
 		defer mu.Unlock()
-		lastCount = c
 		calls++
 	})
 
@@ -135,7 +134,18 @@ func TestSchedulableNodeCountCallback(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("expected callback on every event (3), got %d", calls)
 	}
-	if lastCount != 0 {
-		t.Fatalf("expected final schedulable count 0, got %d", lastCount)
+}
+
+// An external agent runs on no cluster node, so a cordoned node that shares its name stays out.
+func TestExpectedAgentsForIgnoresExternalAgents(t *testing.T) {
+	nw := newTestNodeWatcher()
+	nw.onNodeEvent(node("node-a", false))
+	nw.onNodeEvent(node("edge", true))
+	agents := []model.AgentInfo{
+		{ID: "a", NodeName: "node-a"},
+		{ID: "x", NodeName: "edge", Labels: map[string]string{model.LabelExternal: "true"}},
+	}
+	if got := expectedAgentsFor(nw, agents); got != 1 {
+		t.Errorf("expectedAgentsFor = %d, want 1: the external agent must not keep cordoned node edge expected", got)
 	}
 }

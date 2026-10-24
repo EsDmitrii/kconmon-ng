@@ -49,6 +49,15 @@ helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
 Without the operator, drop both `--set` flags. The examples track the latest
 published chart; pass `--version` if you need a pinned, reproducible install.
 
+The path MTU probe is on by default (agents 2.5.0 and newer): once a minute
+each agent sends every peer a full-size datagram with Don't Fragment set. If
+some hop on a pair silently drops packets above a smaller size, that pair
+fails the probe while TCP and ping stay green, and with
+`prometheusRule.enabled=true` the bundled `PathMTUBlackHole` alert fires. The
+[runbook](../reference/alerts.md#pathmtublackhole) says what to check; a
+network that runs smaller on purpose is covered in the
+[FAQ](../faq.md#why-does-pathmtublackhole-fire-when-tcp-works-fine).
+
 Expect one controller pod plus one agent per node. The agent DaemonSet
 tolerates every taint by default (`tolerations: [{operator: Exists}]`), so
 control-plane nodes get one too:
@@ -71,13 +80,45 @@ The real capacity question is on the Prometheus side; see
 Narrow the blanket toleration (replace `agent.tolerations`) or pin the
 DaemonSet with `agent.nodeSelector` / `agent.affinity`. One side effect to
 know: the controller derives `kconmon_ng_controller_expected_agents` from the
-count of *schedulable* nodes, each of which it expects to run an agent. Keep
-agents off schedulable nodes and registered stays below expected, so the
-bundled `KconmonAgentsMissing` alert fires about a gap you created on
-purpose. Cordoned nodes are excluded from the count; selector-excluded ones
-are not.
+count of schedulable nodes, each of which it expects to run an agent. Keep
+agents off a schedulable node and registered stays below expected, so the
+bundled `KconmonAgentsMissing` alert fires about a gap you created on purpose.
+A cordoned node counts only while its agent is registered (since 2.5.2): the
+DaemonSet tolerates `node.kubernetes.io/unschedulable`, so a cordoned node
+keeps its agent until you drain or power it off, and then it drops out of the
+count instead of firing.
+
+### Ports
+
+The chart's Services, container ports and NetworkPolicies use these values.
+Open them in host firewalls and in policies of your own; under
+`agent.hostNetwork` the agent's three ports must also be free on every node:
+
+| Value | Default | Protocol | Listens | Who connects |
+|---|---|---|---|---|
+| `config.httpPort` | `8080` | TCP | agent, controller | agent: peer agents' TCP probes (connect, then `GET /readyz`); controller: its HTTP API, used by the console and `kubectl-kconmon`; the kubelet's probes on both |
+| `config.grpcPort` | `9090` | UDP on the agent, TCP on the controller | agent, controller | agent: the UDP echo that peers' UDP and path MTU probes hit (nothing listens on TCP there); controller: gRPC, where agents register and the console reads the event stream |
+| `config.metricsPort` | `9091` | TCP | agent, controller, console | Prometheus scrapes; `helm test` (controller only) |
+| `console.service.port` | `8080` | TCP | console | browsers, API clients and the kubelet's probes; only with the console on |
+| `controller.externalGateway.port` | `9443` | TCP | controller | [external agents](../external-agents.md) over TLS; only with `controller.externalGateway.enabled` |
+
+ICMP probes and MTR traces between agents use no port, so a policy has to
+allow ICMP between the agent pods. DNS checks go to the pod's resolver, or to
+`config.checkers.dns.resolvers`, on port 53 unless a resolver entry names its
+own.
 
 ## Verify agents are probing
+
+The chart ships a Helm test that checks that the controller answers:
+
+```bash
+helm test kconmon-ng   # add -n <namespace> if you installed elsewhere
+```
+
+It runs a short-lived `curlimages/curl` pod against the controller's
+`/healthz` and reports the test phase as `Succeeded`; the pod is deleted
+afterwards either way. It says nothing about the agents, which is what the
+rest of this section checks.
 
 Metrics start flowing within seconds of the agents registering. To look at
 them raw, port-forward any agent and read its `/metrics`:

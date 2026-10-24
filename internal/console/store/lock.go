@@ -35,6 +35,11 @@ func releaseAdvisoryLock(conn *pgxpool.Conn, key int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
 	defer cancel()
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", key); err != nil {
-		slog.Warn("store: release advisory lock failed", "key", key, "error", err)
+		// Ending the session is the release left: back in the pool, the connection would hold the
+		// lock for the rest of its life and every other replica's try-lock would keep failing.
+		slog.Warn("store: release advisory lock failed, closing its connection", "key", key, "error", err)
+		closeCtx, cancelClose := context.WithTimeout(context.Background(), unlockTimeout)
+		defer cancelClose()
+		_ = conn.Hijack().Close(closeCtx)
 	}
 }

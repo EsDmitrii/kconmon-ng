@@ -222,7 +222,7 @@ MUST = [
     ("host-network agent (node IP) -> controller gRPC", ip(NODE), ctrl, "TCP", GRPC),
     ("console -> controller API", console, ctrl, "TCP", HTTP),
     ("console -> controller gRPC (events)", console, ctrl, "TCP", GRPC),
-    ("helm test pod -> controller API", testpod, ctrl, "TCP", HTTP),
+    ("helm test pod -> controller /healthz on the metrics port", testpod, ctrl, "TCP", METRICS),
     ("prometheus -> controller metrics", prom, ctrl, "TCP", METRICS),
     ("prometheus -> agent metrics", prom, agent, "TCP", METRICS),
     # serviceMonitor.enabled stays off here: a PodMonitor or a plain scrape config needs the rule too.
@@ -249,6 +249,8 @@ MUST_NOT = [
     ("external peer -> controller metrics", ip(EXT_PEER), ctrl, "TCP", METRICS),
     ("external peer -> controller any (ICMP rule)", ip(EXT_PEER), ctrl, "TCP", 12345),
     ("agent -> controller API", agent, ctrl, "TCP", HTTP),
+    # Any pod in the namespace can wear the test pod's label; the unauthenticated API stays closed to it.
+    ("helm test pod -> controller API", testpod, ctrl, "TCP", HTTP),
     ("agent -> controller arbitrary port", agent, ctrl, "TCP", 12345),
     ("external agent CIDR -> controller gRPC", ip(EXT_AGENT), ctrl, "TCP", GRPC),
     ("external agent CIDR -> agent", ip(EXT_AGENT), agent, "TCP", HTTP),

@@ -7,16 +7,16 @@
 The name is inherited, so credit first:
 [kconmon](https://github.com/Stono/kconmon) by Karl Stoney established this
 exact shape: per-node agents, a controller handing out peer lists, per-pair
-Prometheus metrics enriched with zones. It is written in Node.js and was
-archived in June 2026. kconmon-ng is a ground-up Go implementation of the
-same idea, not a fork (no code is shared), extended with ICMP, reactive MTR
+Prometheus metrics enriched with zones. It is written in TypeScript for
+Node.js and was archived in June 2026. kconmon-ng is a ground-up Go
+implementation of the same idea, not a fork (no code is shared), extended with ICMP, reactive MTR
 tracing and the Console. Here is the comparison against kconmon, goldpinger
 and kubenurse:
 
 | | kconmon-ng | [kconmon](https://github.com/Stono/kconmon) | [goldpinger](https://github.com/bloomberg/goldpinger) | [kubenurse](https://github.com/postfinance/kubenurse) |
 |---|---|---|---|---|
 | Status | active | archived (June 2026) | active | active |
-| Language | Go | Node.js | Go | Go |
+| Language | Go | TypeScript (Node.js) | Go | Go |
 | Architecture | agent DaemonSet + controller; peer list pushed over gRPC | agent DaemonSet + controller; peers fetched every 5s | one DaemonSet; every pod queries the Kubernetes API for peers | one DaemonSet |
 | Node-to-node probes | TCP, UDP and ICMP on every ordered pair, per protocol, plus a once-a-minute path MTU probe | TCP (HTTP GET), UDP | HTTP between pods; UDP optional, off by default | HTTP between neighbours |
 | Other checks | DNS, HTTP(S) URLs, external targets behind an agent-side CIDR allowlist | DNS | DNS; TCP/HTTP(S) to external targets | API server (direct and via DNS), ingress, service |
@@ -32,6 +32,34 @@ with a tiny footprint is enough, for **kubenurse** when the question is the path
 through ingress, service and API server rather than raw node-to-node transport,
 and for **kconmon-ng** when you need per-protocol pair evidence (the
 UDP-but-not-TCP class of failure) with the bad hop already traced.
+
+### How does it compare with Cilium's node health and other probers?
+
+Four more projects cover part of the same ground: Cilium's built-in node
+health (`cilium-health`), Gardener's network-problem-detector, the Prometheus
+blackbox_exporter and Kuberhealthy.
+
+| | kconmon-ng | [Cilium node health](https://docs.cilium.io/en/stable/operations/troubleshooting/#checking-cluster-connectivity-health) | [network-problem-detector](https://github.com/gardener/network-problem-detector) | [blackbox_exporter](https://github.com/prometheus/blackbox_exporter) | [Kuberhealthy](https://github.com/kuberhealthy/kuberhealthy) |
+|---|---|---|---|---|---|
+| What it is | agent DaemonSet + controller, any CNI | part of every Cilium agent, on by default (`healthChecking: true`); Cilium clusters only | two agent DaemonSets (pod network and host network) + a controller | one exporter that runs a probe each time Prometheus scrapes it | an operator that runs `HealthCheck` resources as short-lived checker pods on a schedule |
+| Node-to-node probes | TCP, UDP and ICMP on every ordered pair, plus a once-a-minute path MTU probe | ICMP and HTTP to every node and to a simulated workload on each, typically once a minute | TCP connects pod-to-pod, pod-to-node and node-to-node, one peer at a time in round robin; ICMP ping is an optional job that needs `NET_ADMIN` | none of its own: HTTP(S), TCP, ICMP, DNS or gRPC to the targets you list | none built in; the check registry's network connection check opens a TCP or UDP connection to one target |
+| Other checks | DNS, HTTP(S) URLs, external targets | none | API server over TCP and HTTPS, DNS lookups | any endpoint you list | anything a container can test: deployments, DNS, HTTP, TLS, your own code |
+| Pair in the metric labels | `source_node`/`destination_node`, plus zones | no: counts and latency per agent; per-peer status from `cilium-health status` | `src`/`dest` per check job | whatever labels the scrape job attaches | no: one series per check |
+| Path MTU | DF probe, bisected on loss | no | no | an ICMP module can set DF and a payload size (IPv4, raw socket); no search | no |
+| Beyond metrics | reactive MTR; the optional Console | the `cilium-health status` CLI | node conditions `ClusterNetworkProblem`/`HostNetworkProblem` and events, with its K8s exporter on | no | status UI, JSON API, `kubectl get healthcheck` |
+
+The table states what each project's README or documentation claims as of
+October 2026 (Cilium 1.20); a *no* means the docs do not claim the feature.
+On a Cilium cluster node health is already running, and
+`cilium-health status` answers "can this node reach that one" with nothing
+to install; kconmon-ng adds per-pair series in Prometheus, UDP and path MTU
+on every pair, and the same tool on any CNI. Reach for
+**network-problem-detector** when you want the verdict as node conditions and
+events that Kubernetes tooling already reads, for **blackbox_exporter** when
+the question is a fixed list of endpoints from one vantage point, and for
+**Kuberhealthy** when the question is whether the cluster works end to end
+(a deployment rolls out, DNS resolves) rather than how the network between
+nodes behaves.
 
 ### Do I need the Prometheus Operator?
 
@@ -207,11 +235,13 @@ size it really carries with `config.checkers.pmtu.size`, or switch the rule off
 with `prometheusRule.pathMtuBlackHole.enabled: false`. See
 [When the black hole is by design](scenarios/mtu-black-hole.md#when-the-black-hole-is-by-design).
 
-On Cilium you do not need `checkers.pmtu.size`. Cilium keeps the pod's `eth0`
-at 1500 and sets the tunnel MTU on its routes, and the probe takes its size
-from the route to the peer, so it probes at 1450 with VXLAN without any
-configuration. It falls back to the interface MTU only when the route lookup
-fails, and says so once in the agent log.
+On Cilium you do not need `checkers.pmtu.size`. Cilium sets the tunnel MTU on
+the pod's routes, and the probe takes its size from the route to the peer, so
+it probes at the underlay MTU minus the encapsulation overhead without any
+configuration: 1450 with VXLAN on a 1500-byte underlay such as kind, 1400
+with VXLAN on a Hetzner Cloud private network, whose NIC is 1450. It falls
+back to the interface MTU only when the route lookup fails, and says so once
+in the agent log.
 
 ### Why is everything in one zone / why does Topology say no zone?
 

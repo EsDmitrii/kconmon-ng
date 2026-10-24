@@ -719,6 +719,14 @@ func scanPromDurationComponent(s string, from int) (digits, unit string, rest in
 // SanitizeAlertName
 // ---------------------------------------------------------------------------
 
+// ChartAlertNames are the alerts the chart's own PrometheusRule ships. A console rule must not take
+// one of these names: two different alerts under one name read as one in every receiver.
+var ChartAlertNames = []string{
+	"UDPLossHigh", "TCPChecksFailing", "PathMTUBlackHole", "ZonePathMTUBlackHole", "NodeUnreachable",
+	"NodeIsolated", "PairWentSilent", "DNSChecksFailing", "ExternalChecksFailing", "ZoneChecksFailing",
+	"ZoneLossHigh", "KconmonAgentsMissing", "KconmonControllerDown", "KconmonExternalAgentDown",
+}
+
 // SanitizeAlertName turns an operator-typed rule name into a Prometheus alert name; the rules,
 // pinned by TestSanitizeAlertName: - Only [a-zA-Z0-9_] survives.
 func SanitizeAlertName(name string) (alert string, err error) {

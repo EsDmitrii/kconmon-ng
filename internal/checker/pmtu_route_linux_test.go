@@ -123,7 +123,7 @@ func TestParseRouteReply(t *testing.T) {
 
 // The probe fits the smallest of the route's mtu metric and its egress devices.
 func TestFIBRouteProbeMTU(t *testing.T) {
-	devs := map[int]int{2: 1500, 3: 1450, 4: 65536}
+	devs := map[int]int{2: 1500, 3: 1450, 4: 65536, 5: 0}
 	linkMTU := func(i int) (int, error) {
 		if mtu, ok := devs[i]; ok {
 			return mtu, nil
@@ -143,6 +143,9 @@ func TestFIBRouteProbeMTU(t *testing.T) {
 		{"loopback", fibRoute{oifs: []int{4}}, 65536, false},
 		{"no egress device", fibRoute{mtu: 1400}, 0, true},
 		{"unknown device", fibRoute{oifs: []int{9}}, 0, true},
+		{"a device without an MTU is not the smallest", fibRoute{oifs: []int{2, 5}}, 1500, false},
+		{"only the route mtu sizes it", fibRoute{mtu: 1400, oifs: []int{5}}, 1400, false},
+		{"nothing sizes it", fibRoute{oifs: []int{5}}, 0, true},
 	}
 	for _, tc := range cases {
 		got, err := tc.route.probeMTU(linkMTU)

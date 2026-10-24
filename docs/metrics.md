@@ -33,6 +33,14 @@ plus the implicit `+Inf`, `_sum` and `_count`: 16 series per histogram.
 | `kconmon_ng_tcp_total_duration_seconds`   | histogram | peer            | Total TCP probe RTT                |
 | `kconmon_ng_tcp_results_total`            | counter   | peer + `result` | Probe outcomes: `success` / `fail` |
 
+A probe is a TCP connect followed by `GET /readyz` on the peer's HTTP port.
+The connect histograms (`tcp_connect_duration_seconds` and
+`zone_tcp_connect_seconds`) observe every probe whose connect succeeded. Since
+2.5.2 the total-duration ones (`tcp_total_duration_seconds` and
+`zone_tcp_total_seconds`) observe only successful probes, a `/readyz` that
+answered 200: a timeout, a reset or another status counts as `fail` and stays
+out of them, so the time spent giving up does not land in the RTT quantiles.
+
 ## Agent: UDP
 
 | Metric                             | Type      | Labels          | Description                  |
@@ -49,6 +57,11 @@ plus the implicit `+Inf`, `_sum` and `_count`: 16 series per histogram.
 | `kconmon_ng_icmp_rtt_seconds`       | histogram | peer            | ICMP round-trip time        |
 | `kconmon_ng_icmp_packet_loss_ratio` | gauge     | peer            | Packet loss ratio (0.0–1.0) |
 | `kconmon_ng_icmp_results_total`     | counter   | peer + `result` | Probe outcomes              |
+
+An ICMP probe sends exactly one echo request, so `icmp_packet_loss_ratio` is
+binary: `0` when the reply came back, `1` when it did not, held until the next
+probe. For a loss rate over time, take the failure ratio of
+`icmp_results_total` over a window, or the zone family's packet counters.
 
 ## Agent: Path MTU
 
@@ -73,9 +86,12 @@ bisection found was lost when sent again, or the time budget (half of
 writes neither the counter nor the gauge, so a lossy path reads as a pair
 with no path MTU result rather than as a black hole; its loss shows on the
 UDP plane. On Cilium the probe size, and with it every gauge on a healthy
-path, is the route MTU (1450 with VXLAN), not the pod `eth0`'s 1500. Calico
-sets the MTU on the pod's `eth0` instead: with IPIP that is 1480, and the
-probe and the gauge read 1480 on every healthy pair.
+path, is the MTU Cilium puts on the pod's routes: the underlay MTU minus the
+encapsulation overhead, so 1450 with VXLAN on a 1500-byte underlay such as
+kind, and 1400 with VXLAN on a Hetzner Cloud private network, whose NIC is
+1450. Calico sets the MTU on the pod's `eth0` instead: with IPIP on a
+1500-byte underlay that is 1480, and the probe and the gauge read 1480 on
+every healthy pair.
 
 The probe size is per pair because it comes from the route to each peer: a
 hostNetwork or bare-host agent with a VPN route next to a 1500-byte LAN
@@ -282,7 +298,7 @@ counters and histograms stop growing and stay until the restart.
 | Metric                                     | Type    | Labels             | Description                                |
 | ------------------------------------------ | ------- | ------------------ | ------------------------------------------ |
 | `kconmon_ng_controller_registered_agents`  | gauge   | none                | Currently registered agents, external ones included |
-| `kconmon_ng_controller_expected_agents`    | gauge   | none                | Schedulable nodes expected to run an agent |
+| `kconmon_ng_controller_expected_agents`    | gauge   | none                | Nodes expected to run an agent: schedulable ones, and cordoned ones while their agent is registered (before 2.5.2: schedulable nodes only) |
 | `kconmon_ng_controller_external_agents`    | gauge   | none                | Registered agents running outside the cluster (through the external gateway); a subset of `registered_agents`, since 2.4.0 |
 | `kconmon_ng_controller_grpc_connections`   | gauge   | none                | Active gRPC streaming connections          |
 | `kconmon_ng_controller_peer_updates_total` | counter | none                | Peer-list updates broadcast to agents      |
@@ -298,7 +314,7 @@ counts **agents, never specs**: a per-agent series would grow with the cluster
 for no operational gain. `external_agents` is updated in the same registry
 callback as `registered_agents` and zeroed with it when a replica loses the
 lease; it exists so that `KconmonAgentsMissing` can subtract bare hosts from
-the registered count, which `expected_agents` (schedulable nodes) never
+the registered count, which `expected_agents` (cluster nodes) never
 included.
 
 ### On a standby replica
@@ -803,7 +819,7 @@ story, including how not to get paged twice, lives in
   labels:
     severity: warning
   annotations:
-    summary: Fewer kconmon-ng agents registered than schedulable nodes
+    summary: Fewer kconmon-ng agents registered than expected
 
 - alert: KconmonControllerDown
   expr: absent(kconmon_ng_controller_leader == 1)
@@ -828,12 +844,14 @@ Fourteen rules, thirteen of them on by default; `KconmonExternalAgentDown` ships
 because its job only exists once external agents are
 [scraped](external-agents.md#scraping-external-agents). `expr`/`for`/`severity`
 above are what the chart renders at its default knob values; the
-`annotations` are abridged; what ships carries a templated `summary` and
-`description` naming the pair, the zones and the measured value.
+`annotations` are abridged; what ships carries a templated `summary` naming
+the pair (the zones, for the zone rules) and the measured value, a short
+`description` of what to check first, and a `runbook_url` into the
+[alert runbooks](reference/alerts.md).
 
 `KconmonAgentsMissing` subtracts `kconmon_ng_controller_external_agents`
 from `registered`: `registered` counts external agents while `expected`
-(schedulable nodes) does not, so without it one bare host would mask one
+(cluster nodes) does not, so without it one bare host would mask one
 missing cluster node. `or registered * 0` stands in for that gauge on a
 controller image older than 2.4.0, so the rule keeps firing there rather than
 matching nothing. `KconmonExternalAgentDown` reads Prometheus' own `up` for
@@ -1010,9 +1028,13 @@ still *probe* the full N×N mesh, which is what `topology.mode: sparse`
 
 kconmon-ng monitors itself so that degradation of the monitor raises an alert
 instead of a silent gap. The controller derives
-`kconmon_ng_controller_expected_agents` from its node informer: the number of
-schedulable nodes (`spec.unschedulable == false`), each of which should run an
-agent. Two default rules cover the failure modes, and a third, off by
+`kconmon_ng_controller_expected_agents` from its node informer and its
+registry: every schedulable node, plus each cordoned node while its agent is
+registered. The agent DaemonSet tolerates `node.kubernetes.io/unschedulable`,
+so a cordoned node keeps its agent; before 2.5.2 the count left cordoned nodes
+out while their agents still registered, so each cordoned node could hide one
+missing agent elsewhere. A cordoned node whose agent is gone (drained and
+powered off for maintenance) is not expected and does not fire. Two default rules cover the failure modes, and a third, off by
 default, watches the hosts outside the cluster:
 
 - `KconmonAgentsMissing` (warning) fires when registered in-cluster agents
@@ -1021,8 +1043,10 @@ default, watches the hosts outside the cluster:
   `kconmon_ng_controller_external_agents` subtracted first, so a bare host
   through the gateway cannot stand in for a missing node.
 - `KconmonControllerDown` (critical) fires when no controller reports itself
-  leader for 5m: the control plane is down and no other alert would be
-  evaluated.
+  leader for 5m: the control plane is down. Agents keep probing the last peer
+  list they received, so the per-pair and zone rules still evaluate, but
+  `KconmonAgentsMissing` reads only a leader's counts and goes quiet, and
+  nodes that join or leave are not picked up.
 - `KconmonExternalAgentDown` (warning, `prometheusRule.externalAgentDown.enabled`)
   fires when an external agent the controller's SD endpoint lists sits at
   `up == 0` for 5m. The agent still registers, or the target would have left

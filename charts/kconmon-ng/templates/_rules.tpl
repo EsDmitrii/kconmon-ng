@@ -251,7 +251,12 @@ https://esdmitrii.github.io/kconmon-ng/reference/alerts/#{{ lower . }}
      is a pre-2.3.0 agent (or one that stopped being scraped — the case this alert exists for),
      and its pairs keep the old two-window behaviour; a mixed fleet mid-rollout gets each
      behaviour exactly where it applies. The two halves are disjoint by construction, so the
-     union never yields a duplicate label set. */}}
+     union never yields a duplicate label set.
+     The summary counts the 5m rate window too: the pair has been quiet that long before `for` starts. */}}
+{{- $silence := printf "%s plus the 5m rate window" (toString .for) }}
+{{- if regexMatch "^[0-9]+m$" (toString .for) }}
+{{- $silence = printf "about %dm" (add 5 (atoi (trimSuffix "m" (toString .for)))) }}
+{{- end }}
 - alert: PairWentSilent
   expr: >-
     (
@@ -284,7 +289,7 @@ https://esdmitrii.github.io/kconmon-ng/reference/alerts/#{{ lower . }}
   annotations:
     summary: >-
       No probe results {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}}
-      for over {{ .for }}
+      for {{ $silence }}
     description: >-
       The other rules say nothing about this pair now. Check the agent pod on
       {{`{{ $labels.source_node }}`}} and its scrape target; a removed node clears within an hour.

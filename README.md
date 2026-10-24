@@ -173,9 +173,10 @@ release with `kubectl krew install --manifest-url https://github.com/EsDmitrii/k
 ## How it compares
 
 kconmon-ng inherits its name and shape from
-[kconmon](https://github.com/Stono/kconmon) by Karl Stoney (Node.js, archived
-in June 2026) and is a ground-up Go implementation of the same idea, not a
-fork, extended with ICMP, reactive MTR tracing and the Console. Reach for
+[kconmon](https://github.com/Stono/kconmon) by Karl Stoney (TypeScript on
+Node.js, archived in June 2026) and is a ground-up Go implementation of the
+same idea, not a fork, extended with ICMP, reactive MTR tracing and the
+Console. Reach for
 goldpinger when an HTTP-level pod graph is enough, for kubenurse when the
 question is the path through ingress and API server, and for kconmon-ng when
 you need per-protocol pair evidence with the bad hop already traced; the

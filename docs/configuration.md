@@ -716,7 +716,7 @@ console:
     url: "" # REQUIRED for the Matrix, Metrics and PromQL pages; empty = those APIs 503
     queryTimeout: 30s
     maxRange: 24h # max query_range window
-    maxResponseBytes: 8388608 # 8 MiB
+    maxResponseBytes: 8388608 # 8 MiB; the Matrix reads one series per pair, so a large cluster may need more
   networkPolicy:
     # Egress rules for console -> external Redis; empty renders a permissive default.
     redisEgress: []

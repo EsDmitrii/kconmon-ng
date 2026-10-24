@@ -112,6 +112,12 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 	if !zoneExplicit && r.zoneResolver != nil {
 		info.Zone = r.zoneResolver.ZoneFor(info.NodeName)
 	}
+	if prev, ok := r.agents[info.ID]; ok && prev.info.PodIP != info.PodIP {
+		// The id is node name plus pod name (the hostname off-cluster): two hosts sharing it evict
+		// each other on every registration, and nothing else in the mesh shows why.
+		slog.Warn("an agent registered under an id another address holds; two agents may share a node name and hostname",
+			"id", info.ID, "previousAddress", prev.info.PodIP, "address", info.PodIP)
+	}
 	r.agents[info.ID] = &registeredAgent{
 		info:         info,
 		lastSeen:     now,

@@ -1,7 +1,6 @@
 # Roadmap
 
-Direction, not dates. The issue tracker has the detail, and [RELEASE_NOTES.md](RELEASE_NOTES.md)
-what has shipped.
+Direction, not dates. [RELEASE_NOTES.md](RELEASE_NOTES.md) has what has shipped.
 
 ## 2.6.0
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -360,6 +361,10 @@ func AlertNameConflict(rows []AlertRule, id, name string) error {
 		if cur, _ := alerting.SanitizeAlertName(rows[i].Name); cur == alert {
 			return nil
 		}
+	}
+	if slices.Contains(alerting.ChartAlertNames, alert) {
+		return fmt.Errorf("store: alert rule: name %q becomes the Prometheus alert name %q, which one of the "+
+			"chart's built-in alert rules already has; choose another name", name, alert)
 	}
 	for i := range rows {
 		if rows[i].ID == id || strings.EqualFold(rows[i].Name, name) {

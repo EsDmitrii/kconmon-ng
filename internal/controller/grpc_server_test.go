@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"strconv"
@@ -131,7 +132,10 @@ func TestGRPCServerWatchTasksSubscribeCleanup(t *testing.T) {
 	// Closing the stream cleans up the subscription and the gauge.
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("WatchTasks returned %v after context cancel, want context.Canceled", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("WatchTasks did not return after context cancel")
 	}
@@ -254,7 +258,10 @@ func TestGRPCServerWatchEventsFanOutAndCleanup(t *testing.T) {
 
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("WatchEvents returned %v after context cancel, want context.Canceled", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("WatchEvents did not return after context cancel")
 	}

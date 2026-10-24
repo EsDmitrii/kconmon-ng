@@ -885,7 +885,10 @@ func (r *Reconciler) retryWithLastApplied(
 			// live object as it was, so with nothing accepted there is nothing to restore.
 			if len(accepted) > 0 {
 				if good, gerr := r.renderer.RenderBundle(accepted, r.client.Namespace(), r.bundleName); gerr == nil {
-					_, _ = r.client.Apply(ctx, good)
+					if _, rerr := r.client.Apply(ctx, good); rerr != nil {
+						slog.Warn("could not put the last accepted alert bundle back after a refused probe; "+
+							"the next pass applies it again", "bundle", r.bundleName, "error", rerr)
+					}
 				}
 			}
 			continue

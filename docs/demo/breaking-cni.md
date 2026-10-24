@@ -63,8 +63,8 @@ kubectl cordon kconmon-stand-worker10
 
 Then install the chart into `kconmon-ng` with every checker on (TCP, UDP,
 ICMP, DNS, HTTP, MTR, external checks), `controller.leaderElection: true` (the
-zone resolver only runs on a leader), an agent affinity that keeps the
-DaemonSet off `worker10`, and the external gateway on NodePort 30443.
+zone resolver runs only with leader election on), an agent affinity that keeps
+the DaemonSet off `worker10`, and the external gateway on NodePort 30443.
 [Install in 15 minutes](../getting-started/install-15-min.md) covers the
 chart, and [External agents](../external-agents.md) covers the gateway and the
 agent on `worker10`. Prometheus is a plain Deployment on NodePort 30090, with

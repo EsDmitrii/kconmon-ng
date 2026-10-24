@@ -104,6 +104,7 @@ type fibRoute struct {
 }
 
 // probeMTU fits the smallest egress device of a multipath route, since a flow may hash to any of them.
+// A device reporting no MTU (0) sizes nothing; it must not become the smallest.
 func (r fibRoute) probeMTU(linkMTU func(int) (int, error)) (int, error) {
 	if len(r.oifs) == 0 {
 		return 0, errors.New("the route reply names no egress device")
@@ -114,12 +115,15 @@ func (r fibRoute) probeMTU(linkMTU func(int) (int, error)) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("MTU of egress device %d: %w", oif, err)
 		}
-		if size == 0 || mtu < size {
+		if mtu > 0 && (size == 0 || mtu < size) {
 			size = mtu
 		}
 	}
-	if r.mtu > 0 && r.mtu < size {
+	if r.mtu > 0 && (size == 0 || r.mtu < size) {
 		size = r.mtu
+	}
+	if size == 0 {
+		return 0, errors.New("neither the route nor its egress devices report an MTU")
 	}
 	return size, nil
 }

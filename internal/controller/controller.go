@@ -39,6 +39,10 @@ type Controller struct {
 	topology atomic.Pointer[config.TopologyConfig]
 	// evictEvery carries a reloaded sweep period (half the agent TTL) to Run's eviction loop.
 	evictEvery chan time.Duration
+	// nodeWatcher is set once Run starts it; expectedMu orders the expected_agents writes that node
+	// and registry changes both make, so a stale count cannot land after a fresh one.
+	nodeWatcher atomic.Pointer[NodeWatcher]
+	expectedMu  sync.Mutex
 }
 
 // IsLeader reports whether this replica currently serves as the leader.
@@ -136,6 +140,9 @@ func New(cfg *config.Config) *Controller {
 		c.grpcServer.SchedulePeerBroadcast(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
 		m.ControllerExternalAgents.WithLabelValues().Set(float64(countExternal(agents)))
+		if nw := c.nodeWatcher.Load(); nw != nil {
+			c.setExpectedAgents(nw, agents)
+		}
 		for _, tc := range change.Events() {
 			c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{TopologyChanged: tc}})
 		}
@@ -256,11 +263,10 @@ func (c *Controller) Run(ctx context.Context) error {
 			nw := NewNodeWatcherWithContext(ctx, clientset, cfg.FailureDomainLabel)
 			c.httpServer.SetNodeWatcher(nw)
 			c.registry.SetZoneResolver(nw)
-			nw.OnCountChange(func(n int) {
-				c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(n))
-			})
+			nw.OnNodesChange(func() { c.setExpectedAgents(nw, c.registry.GetAll()) })
 			nw.OnZoneChange(c.registry.UpdateZone)
-			c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(nw.SchedulableNodeCount()))
+			c.nodeWatcher.Store(nw)
+			c.setExpectedAgents(nw, c.registry.GetAll())
 			slog.Info("NodeWatcher started", "failureDomainLabel", cfg.FailureDomainLabel)
 
 			opts := electionOptionsFor(clientset)
@@ -338,6 +344,25 @@ func (c *Controller) metricsListenerHandler() http.Handler {
 		extra = append(extra, metrics.Route{Pattern: "GET " + prometheusSDPath, Handler: sd})
 	}
 	return metrics.NewListenerHandler(c.promReg, c.httpServer.Ready, extra...)
+}
+
+// setExpectedAgents publishes controller_expected_agents for a registry snapshot.
+func (c *Controller) setExpectedAgents(nw *NodeWatcher, agents []model.AgentInfo) {
+	c.expectedMu.Lock()
+	defer c.expectedMu.Unlock()
+	c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(expectedAgentsFor(nw, agents)))
+}
+
+// expectedAgentsFor is NodeWatcher.ExpectedAgents against a registry snapshot. Only in-cluster
+// agents keep a cordoned node expected; an external host runs on no node, whatever its name.
+func expectedAgentsFor(nw *NodeWatcher, agents []model.AgentInfo) int {
+	onNode := make(map[string]bool, len(agents))
+	for i := range agents {
+		if !agents[i].IsExternal() {
+			onNode[agents[i].NodeName] = true
+		}
+	}
+	return nw.ExpectedAgents(func(name string) bool { return onNode[name] })
 }
 
 // countExternal is the bare-host subset of a registry snapshot, for controller_external_agents.
