@@ -163,7 +163,7 @@ nfpms:
     package_name: kconmon-ng-agent
     vendor: Dmitrii Esin
     homepage: https://github.com/EsDmitrii/kconmon-ng
-    maintainer: Dmitrii Esin <esdmitrii@gmail.com>
+    maintainer: Dmitrii Esin <esindmitrii@gmail.com>
     description: |-
       kconmon-ng external agent.
       Registers with a kconmon-ng controller over the TLS external gateway and
