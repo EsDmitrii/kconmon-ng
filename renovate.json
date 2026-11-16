@@ -14,7 +14,9 @@
   "prHourlyLimit": 4,
   "rebaseWhen": "behind-base-branch",
   "configMigration": true,
-  "dependencyDashboardTitle": "Renovate: dependency dashboard",
+  "dependencyDashboard": {
+    "title": "Renovate: dependency dashboard"
+  },
 
   "automergeType": "pr",
   "automergeStrategy": "squash",
